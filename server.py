@@ -391,8 +391,9 @@ def run_qwen(args):
     # it cannot distinguish "Qwen did the work" from "Qwen did nothing" from "the task's
     # premise was false". The false-premise test passed for exactly this reason.
     preflight = None
+    preflight_out = ""
     if verify:
-        preflight, _ = run_verify(verify, cwd)
+        preflight, preflight_out = run_verify(verify, cwd)
         log(f"preflight verify: {'pass' if preflight else 'fail'}")
 
     prompt = task
@@ -400,6 +401,7 @@ def run_qwen(args):
     result_text = ""
     denials = []
     ctx = {
+        "preflight_out": preflight_out,
         "pre_status": pre_status,
         "pre_sha": pre_sha,
         "pre_clean": pre_clean,
@@ -456,6 +458,28 @@ def run_qwen(args):
             return render("success", session_id, trail, result_text, denials, max_iter, ctx)
 
         trail.append(f"attempt {attempt}: verify failed")
+
+        # If the gate produces byte-identical output before and after Qwen worked, then
+        # nothing Qwen does moves it -- the gate is malformed, or tests something the
+        # task never touches. Iterating is pure waste: a real case burned 3 attempts and
+        # 64 session records thrashing against a verify command whose quoting was broken,
+        # while the code on disk was correct the entire time. Bail with the diagnosis.
+        if preflight is False and v_out.strip() == (preflight_out or "").strip():
+            # Replace, don't append -- trail length is the attempt count.
+            trail[-1] = (
+                f"attempt {attempt}: verify failed -- output IDENTICAL to preflight"
+            )
+            return render(
+                "gate_suspect",
+                session_id,
+                trail,
+                result_text,
+                denials,
+                max_iter,
+                ctx,
+                last_verify=v_out,
+            )
+
         if attempt < max_iter:
             prompt = (
                 f"The verification command failed. This is the real output:\n\n"
@@ -495,6 +519,15 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     if guard_on:
         lines.append(blast_radius(cwd, ctx["pre_status"]))
+
+    if status == "gate_suspect":
+        lines.append(
+            "GATE SUSPECT: the verify command produced identical output before and after "
+            "Qwen ran, so nothing it did moves this gate. Almost always the gate itself is "
+            "wrong -- malformed quoting, a bad path, or it tests something the task never "
+            "touches. Check CHANGED above: Qwen may have done the work correctly while the "
+            "gate was broken. Fix the gate before retrying; iterating cannot help."
+        )
 
     if status == "success_but_preflight_passed":
         lines.append(
