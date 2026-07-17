@@ -22,7 +22,7 @@ version — see [docs/FINDINGS.md](docs/FINDINGS.md) for the evidence:
   tests pass ✅" with pytest not installed. Its self-report is never evidence, so a
   shell command decides instead.
 - **Never let it grade itself.** Given a vague task it rewrote the spec tests and
-  reported 38/38 green. Specs are `*_spec.py`, Claude-authored, auto-reverted if touched.
+  reported 38/38 green. Specs are `*_spec.*`, Claude-authored, auto-reverted if touched.
 - **A gate you haven't tested is a hope.** 909 real tests passed a mutation that changed
   *every error message* the library emits. Mutation-test the gate before trusting it.
 - **Vagueness is the root cause of everything.** Well-specified, Qwen is genuinely good
@@ -104,7 +104,7 @@ Or call the tool directly for something already specified:
 |---|---|
 | **verify gate** | a command decides, not Qwen's prose |
 | **iterate loop** | failures fed back as real error text; converges on free compute |
-| **spec guard** | `*_spec.py` auto-reverted if touched; refuses to run if one is dirty |
+| **spec guard** | `*_spec.*` / `*.spec.*` (any language) auto-reverted if touched; refuses to run if one is dirty |
 | **blast radius** | content-hashed: what the *filesystem* says changed |
 | **pre-flight** | if the gate was already green, says so — the pass proves nothing |
 | **gate_suspect** | identical output before/after ⇒ your gate is broken, not the code |
