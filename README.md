@@ -6,12 +6,60 @@ actually did it** — without reading its output or trusting its word.
 Claude decides and specifies. Qwen executes on free local compute. An objective gate
 rules on the result. Nothing reaches Claude's context except a verdict.
 
+## Architecture
+
+```mermaid
+flowchart TD
+    U([you]) -->|vague goal| M
+
+    subgraph claude["Claude Code (expensive tokens, big context)"]
+        M["qwen-manager<br/>(a Claude subagent)<br/>decides · writes the spec · verifies"]
+    end
+
+    M -->|"qwen_delegate(task, cwd, verify, mode)"| S
+
+    subgraph mcp["server.py — MCP server (Python, zero deps)"]
+        direction TB
+        S["JSON-RPC over stdio"] --> PRE["snapshot git tree<br/>run gate once (pre-flight)"]
+        PRE --> RUN["run Qwen as subprocess"]
+        RUN --> GATE{"run verify<br/>exit 0?"}
+        GATE -->|no| FEED["feed real error back<br/>resume session (-r)"]
+        FEED --> RUN
+        GATE -->|yes| GUARD["spec guard: revert *_spec.*<br/>blast radius: hash the diff"]
+        GUARD --> REP["compact verdict<br/>(≤3000 chars)"]
+    end
+
+    RUN -->|"qwen -p '…' --approval-mode auto-edit -o json"| Q
+
+    subgraph local["your hardware (free tokens)"]
+        Q["Qwen Code CLI"] -->|Tailscale| O["Ollama<br/>qwen3.6:27b-agent"]
+        Q -.reads.-> QMD["QWEN.md<br/>(auto-loaded rules)"]
+    end
+
+    Q -->|writes code| WT[("git working tree")]
+    GUARD -.->|git checkout / clean| WT
+    REP -->|"status · changed · rollback"| M
+    M -->|"outcome + proof"| U
+
+    style claude fill:#1e3a5f,stroke:#4a90d9,color:#fff
+    style mcp fill:#3d2f1e,stroke:#d9a441,color:#fff
+    style local fill:#1e3d2f,stroke:#41d98a,color:#fff
+```
+
+The same flow in one screen of text:
+
     you ──▶ qwen-manager (Claude subagent)          ← owns the whole loop
               ├── qwen, plan mode      → options, writes nothing
               ├── decides, writes the spec tests    ← the design decision
               ├── qwen, auto-edit + gate → iterates on real failures
               └── verifies independently, rolls back if wrong
         ◀── "here's what landed, here's the proof"
+
+**Three systems, each doing the one thing it is good at.** Claude holds judgment and a
+big context. `server.py` is a dependency-free broker that runs Qwen and enforces the
+gate with git. Qwen types code for free on local hardware. The gate — your own shell
+command — is the only thing trusted to say "it worked." Full detail in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Why it's built this way
 
