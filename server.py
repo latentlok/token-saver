@@ -20,7 +20,7 @@ stdio JSON-RPC 2.0, no dependencies. stdout is the protocol channel -- all
 diagnostics go to stderr.
 """
 
-import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -103,9 +103,18 @@ TOOL = {
             "session_id": {
                 "type": "string",
                 "description": (
-                    "Resume a prior Qwen session by id (returned as SESSION). Reuses warm "
-                    "context and skips ~17k tokens of cold-start reload. Use for "
-                    "follow-ups on the same task."
+                    "Resume a prior Qwen session (the SESSION value from an earlier call) "
+                    "to continue THAT task with warm context, skipping ~17.6k tokens of "
+                    "reload. Sessions are cwd-scoped: pass the same cwd or the id will not "
+                    "resolve.\n\n"
+                    "STATEFUL when the follow-up builds directly on what Qwen just did "
+                    "('now add X to the function you wrote', 'fix the edge case you "
+                    "missed'). It still has the code and reasoning in context.\n\n"
+                    "STATELESS (omit this) for anything else -- this is the default and "
+                    "usually correct. A fresh session re-reads QWEN.md, which is what "
+                    "makes the rules bind, and prevents one task's reasoning from "
+                    "contaminating the next. A long-lived session drifts as its context "
+                    "fills and starts silently forgetting the rules."
                 ),
             },
             "approval_mode": {
@@ -189,6 +198,32 @@ def status_map(cwd):
     return m
 
 
+def file_sha(cwd, path):
+    """Content hash, or None if unreadable/absent."""
+    try:
+        full = os.path.join(cwd, path)
+        if not os.path.isfile(full):
+            return None
+        if os.path.getsize(full) > 8_000_000:
+            return f"big:{os.path.getsize(full)}"
+        with open(full, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except Exception:
+        return None
+
+
+def snapshot(cwd):
+    """
+    {path: (status_code, content_sha)} for every dirty path.
+
+    The sha matters: comparing status codes alone is blind to a file that was ALREADY
+    dirty and got edited again -- the code stays '??' or 'M' while the content changes.
+    That produced a false "CHANGED: nothing" on a session-resume follow-up that had in
+    fact rewritten the file.
+    """
+    return {p: (code, file_sha(cwd, p)) for p, code in status_map(cwd).items()}
+
+
 def blast_radius(cwd, pre):
     """
     What changed during the run. Qwen reports what it *says* it did; this reports
@@ -196,9 +231,10 @@ def blast_radius(cwd, pre):
     (true) while silently adding an unrequested public API -- the tool result gave no
     hint of the sprawl. This closes that.
     """
-    post = status_map(cwd)
+    post = snapshot(cwd)
     touched = sorted(p for p in post if post.get(p) != pre.get(p))
-    if not touched:
+    gone = sorted(p for p in pre if p not in post)
+    if not touched and not gone:
         return "CHANGED: nothing (Qwen wrote no files)"
 
     rc, numstat = git(cwd, "diff", "--numstat")
@@ -209,11 +245,15 @@ def blast_radius(cwd, pre):
             if len(parts) == 3:
                 lines[parts[2]] = (parts[0], parts[1])
 
-    out = [f"CHANGED: {len(touched)} file(s)"]
+    out = [f"CHANGED: {len(touched) + len(gone)} file(s)"]
+    for p in gone:
+        out.append(f"  - {p} (reverted/removed)")
     for p in touched[:20]:
-        code = post.get(p, "?")
+        code = post.get(p, ("?", None))[0]
         if code == "??":
-            out.append(f"  + {p} (new)")
+            # Already-untracked files stay '??' when edited, so distinguish by presence
+            # in the pre-run snapshot rather than by status code.
+            out.append(f"  + {p} (new)" if p not in pre else f"  ~ {p} (edited, untracked)")
         elif p in lines:
             add, rem = lines[p]
             out.append(f"  M {p} (+{add}/-{rem})")
@@ -224,11 +264,56 @@ def blast_radius(cwd, pre):
     return "\n".join(out)
 
 
+# ---------- handoff ----------
+
+# Appended to every task. Gives Claude a compact, structured basis for deciding whether
+# to continue this session or start fresh -- without reading Qwen's full prose. FILES is
+# cross-checked against the filesystem in render(): a mismatch means Qwen misreported
+# its own blast radius, which is exactly the class of error the gate exists to catch.
+HANDOFF_SUFFIX = """
+
+---
+Finish your reply with exactly these three lines, after any prose:
+
+HANDOFF: <one line: what state the work is in now>
+FILES: <comma-separated paths you created or modified, or the word: none>
+NEXT: <one line: what a follow-up would need to know, or the word: nothing>
+
+Keep each line under 120 characters. This is a machine-read handoff, not prose.
+"""
+
+
+def parse_handoff(text):
+    """Pull the HANDOFF/FILES/NEXT lines out of Qwen's reply."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("*# ").strip()
+        for key in ("HANDOFF", "FILES", "NEXT"):
+            prefix = f"{key}:"
+            if line.upper().startswith(prefix):
+                out[key] = line[len(prefix):].strip().strip("*`").strip()
+    return out
+
+
+def strip_handoff(text):
+    """Remove the handoff lines from prose so they aren't shown twice."""
+    keep = []
+    for line in (text or "").splitlines():
+        probe = line.strip().lstrip("*# ").strip().upper()
+        if any(probe.startswith(f"{k}:") for k in ("HANDOFF", "FILES", "NEXT")):
+            continue
+        keep.append(line)
+    return "\n".join(keep).strip()
+
+
 # ---------- qwen invocation ----------
 
 
 def invoke_qwen(task, cwd, approval_mode, timeout, session_id):
-    cmd = [QWEN_BIN, "-p", task, "--approval-mode", approval_mode, "-o", "json"]
+    cmd = [
+        QWEN_BIN, "-p", task + HANDOFF_SUFFIX,
+        "--approval-mode", approval_mode, "-o", "json",
+    ]
     if session_id:
         cmd += ["-r", session_id]
 
@@ -298,7 +383,7 @@ def run_qwen(args):
 
     # Snapshot pre-run state so the result can report what Qwen actually touched and
     # how to undo it, rather than what Qwen claims it touched.
-    pre_status = status_map(cwd) if guard_on else {}
+    pre_status = snapshot(cwd) if guard_on else {}
     pre_sha = head_sha(cwd) if guard_on else None
     pre_clean = guard_on and not pre_status
 
@@ -433,6 +518,41 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                 f"pre-existing ones. Review the diff and revert selectively."
             )
 
+    # Structured handoff, extracted BEFORE truncation so a long reply can't bury it.
+    handoff = parse_handoff(result_text)
+    if handoff:
+        if handoff.get("HANDOFF"):
+            lines.append(f"HANDOFF: {handoff['HANDOFF']}")
+        if handoff.get("NEXT"):
+            lines.append(f"NEXT: {handoff['NEXT']}")
+
+        # Qwen's own account of what it touched vs what the filesystem says. This is the
+        # fib-fabrication failure mode in miniature -- trust the filesystem.
+        claimed = handoff.get("FILES", "")
+        if guard_on and claimed:
+            post_snap = snapshot(cwd)
+            actual = {p for p in post_snap if post_snap.get(p) != ctx["pre_status"].get(p)}
+            said_none = claimed.strip().lower() in ("none", "no files", "-")
+            if said_none and actual:
+                lines.append(
+                    f"MISREPORT: Qwen claims FILES: none but {len(actual)} file(s) "
+                    f"changed on disk. Its account is unreliable -- trust CHANGED above."
+                )
+            elif not said_none and not actual:
+                lines.append(
+                    f"MISREPORT: Qwen claims it changed '{claimed}' but nothing changed "
+                    f"on disk. It may have described intended work it never did."
+                )
+
+    if guard_on and status not in ("error",):
+        lines.append(
+            f"CONTINUE: to follow up on THIS task with warm context, pass "
+            f"session_id=\"{session_id}\" and the same cwd (sessions are cwd-scoped). "
+            f"Skips ~17.6k tokens of reload. Do NOT reuse it for an unrelated task -- a "
+            f"fresh session re-reads QWEN.md, which is what makes the rules bind, and "
+            f"keeps one task's reasoning from contaminating the next."
+        )
+
     if denials:
         names = ", ".join(sorted({d.get("tool_name", "?") for d in denials}))
         lines.append(
@@ -446,7 +566,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if status == "unverified":
         lines.append("NOTE: no verify command -- this is Qwen's unverified claim.")
 
-    lines.append(f"--- qwen result ---\n{truncate(result_text, RESULT_CAP)}")
+    lines.append(f"--- qwen result ---\n{truncate(strip_handoff(result_text), RESULT_CAP)}")
     return "\n".join(lines)
 
 
