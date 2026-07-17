@@ -9,7 +9,7 @@ result before Claude spends context on it.
 Three structural protections, because Qwen's self-report is not evidence:
 
   1. verify gate   -- an objective command decides success, not Qwen's prose.
-  2. spec guard    -- *_spec.py files are Claude-authored. If Qwen edits one, it is
+  2. spec guard    -- *_spec.* files are Claude-authored. If Qwen edits one, it is
                       auto-reverted and the attempt is failed. Qwen has, in practice,
                       rewritten spec tests to make them pass.
   3. iterate loop  -- on failure, the real verify output is fed back and Qwen retries
@@ -32,7 +32,14 @@ VERIFY_CAP = 2500
 DEFAULT_TIMEOUT = 900
 MAX_TIMEOUT = 7200
 DEFAULT_MAX_ITER = 3
-SPEC_GLOB = "*_spec.py"
+
+# Files the guard protects: Claude-authored specs that define what correct means.
+# Language-agnostic by convention -- any basename containing `_spec.` or `.spec.`:
+#   roman_spec.py  foo.spec.ts  bar_spec.rb  baz.spec.js  qux_spec.go
+# A project can override this in <cwd>/.qwen-delegate.json:
+#   {"spec_globs": ["*.spec.ts", "tests/contract/*.ts"]}
+DEFAULT_SPEC_GLOBS = ["*_spec.*", "*.spec.*"]
+PROJECT_CONFIG = ".qwen-delegate.json"
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -59,9 +66,10 @@ TOOL = {
         "On verify failure the tool automatically feeds the real error output back and "
         "retries in the same session (see max_iterations). Worker tokens are free, so "
         "prefer letting it iterate over returning a failure to you.\n\n"
-        "Files matching *_spec.py are treated as YOUR protected specification: if Qwen "
-        "edits one, it is auto-reverted and the attempt fails. Write gate tests in "
-        "*_spec.py; let Qwen write its own tests in *_qwen.py.\n\n"
+        "Files matching *_spec.* / *.spec.* (any language) are treated as YOUR protected "
+        "specification: if Qwen edits one, it is auto-reverted and the attempt fails. Write "
+        "gate tests as <name>_spec.<ext>; let Qwen write its own tests as <name>_qwen.<ext>. "
+        "Override the patterns per-project in .qwen-delegate.json {\"spec_globs\": [...]}.\n\n"
         "Re-read any file Qwen touched before editing it yourself -- your cached copy "
         "is stale. Parallel calls MUST use separate `cwd` worktrees."
     ),
@@ -88,7 +96,7 @@ TOOL = {
                 "type": "string",
                 "description": (
                     "Shell command run in `cwd` after each attempt; exit 0 means real "
-                    "success (e.g. 'venv/bin/pytest -q x_spec.py', 'tsc --noEmit'). Its "
+                    "success (e.g. './gate.sh', 'npm test', 'cargo test', 'venv/bin/pytest -q'). Its "
                     "output is fed back to Qwen on failure, so make failures legible. "
                     "Strongly recommended -- omit only for read-only/research tasks."
                 ),
@@ -205,12 +213,29 @@ def is_git_repo(cwd):
     return rc == 0 and out == "true"
 
 
+def spec_globs(cwd):
+    """Protected-spec patterns for this project. Per-project config wins."""
+    try:
+        cfg = os.path.join(cwd, PROJECT_CONFIG)
+        if os.path.isfile(cfg):
+            with open(cfg) as f:
+                globs = (json.load(f) or {}).get("spec_globs")
+            if isinstance(globs, list) and globs:
+                return [str(g) for g in globs]
+    except Exception as e:
+        log(f"warning: could not read {PROJECT_CONFIG}: {e!r}; using defaults")
+    return DEFAULT_SPEC_GLOBS
+
+
 def spec_files(cwd):
-    """Tracked *_spec.py paths, repo-relative."""
-    rc, out = git(cwd, "ls-files", SPEC_GLOB, f"**/{SPEC_GLOB}")
+    """Tracked protected-spec paths, repo-relative. Language-agnostic."""
+    pats = []
+    for g in spec_globs(cwd):
+        pats += [g, f"**/{g}"]
+    rc, out = git(cwd, "ls-files", *pats)
     if rc != 0 or not out:
         return []
-    return [p for p in out.splitlines() if p.strip()]
+    return sorted({p for p in out.splitlines() if p.strip()})
 
 
 def violated_specs(cwd):
@@ -480,7 +505,7 @@ def run_qwen(args):
                 "error", session_id, trail, result_text or "", denials, max_iter, ctx
             )
 
-        # spec guard: Qwen must never edit Claude's *_spec.py
+        # spec guard: Qwen must never edit Claude's protected spec files
         cheated = violated_specs(cwd) if guard_on else []
         if cheated:
             revert_specs(cwd, cheated)
@@ -492,7 +517,7 @@ def run_qwen(args):
                 prompt = (
                     f"You edited a protected specification file ({names}). That file "
                     f"defines what correct means and has been reverted. Never modify a "
-                    f"*_spec.py file. Fix the implementation code so it satisfies the "
+                    f"protected spec file. Fix the implementation code so it satisfies the "
                     f"spec as written. If you believe the spec is wrong, stop and say so "
                     f"instead of editing it.\n\nOriginal task:\n{task}"
                 )
@@ -539,7 +564,7 @@ def run_qwen(args):
             prompt = (
                 f"The verification command failed. This is the real output:\n\n"
                 f"```\n{truncate(v_out, VERIFY_CAP)}\n```\n\n"
-                f"Fix the code so this command passes. Do not modify any *_spec.py file "
+                f"Fix the code so this command passes. Do not modify any protected spec file "
                 f"-- fix the implementation. Run the command yourself to confirm before "
                 f"reporting.\n\nVerify command: {verify}\n\nOriginal task:\n{task}"
             )

@@ -103,7 +103,10 @@ a technical call, not a human's call.
 
 ### 3. Write the gate yourself — this IS the design step
 
-Author `<name>_spec.py` — your tests, your definition of correct. This is the
+Author `<name>_spec.<ext>` — your tests, your definition of correct. Any language:
+the guard protects any tracked file matching `*_spec.*` or `*.spec.*` (`foo_spec.py`,
+`foo.spec.ts`, `foo_spec.rb`). A project may override the patterns in
+`.qwen-delegate.json` `{"spec_globs": [...]}`. This is the
 linchpin of the whole system, and for new files it is also where the design gets
 decided. The spec fixes the module path, the names, the signatures, the return
 types, and the edge cases; Qwen is then filling in an implementation against a
@@ -119,8 +122,8 @@ Qwen happened to sketch in its plan. The plan is input to your design, not the d
   requirement made executable by someone who is not about to implement it. That
   independence is the whole value.
 - Spec the edge cases that are easy to get wrong, with exact expected values.
-- Qwen's own tests go in `*_qwen.py` — supplementary, never the gate. Let it write as
-  many as it likes there.
+- Qwen's own tests go in `<name>_qwen.<ext>` — supplementary, never the gate. Let it
+  write as many as it likes there.
 - Commit the spec before delegating. The tool refuses to run if a spec is uncommitted.
 
 **When the gate already exists (refactors, "don't break anything" work):** there may be
@@ -131,9 +134,9 @@ whether it fails:
     # make the change you fear, then:
     <suite>          # does it go red? if not, the suite cannot gate this work.
 
-Measured: 909 jinja tests passed a mutation that altered *every error message the
-library emits*. Delegating with `verify="pytest tests/"` would have gone green on a
-silent public-API change. If the existing suite is blind to your change, it is not a
+Measured: 909 real tests passed a mutation that altered *every error message the
+library emits*. Gating on the project suite alone would have gone green on a silent
+public-API change. If the existing suite is blind to your change, it is not a
 gate — write a spec that pins the behaviour first, then delegate.
 
 A gate you have not tested is a hope.

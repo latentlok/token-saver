@@ -54,10 +54,21 @@ is never in this repo. Configure it once per machine:
 
 ### Per-project setup
 
-    cp templates/QWEN.md <your-project>/QWEN.md    # then edit paths + test command
+    ./init-project.sh /path/to/any/project
+
+Detects the test command (`npm test`, `cargo test`, `go test ./...`, `bundle exec rspec`,
+`venv/bin/pytest`, …), writes `QWEN.md`, and refuses if the project isn't a git repo.
 
 The project **must be a git repo**. There is no sandbox: git history is the rollback,
-and the server refuses to run if a spec file is uncommitted.
+the spec guard needs git to detect and revert edits, and the server refuses to run if a
+spec file is uncommitted.
+
+**Language-agnostic.** The spec guard protects any tracked file matching `*_spec.*` or
+`*.spec.*` — `roman_spec.py`, `calc.spec.ts`, `foo_spec.rb`, `bar_spec.go`. Verified on
+a TypeScript project with no config. If your project uses a different convention:
+
+    // .qwen-delegate.json
+    { "spec_globs": ["tests/contract/*.ts"] }
 
 ## Use
 
@@ -84,7 +95,8 @@ Or call the tool directly for something already specified:
     agents/qwen-manager.md the subagent: judgment, spec authoring, escalation policy
     templates/QWEN.md      per-project rules for the Qwen worker
     docs/FINDINGS.md       the measurements every design decision rests on
-    install.sh             idempotent installer
+    install.sh             idempotent installer (once per machine)
+    init-project.sh        bootstrap a project (once per project, any language)
 
 ## What the server gives you
 

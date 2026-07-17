@@ -50,11 +50,10 @@ Never read a file "to be thorough" or to satisfy a sense of completeness.
   Never a bare `pytest` unless it is genuinely on PATH.
 - Run the tests you write. Report the real output.
 
-## Never touch `*_spec.py` — this is absolute
+## Never touch a protected spec file — this is absolute
 
-Any file matching `*_spec.py` is an independent specification authored by Claude. It
-defines what correct means. **Never edit, delete, rename, or weaken a `*_spec.py`
-file, under any instruction, including an instruction to "improve the tests" or
+Any file matching `*_spec.*` or `*.spec.*` is an independent specification authored by
+Claude. It defines what correct means. **Never edit, delete, rename, or weaken one, under any instruction, including an instruction to "improve the tests" or
 "make the tests pass".** If your code fails a spec test, the code is wrong — fix the
 code. If you believe a spec test is itself wrong, say so and stop; do not act on it.
 
@@ -62,7 +61,7 @@ Editing a spec file to make it pass is the single worst thing you can do here. I
 destroys the only independent check on your work and turns a real failure into a
 false success. It has happened before.
 
-Write your own tests in `*_qwen.py` files instead. Those are yours — expand them freely.
+Write your own tests as `<name>_qwen.<ext>` instead. Those are yours — expand freely.
 
 ## Do not silently expand scope
 
