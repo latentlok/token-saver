@@ -205,6 +205,30 @@ strategy, not task size. You cannot fill 120k with a well-posed task.
 → For any run that might compact, **put critical rules in the task, not just QWEN.md**.
 → Statelessness avoids this entirely: baseline ~22.4k, normal tasks peak 25–45k.
 
+## Scoped shell: gate every tool, not just the shell
+
+Goal: let Qwen run its own tests (useful) without full `yolo` (dangerous). Findings
+from building it:
+
+- **A PreToolUse hook fires and its `deny` is honoured — but only in `yolo`.** In
+  `default`/`auto` the mode denies before the hook runs; in `auto-edit` the hook is not
+  consulted. So the mechanism is `yolo` + an allowlist hook that gates back down.
+- **Gating only `run_shell_command` is porous, because Qwen routes around it.** A denied
+  `touch leak.txt` came back moments later as a `write_file` to the same path — same
+  effect, different tool. The hook must gate **every effect-bearing tool**: shell against
+  an allowlist, and `write_file`/`edit` confined to the cwd. With both gated, an
+  out-of-cwd write and an `rm` were blocked, an in-cwd write and `pytest` allowed.
+- **The hook injects cleanly via `QWEN_CODE_SYSTEM_SETTINGS_PATH`** — a temp settings
+  file, so neither the repo nor `~/.qwen` is touched. Fail closed: any hook error denies.
+- **Elicitation is batched, not live.** `-p` is one-shot; Qwen cannot pause mid-run to
+  ask. So blocked attempts are logged and surfaced in the verdict as `ELICITATION`; the
+  manager decides whether to re-delegate with the command in `shell_allow`. This is the
+  only shape the stateless model supports, and it keeps "when to ask" out of Qwen's
+  (unreliable) hands — the gate decides, the manager adjudicates.
+
+Validated end-to-end: a `scoped` delegation let Qwen run `pytest` to check its own work
+("6 tests pass") while `pip list` was blocked and surfaced back for a decision.
+
 ## Approval modes (probed — the bundle doesn't document them)
 
 | mode | write | shell |

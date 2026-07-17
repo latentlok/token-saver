@@ -202,6 +202,7 @@ Modes, measured (do not guess these):
 |-------------|-------|-------|------------|
 | `plan`      | no    | no    | step 1. Also blocks `agent`/`exit_plan_mode`. |
 | `auto-edit` | YES   | no    | **default for code tasks** |
+| `scoped`    | cwd   | allowlist | when Qwen should run tests to self-check |
 | `yolo`      | YES   | YES   | only when shell IS the work |
 | `default`   | no    | no    | never (headless auto-denies) |
 | `auto`      | no    | no    | never — denies everything without a TTY |
@@ -212,8 +213,11 @@ in `auto-edit`, told to use a banned module, Qwen failed the gate on attempt 1, 
 the feedback, and passed on attempt 2 with every shell call it tried denied. Same
 convergence, and arbitrary command execution at user privilege is simply unreachable.
 
-Use `yolo` only when running something IS the task (a build, a migration, git
-operations). Writing code is not that.
+Use `scoped` when letting Qwen run the tests itself would help (it self-corrects
+before the gate, saving server iterations) -- it gets the exact `verify` command plus a
+read-only allowlist, writes stay in cwd, and anything else it tries comes back to you as
+`ELICITATION` to approve or ignore. Use `yolo` only when running something IS the task (a
+build, a migration, git operations). Writing code is not that.
 
     qwen_delegate(
       task=<the chosen option, concretely: exact files, symbols, end state>,

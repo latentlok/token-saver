@@ -174,8 +174,17 @@ Or call the tool directly for something already specified:
 |---|---|---|---|
 | `plan` | no | no | **any vague task.** Also blocks `agent`/`exit_plan_mode`. |
 | `auto-edit` | **yes** | **no** | **default for code.** |
+| `scoped` | cwd | allowlist | let Qwen run tests to check its own work |
 | `yolo` | yes | yes | only when running something *is* the task |
 | `default`, `auto` | no | no | never — headless auto-denies |
+
+`scoped` is `auto-edit` plus a **safe shell**: Qwen may run the exact `verify` command,
+a read-only/test allowlist (pytest, git status/diff/log, ls, grep…), and any
+`shell_allow` patterns you add. Writes stay inside cwd; `rm`/`curl`/network/`git push`/
+compound commands are denied and **surfaced back as `ELICITATION`** so you decide
+whether to re-delegate with them allowed. Enforced by a PreToolUse hook injected via a
+temp settings file (your repo and `~/.qwen` are untouched). Validated: an out-of-cwd
+write and an `rm` were both blocked.
 
 `auto-edit` beats `yolo` for writing code: the iterate loop is server-driven, so Qwen
 never needs a shell to converge — measured, it dropped a banned import on attempt 2 with

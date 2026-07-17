@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 QWEN_BIN = os.environ.get("QWEN_BIN", "qwen")
 RESULT_CAP = 3000
@@ -126,9 +127,21 @@ TOOL = {
                     "fills and starts silently forgetting the rules."
                 ),
             },
+            "shell_allow": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Only with approval_mode='scoped'. Extra regex patterns of shell "
+                    "commands to allow, beyond the built-in read-only/test set and the "
+                    "exact `verify` command (which are always allowed). E.g. "
+                    "['^make build$', '^tsc --noEmit$']. Keep it tight -- these run at "
+                    "user privilege. Compound/redirect/network commands are rejected "
+                    "regardless."
+                ),
+            },
             "approval_mode": {
                 "type": "string",
-                "enum": ["plan", "default", "auto-edit", "auto", "yolo"],
+                "enum": ["plan", "default", "auto-edit", "auto", "yolo", "scoped"],
                 "description": (
                     "Tool-approval policy. Pick the WEAKEST mode that can do the job.\n\n"
                     "Measured behaviour (probed; the bundle does not document this):\n"
@@ -136,7 +149,16 @@ TOOL = {
                     "  default    write NO   shell NO   (headless auto-denies -- useless)\n"
                     "  auto-edit  write YES  shell NO   <- BEST DEFAULT for code tasks\n"
                     "  auto       write NO   shell NO   (useless headless, same as default)\n"
+                    "  scoped     write cwd  shell ALLOWLIST  <- when Qwen should run tests\n"
                     "  yolo       write YES  shell YES  (only when shell IS the work)\n\n"
+                    "'scoped' is auto-edit plus a safe shell: Qwen may run the exact `verify` "
+                    "command, a read-only/test allowlist (pytest, git status/diff/log, ls, "
+                    "grep, ...), and any `shell_allow` patterns you add -- so it can check its "
+                    "own work before the gate. Writes are confined to cwd; rm/curl/network/git "
+                    "push/compound-commands are denied. Anything blocked is surfaced back as "
+                    "ELICITATION so you can decide whether to re-delegate with it allowed. "
+                    "Enforced by a PreToolUse hook (yolo underneath so the hook fires); the "
+                    "boundary is validated -- an out-of-cwd write and an rm were both blocked.\n\n"
                     "PREFER 'auto-edit' OVER 'yolo'. Qwen does not need shell to converge -- "
                     "THIS server runs `verify` and feeds failures back, so the iterate loop is "
                     "server-driven. Measured: in auto-edit, told to use a banned module, Qwen "
@@ -529,33 +551,102 @@ def run_investigate(args):
 
 # ---------- qwen invocation ----------
 
+HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scoped_hook.py")
 
-def invoke_qwen(task, cwd, approval_mode, timeout, session_id, suffix=HANDOFF_SUFFIX):
+
+def scoped_setup(cwd, verify, shell_allow):
+    """
+    Wire the PreToolUse allowlist hook for approval_mode='scoped' WITHOUT touching the
+    repo or ~/.qwen. Runs qwen in yolo (so the hook fires) but the hook enforces:
+    shell allowlist + the exact verify command, writes confined to cwd, everything else
+    denied and logged. Returns (env_overrides, denylog_path, tempdir_to_clean).
+    """
+    td = tempfile.mkdtemp(prefix="qgate-")
+    denylog = os.path.join(td, "denied.log")
+    sys_settings = os.path.join(td, "settings.json")
+    with open(sys_settings, "w") as f:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": ".*", "hooks": [
+                {"type": "command", "command": f"python3 {HOOK_SCRIPT}"}]}]}}, f)
+    env = {
+        "QWEN_CODE_SYSTEM_SETTINGS_PATH": sys_settings,
+        "QGATE_CWD": os.path.realpath(cwd),
+        "QGATE_VERIFY": verify or "",
+        "QGATE_DENYLOG": denylog,
+        "QGATE_EXTRA": json.dumps(shell_allow or []),
+    }
+    return env, denylog, td
+
+
+def invoke_qwen(task, cwd, approval_mode, timeout, session_id,
+                suffix=HANDOFF_SUFFIX, verify=None, shell_allow=None):
+    real_mode = approval_mode
+    scoped_env = {}
+    denylog = None
+    tempdir = None
+    if approval_mode == "scoped":
+        real_mode = "yolo"  # yolo so the hook is consulted; the hook does the gating
+        scoped_env, denylog, tempdir = scoped_setup(cwd, verify, shell_allow)
+
     cmd = [
         QWEN_BIN, "-p", task + suffix,
-        "--approval-mode", approval_mode, "-o", "json",
+        "--approval-mode", real_mode, "-o", "json",
     ]
     if session_id:
         cmd += ["-r", session_id]
 
     env = dict(os.environ)
     env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
+    env.update(scoped_env)
 
     try:
         proc = subprocess.run(
             cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
         )
     except subprocess.TimeoutExpired:
+        _cleanup(tempdir)
         return None, [], None, f"timed out after {timeout}s", {}
     except FileNotFoundError:
+        _cleanup(tempdir)
         return None, [], None, f"qwen binary not found (QWEN_BIN={QWEN_BIN})", {}
 
+    blocked = _read_denylog(denylog)
+    _cleanup(tempdir)
+
     text, denials, sid = parse_qwen_json(proc.stdout)
-    meta = {"peak": peak_context(proc.stdout), "stats": parse_stats(proc.stdout)}
+    meta = {"peak": peak_context(proc.stdout), "stats": parse_stats(proc.stdout),
+            "blocked": blocked}
     if text is None:
         tail = (proc.stderr or proc.stdout or "").strip()[-800:]
         return None, [], sid, f"unparseable output (exit {proc.returncode}): {tail}", meta
     return text, denials, sid, None, meta
+
+
+def _read_denylog(path):
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path) as f:
+            seen, out = set(), []
+            for line in f:
+                line = line.strip()
+                if line and line not in seen:
+                    seen.add(line)
+                    out.append(line)
+            return out
+    except Exception:
+        return []
+
+
+def _cleanup(td):
+    if td and os.path.isdir(td):
+        try:
+            for root, _, files in os.walk(td, topdown=False):
+                for fn in files:
+                    os.remove(os.path.join(root, fn))
+            os.rmdir(td)
+        except Exception:
+            pass
 
 
 def run_verify(verify, cwd):
@@ -640,7 +731,8 @@ def run_qwen(args):
         log(f"attempt {attempt}/{max_iter} cwd={cwd} resume={session_id or '-'}")
 
         result_text, denials, sid, err, meta = invoke_qwen(
-            prompt, cwd, approval_mode, timeout, session_id
+            prompt, cwd, approval_mode, timeout, session_id,
+            verify=verify, shell_allow=args.get("shell_allow"),
         )
         ctx["meta"] = meta
         ctx["peak"] = max(ctx.get("peak", 0), meta.get("peak", 0))
@@ -766,6 +858,19 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         lines.append(line)
     elif peak:
         lines.append(f"CONTEXT: peak {peak:,} tokens (window unknown)")
+
+    # Scoped-shell elicitation: commands the hook blocked. Surfacing them is the
+    # "ask the manager" half -- Qwen wanted to run these; you decide if they're legit.
+    blocked = ctx.get("meta", {}).get("blocked") or []
+    if blocked:
+        lines.append(
+            "ELICITATION: Qwen tried these out-of-scope actions; the scoped-shell guard "
+            "blocked them:\n"
+            + "\n".join(f"  - {b}" for b in blocked[:12])
+            + ("\n  ..." if len(blocked) > 12 else "")
+            + "\nIf one is legitimate and needed, re-delegate with it in `shell_allow` "
+            "(or approval_mode='yolo' for full shell). If not, it was correctly blocked."
+        )
 
     st = ctx.get("meta", {}).get("stats") or {}
     if st.get("ms") and ctx.get("peak"):
