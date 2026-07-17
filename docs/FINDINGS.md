@@ -111,6 +111,22 @@ glob→grep→read. Its *story about* that surface was not reliable.
 
 → Qwen finds the surface; the manager checks whether the story is true.
 
+## Investigation is trustworthy in structure, not in precision
+
+`qwen_investigate` on an unseen library returned a perfect structural map — all 12
+public functions, correct purposes, correct composition (`tableize` = `underscore` +
+`pluralize`), correct "no `__all__`". Every semantic claim checked out (5/5).
+
+**But every line number it cited was fabricated** — `dasherize` claimed at 130 (actual
+174), `titleize` 256 (357), all of them off by 40–100 lines — and it asserted it had
+"confirmed by reading directly (lines ~83–310)" when functions ran to ~382. False
+confidence on the precise part.
+
+→ The map is a **lead, not truth**: trust its structure and semantics, verify anything
+load-bearing against source. `qwen_investigate` now asks for grep-able symbol names, not
+line numbers — Qwen gets names right and numbers wrong, so it no longer emits the thing
+it fabricates.
+
 ## What Qwen is genuinely good at
 
 Don't over-correct. Given a spec, it is strong:

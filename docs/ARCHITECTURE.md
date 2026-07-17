@@ -209,6 +209,34 @@ Beyond the core loop, the verdict carries signals learned from real failures:
 
 ---
 
+## 7b. `qwen_investigate` — reading, offloaded
+
+The server exposes a second tool for the cheap half of the work: **understanding a
+codebase**. Qwen's tokens are free and it is genuinely good at investigation (glob →
+grep → targeted read), so instead of the manager spending its scarce context reading ten
+files, it delegates the reading and gets back a compressed map.
+
+Mechanically it is `qwen_delegate`'s inner call with three differences: forced `plan`
+mode (read-only, so always safe and no gate needed), a different prompt suffix that
+demands a structured map, and no git snapshot (nothing changes). The response is
+**MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY**, plus a peak-context line.
+
+Two design constraints, both from measurement:
+
+- **Bounded and stateless.** Each call asks a focused question over a few files. A
+  "read the whole repo" call pushes Qwen past its compaction threshold, after which it
+  fabricates having read things it did not. The response reports peak context and warns
+  if compaction likely fired, so an over-broad read is visible rather than silently
+  wrong.
+- **A lead, not truth.** Qwen's *structure and semantics* are reliable; its *precise
+  claims* are not. On an unseen library it produced a perfect function inventory and
+  correct composition relationships — and fabricated every line number, with false
+  confidence ("confirmed by reading directly"). So the tool asks for grep-able symbol
+  names rather than line numbers (it gets names right, numbers wrong), and the VERIFY
+  section lists what the caller must confirm against source. The map says *where to
+  look*; the manager still reads the load-bearing lines itself. That is the whole
+  saving — Qwen turns "read thirty files" into "read three."
+
 ## 8. Language-agnostic by design
 
 Nothing in the mechanism is Python-specific:

@@ -379,12 +379,160 @@ def strip_handoff(text):
     return "\n".join(keep).strip()
 
 
+# ---------- investigate: cheap, bounded, read-only context-building ----------
+
+# Appended to an investigate task. Forces a structured, verifiable map rather than
+# prose -- and, crucially, a VERIFY section. Qwen's investigation is broad and cheap but
+# its conclusions are often wrong in plausible ways (measured: 3/5 options on one real
+# plan rested on a misread of control flow). So the map is a lead, not a fact: it says
+# WHERE to look, and flags which claims the caller must confirm against source itself.
+INVESTIGATE_SUFFIX = """
+
+---
+You are in read-only investigation mode. Do NOT propose changes or write code. Use
+glob/grep/targeted reads; do not read whole files "to be thorough" -- stay small.
+
+Return ONLY this structure, nothing else:
+
+MAP:
+- <path> — <one line: what it is / what it exposes>
+  (one bullet per relevant file; skip irrelevant files)
+
+KEY SYMBOLS:
+- <name> in <path> — <what it does>
+  (the functions/classes/types that matter for the question; omit if not applicable)
+
+CONNECTIONS:
+- <how the relevant pieces call/depend on each other; the seams that matter>
+
+ANSWER: <2-4 sentences directly answering the question you were asked>
+
+VERIFY (load-bearing claims the caller must confirm against source before relying on
+them — be honest about what you inferred vs. read directly):
+- <claim> — <the symbol/path to grep for to check it>
+
+Reference symbols by NAME and file (e.g. `dasherize in inflection/__init__.py`), never
+by line number. You do not track line numbers reliably and a wrong number is worse than
+none — a name can be grepped, a guessed line cannot. If you did not actually read
+something, say so under VERIFY instead of asserting you confirmed it.
+"""
+
+INVESTIGATE_TOOL = {
+    "name": "qwen_investigate",
+    "description": (
+        "Delegate READ-ONLY investigation of a codebase to the local Qwen worker, and get "
+        "back a compact structured map -- cheaply. Qwen reads the code (its tokens are "
+        "free); you get a summary instead of spending your own context on ten files.\n\n"
+        "Runs in plan mode: Qwen physically cannot write, so this is always safe and needs "
+        "no gate. Use it to orient before planning or delegating: 'where does X live', "
+        "'how do these modules connect', 'what is the public surface of Y'.\n\n"
+        "Returns MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY. The VERIFY section "
+        "lists the load-bearing claims you must confirm against source yourself -- Qwen's "
+        "investigation is broad but its conclusions are often wrong in plausible ways, so "
+        "treat the map as a lead (where to look), not as truth. Read the actual source for "
+        "anything a decision hinges on.\n\n"
+        "Keep each call BOUNDED and stateless. Ask one focused question over a few files, "
+        "not 'read the whole repo' -- a huge read pushes Qwen past its compaction threshold, "
+        "after which it fabricates having read things it did not. For broad coverage, make "
+        "several small calls, not one giant one. The response reports peak context so you "
+        "can see whether it stayed safe."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": (
+                    "A focused question to answer by reading the code, e.g. 'What is the "
+                    "public API of the parser module and where is each entry point?' or "
+                    "'How does auth flow from the request handler to the token check?' "
+                    "Scope it so a few files answer it -- not the whole repo at once."
+                ),
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Absolute path to the repository to investigate.",
+            },
+            "focus": {
+                "type": "string",
+                "description": (
+                    "Optional: narrow the search, e.g. a subdirectory ('src/parser'), a "
+                    "glob ('**/*.ts'), or specific files. Keeps the read bounded and cheap. "
+                    "Omit to let Qwen scope it from the question."
+                ),
+            },
+            "timeout_sec": {
+                "type": "integer",
+                "description": f"Kill the investigation after this many seconds (default {DEFAULT_TIMEOUT}).",
+            },
+        },
+        "required": ["question", "cwd"],
+    },
+}
+
+
+def run_investigate(args):
+    question = args["question"]
+    cwd = args["cwd"]
+    focus = args.get("focus")
+    timeout = max(30, min(MAX_TIMEOUT, int(args.get("timeout_sec") or DEFAULT_TIMEOUT)))
+
+    if not os.path.isabs(cwd):
+        return f"STATUS: error\ncwd must be an absolute path, got: {cwd}"
+    if not os.path.isdir(cwd):
+        return f"STATUS: error\ncwd does not exist or is not a directory: {cwd}"
+
+    prompt = f"Investigate this codebase and answer the question.\n\nQUESTION: {question}"
+    if focus:
+        prompt += f"\n\nFOCUS your reading on: {focus}"
+
+    log(f"investigate cwd={cwd} focus={focus or '-'}")
+
+    # plan mode: read-only by construction. No verify, no git snapshot -- nothing changes.
+    text, denials, sid, err, meta = invoke_qwen(
+        prompt, cwd, "plan", timeout, None, suffix=INVESTIGATE_SUFFIX
+    )
+    if err:
+        return f"STATUS: error\n{err}"
+
+    lines = [f"STATUS: ok", f"SESSION: {sid or 'unknown'}"]
+
+    # Compaction is the failure mode for a read that got too big: past it Qwen fabricates.
+    peak = meta.get("peak", 0)
+    win = context_window()
+    if peak and win:
+        _, auto_at = compaction_thresholds(win)
+        pct = 100.0 * peak / win
+        if peak >= auto_at:
+            lines.append(
+                f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%) -- COMPACTION LIKELY FIRED. "
+                f"This read was too big; parts of the map may be fabricated. Re-run with a "
+                f"tighter `focus`, or split into smaller questions."
+            )
+        elif pct >= 60:
+            lines.append(
+                f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%) -- getting large; narrow "
+                f"`focus` if you need more depth."
+            )
+        else:
+            lines.append(f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%) -- safe, well under compaction")
+    elif peak:
+        lines.append(f"CONTEXT: peak {peak:,} tokens")
+
+    st = meta.get("stats") or {}
+    if st.get("tools"):
+        lines.append(f"READS: {st['tools']} tool call(s), {st.get('ms',0)/1000:.0f}s")
+
+    lines.append(f"--- map ---\n{truncate(text, RESULT_CAP + 1500)}")
+    return "\n".join(lines)
+
+
 # ---------- qwen invocation ----------
 
 
-def invoke_qwen(task, cwd, approval_mode, timeout, session_id):
+def invoke_qwen(task, cwd, approval_mode, timeout, session_id, suffix=HANDOFF_SUFFIX):
     cmd = [
-        QWEN_BIN, "-p", task + HANDOFF_SUFFIX,
+        QWEN_BIN, "-p", task + suffix,
         "--approval-mode", approval_mode, "-o", "json",
     ]
     if session_id:
@@ -904,16 +1052,17 @@ def main():
         elif method == "ping":
             respond(rid, {})
         elif method == "tools/list":
-            respond(rid, {"tools": [TOOL]})
+            respond(rid, {"tools": [TOOL, INVESTIGATE_TOOL]})
         elif method == "tools/call":
             params = req.get("params") or {}
             name = params.get("name")
             args = params.get("arguments") or {}
-            if name != "qwen_delegate":
+            handler = {"qwen_delegate": run_qwen, "qwen_investigate": run_investigate}.get(name)
+            if handler is None:
                 respond(rid, error={"code": -32602, "message": f"unknown tool: {name}"})
                 continue
             try:
-                text = run_qwen(args)
+                text = handler(args)
                 respond(rid, {"content": [{"type": "text", "text": text}]})
             except Exception as e:
                 log(f"error: {e!r}")

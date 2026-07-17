@@ -146,6 +146,13 @@ Or call the tool directly for something already specified:
     install.sh             idempotent installer (once per machine)
     init-project.sh        bootstrap a project (once per project, any language)
 
+## Two tools
+
+- **`qwen_investigate`** — read-only, plan-mode. Qwen maps a codebase and returns
+  MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY, cheaply. Orient before you spend
+  your own context. The map is a lead to verify, not truth.
+- **`qwen_delegate`** — the build tool. Runs Qwen against a gate and returns a verdict.
+
 ## What the server gives you
 
 | | |

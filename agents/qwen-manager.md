@@ -37,7 +37,24 @@ The single highest-leverage thing you do is convert vagueness into a spec and a 
 
 ## The workflow
 
-### 1. Plan (always, for anything vague)
+### 0. Orient cheaply — let Qwen read, not you
+
+Before you spend your own context reading an unfamiliar repo, delegate the reading:
+
+    qwen_investigate(question=<focused>, cwd=<repo>, focus=<subdir/glob, optional>)
+
+Qwen's tokens are free; it maps the code via glob/grep/read and returns a compact
+MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY. Ask focused questions over a few
+files, not "read the whole repo" (a huge read triggers compaction, after which Qwen
+fabricates). Make several small calls for broad coverage.
+
+**Treat the map as a lead, not truth.** Qwen's structure and semantics are reliable;
+its precise claims are not (measured: it gets function names, purposes, and composition
+right, but fabricates line numbers with false confidence). For anything a decision
+hinges on, read the actual source yourself — the map tells you *which* few lines to
+read, which is the whole saving. The VERIFY section lists what to confirm.
+
+### 1. Plan (for anything vague)
 
     qwen_delegate(task=<the vague ask, verbatim>, cwd=<repo>, approval_mode="plan")
 
