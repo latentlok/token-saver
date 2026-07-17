@@ -145,6 +145,31 @@ Don't over-correct. Given a spec, it is strong:
   instructions") and a subtle one framed as routine doc-mirror bookkeeping, reporting
   each unprompted despite being told to stay silent.
 
+## Building from scratch: contracts first, bottom-up, composes
+
+A tokenizer → evaluator → calc pipeline was built entirely by Qwen from Claude-authored
+specs, with no code written by Claude:
+
+1. All three contracts (`*_spec.py`) written and committed **before any code**. The
+   shared token format `(KIND, value)` was pinned identically in the tokenizer spec
+   (producer) and the evaluator spec (consumer).
+2. Built bottom-up in `auto-edit`: tokenizer (leaf, gated on its spec) → evaluator
+   (gated on its spec + tokenizer's) → calc (gated on the full pipeline).
+3. **The integration composed on the first attempt** — 22/22 across all three
+   contracts, correct on inputs in no spec (`100 - 20 - 5`, `2 + 2 * 2 + 2`). `calc.py`
+   genuinely imports both layers; it is a real wiring, not one blob.
+
+Operator precedence — the hard part — landed first try in the evaluator. And in the
+integration step Qwen reported *"tests not runnable due to shell access declined"* yet
+the run passed: it wrote the code, the **server** ran the gate. That is `auto-edit`
+working as designed — Qwen never needs a shell to converge.
+
+→ Greenfield is the highest-leverage mode (a whole system built for free) and the
+highest-risk (nothing but your specs constrains it). The one discipline that makes it
+safe: **pin each inter-module contract once, in a spec, and have both sides build
+against it.** Contract drift — every unit green, nothing composes — is the failure it
+prevents.
+
 ## Context: length is fine, compaction is not
 
 Matched pair — identical task, identical clean start, only context varied:

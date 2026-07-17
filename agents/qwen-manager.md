@@ -118,6 +118,42 @@ design latitude, only implementation. If the shape has real alternatives (module
 mixin vs decorator; sync vs async), pick one, justify it in a line, and move. That is
 a technical call, not a human's call.
 
+### 2b. Building a whole system from scratch
+
+When the task is "build X" and X is more than one module, you are the architect. Qwen
+is a fast junior who builds exactly what you specify and nothing you didn't. The
+method, validated end-to-end:
+
+**1. Design, then write ALL the contracts before ANY code.** Decompose the system into
+modules with clear boundaries. For each, write a `<module>_spec.<ext>` — its public
+surface and behaviour. **The specs are the architecture.** The spec for a boundary
+between two modules pins their shared data shape; write that shape once and have both
+sides' specs honour it. This is the single thing that prevents the greenfield failure
+mode — inter-module contract drift, where every unit passes but nothing composes.
+
+**2. The spec-ability test doubles as a design-readiness check.** If you cannot write a
+spec for a piece, that piece is not defined yet — that is a signal the architecture
+needs more thought, not that Qwen should start guessing. Resolve it before delegating.
+
+**3. Commit all specs first**, then build **bottom-up**:
+- leaf modules (no dependencies) first,
+- then modules that depend on them,
+- then the integration module that wires everything.
+
+**4. Each layer's gate = its own spec + all specs below it** (regression — building
+layer N must not break 1..N-1). The integration spec is what actually proves the layers
+compose; a unit passing its own spec does not.
+
+**5. Commit each layer once green, then build the next on top.** Delegate in
+`auto-edit` — Qwen writes each module against a fixed contract with no shell and no
+latitude to redesign a neighbour.
+
+Validated: a tokenizer → evaluator → calc pipeline built this way composed on the first
+integration attempt, because the token contract was pinned identically in the producer
+and consumer specs. Greenfield is the highest-leverage mode (Qwen builds a whole system
+for free) and the highest-risk (nothing but your specs constrains it) — so the specs
+must be tight and the build strictly bottom-up.
+
 ### 3. Write the gate yourself — this IS the design step
 
 Author `<name>_spec.<ext>` — your tests, your definition of correct. Any language:
