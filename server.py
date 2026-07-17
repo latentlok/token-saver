@@ -29,7 +29,8 @@ import sys
 QWEN_BIN = os.environ.get("QWEN_BIN", "qwen")
 RESULT_CAP = 3000
 VERIFY_CAP = 2500
-DEFAULT_TIMEOUT = 600
+DEFAULT_TIMEOUT = 900
+MAX_TIMEOUT = 7200
 DEFAULT_MAX_ITER = 3
 SPEC_GLOB = "*_spec.py"
 
@@ -128,7 +129,26 @@ TOOL = {
             },
             "timeout_sec": {
                 "type": "integer",
-                "description": f"Kill each attempt after this many seconds (default {DEFAULT_TIMEOUT}).",
+                "description": (
+                    f"Kill each attempt after this many seconds (default {DEFAULT_TIMEOUT}, "
+                    f"max {MAX_TIMEOUT}). ESTIMATE THIS for anything beyond a single small "
+                    "file -- the default is sized for ~25k-context tasks and a large task "
+                    "WILL be killed mid-write, leaving a partial tree.\n\n"
+                    "Fitted from 198 real calls on this box:\n"
+                    "    seconds = (turns * avg_context)/10882  +  output_tokens/70\n"
+                    "  prefill ~10,882 tok/s; decode ~70 tok/s (measured, matches the "
+                    "hardware's stated rate). avg_context ~= (22000 + peak_context)/2, since "
+                    "context grows from a ~22k baseline; every turn re-prefills the whole "
+                    "context.\n\n"
+                    "Worked example -- a multi-file task peaking at 120k over ~30 turns "
+                    "emitting ~15k tokens of code:\n"
+                    "    avg_context = (22000+120000)/2 = 71000\n"
+                    "    prefill = 30*71000/10882 = 196s ; decode = 15000/70 = 214s\n"
+                    "    estimate ~410s -> set timeout_sec ~1200 (about 3x headroom)\n\n"
+                    "Use 2-3x headroom: the estimate is a median, and p90 API calls ran 3x "
+                    "median. Over-setting costs nothing (the timeout only fires on a hang); "
+                    "under-setting destroys the run."
+                ),
             },
         },
         "required": ["task", "cwd"],
@@ -354,7 +374,7 @@ def run_qwen(args):
     cwd = args["cwd"]
     verify = args.get("verify")
     approval_mode = args.get("approval_mode", "yolo")
-    timeout = int(args.get("timeout_sec") or DEFAULT_TIMEOUT)
+    timeout = max(30, min(MAX_TIMEOUT, int(args.get("timeout_sec") or DEFAULT_TIMEOUT)))
     max_iter = max(1, min(10, int(args.get("max_iterations") or DEFAULT_MAX_ITER)))
     session_id = args.get("session_id")
 
@@ -402,6 +422,7 @@ def run_qwen(args):
     result_text = ""
     denials = []
     ctx = {
+        "timeout": timeout,
         "meta": {},
         "peak": 0,
         "preflight_out": preflight_out,
@@ -545,6 +566,15 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         lines.append(f"CONTEXT: peak {peak:,} tokens (window unknown)")
 
     st = ctx.get("meta", {}).get("stats") or {}
+    if st.get("ms") and ctx.get("peak"):
+        secs = st["ms"] / 1000.0
+        budget = ctx.get("timeout", 0)
+        if budget:
+            used = 100.0 * secs / budget
+            note = f"TIME: {secs:.0f}s of {budget}s budget ({used:.0f}%)"
+            if used > 70:
+                note += " -- close to timeout; raise timeout_sec for tasks like this"
+            lines.append(note)
     if st.get("tools"):
         tl = f"TOOLS: {st['tools']} call(s)"
         if st.get("tool_names"):
