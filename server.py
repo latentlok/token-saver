@@ -325,15 +325,16 @@ def invoke_qwen(task, cwd, approval_mode, timeout, session_id):
             cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
         )
     except subprocess.TimeoutExpired:
-        return None, [], None, f"timed out after {timeout}s"
+        return None, [], None, f"timed out after {timeout}s", {}
     except FileNotFoundError:
-        return None, [], None, f"qwen binary not found (QWEN_BIN={QWEN_BIN})"
+        return None, [], None, f"qwen binary not found (QWEN_BIN={QWEN_BIN})", {}
 
     text, denials, sid = parse_qwen_json(proc.stdout)
+    meta = {"peak": peak_context(proc.stdout), "stats": parse_stats(proc.stdout)}
     if text is None:
         tail = (proc.stderr or proc.stdout or "").strip()[-800:]
-        return None, [], sid, f"unparseable output (exit {proc.returncode}): {tail}"
-    return text, denials, sid, None
+        return None, [], sid, f"unparseable output (exit {proc.returncode}): {tail}", meta
+    return text, denials, sid, None, meta
 
 
 def run_verify(verify, cwd):
@@ -401,6 +402,8 @@ def run_qwen(args):
     result_text = ""
     denials = []
     ctx = {
+        "meta": {},
+        "peak": 0,
         "preflight_out": preflight_out,
         "pre_status": pre_status,
         "pre_sha": pre_sha,
@@ -413,9 +416,11 @@ def run_qwen(args):
     for attempt in range(1, max_iter + 1):
         log(f"attempt {attempt}/{max_iter} cwd={cwd} resume={session_id or '-'}")
 
-        result_text, denials, sid, err = invoke_qwen(
+        result_text, denials, sid, err, meta = invoke_qwen(
             prompt, cwd, approval_mode, timeout, session_id
         )
+        ctx["meta"] = meta
+        ctx["peak"] = max(ctx.get("peak", 0), meta.get("peak", 0))
         if sid:
             session_id = sid  # resume this session on retry
 
@@ -520,6 +525,42 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if guard_on:
         lines.append(blast_radius(cwd, ctx["pre_status"]))
 
+    # Context used, so Claude can size the next delegation.
+    peak = ctx.get("peak", 0)
+    win = context_window()
+    if peak and win:
+        warn_at, auto_at = compaction_thresholds(win)
+        pct = 100.0 * peak / win
+        line = f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%)"
+        if peak >= warn_at:
+            line += (
+                f" -- APPROACHING COMPACTION at {auto_at:,.0f}. Compaction is lossy and "
+                f"can summarize QWEN.md's rules away mid-task. Split the work or start a "
+                f"fresh session."
+            )
+        else:
+            line += f", compaction at {auto_at:,.0f} ({100.0*auto_at/win:.0f}%) -- ample headroom"
+        lines.append(line)
+    elif peak:
+        lines.append(f"CONTEXT: peak {peak:,} tokens (window unknown)")
+
+    st = ctx.get("meta", {}).get("stats") or {}
+    if st.get("tools"):
+        tl = f"TOOLS: {st['tools']} call(s)"
+        if st.get("tool_names"):
+            tl += f" ({', '.join(st['tool_names'][:6])})"
+        if st.get("ms"):
+            tl += f", {st['ms']/1000:.0f}s"
+        lines.append(tl)
+    if st.get("tool_fail"):
+        lines.append(
+            f"TOOL FAILURES: {st['tool_fail']} of {st['tools']} tool call(s) FAILED. "
+            f"Qwen may have worked around this or reported success anyway -- treat the "
+            f"result as suspect and check CHANGED."
+        )
+    if st.get("api_errors"):
+        lines.append(f"API ERRORS: {st['api_errors']} request(s) errored during this run.")
+
     if status == "gate_suspect":
         lines.append(
             "GATE SUSPECT: the verify command produced identical output before and after "
@@ -601,6 +642,91 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     lines.append(f"--- qwen result ---\n{truncate(strip_handoff(result_text), RESULT_CAP)}")
     return "\n".join(lines)
+
+
+def context_window():
+    """Configured context window for the active model, or None."""
+    try:
+        s = json.load(open(os.path.expanduser("~/.qwen/settings.json")))
+        model = (s.get("model") or {}).get("name")
+        for provs in (s.get("modelProviders") or {}).values():
+            for p in provs if isinstance(provs, list) else []:
+                if p.get("id") == model or p.get("name") == model:
+                    cw = (p.get("generationConfig") or {}).get("contextWindowSize")
+                    if cw:
+                        return int(cw)
+    except Exception:
+        pass
+    return None
+
+
+def compaction_thresholds(window):
+    """
+    Mirrors qwen's computeThresholds() (chunks/chunk-NJOFRXTM.js):
+      DEFAULT_PCT=0.85, SUMMARY_RESERVE=20000, AUTOCOMPACT_BUFFER=13000, WARN_BUFFER=20000
+    Compaction is LOSSY -- it summarizes history away, which can drop QWEN.md rules
+    mid-task. Statelessness normally keeps us near 11%, far below these.
+    """
+    effective = max(0, window - 20000)
+    ceiling = effective - 13000
+    auto = min(0.85 * window, ceiling) if ceiling > 0 else 0.85 * window
+    return max(0, auto - 20000), auto
+
+
+def peak_context(stdout):
+    """
+    Peak prompt tokens across assistant turns == context actually used.
+
+    NOT result.usage.input_tokens: that SUMS every API call in the run, including
+    Qwen's internal auto-memory-extractor sub-agent. Measured: result reported 31,317
+    while true peak context was 20,285 -- a 50% overstatement.
+    """
+    best = 0
+    try:
+        parsed = json.loads((stdout or "").strip())
+        msgs = parsed if isinstance(parsed, list) else [parsed]
+    except Exception:
+        return 0
+    for m in msgs:
+        if not isinstance(m, dict) or m.get("type") != "assistant":
+            continue
+        u = (m.get("message") or {}).get("usage") or {}
+        best = max(best, int(u.get("input_tokens") or 0))
+    return best
+
+
+def parse_stats(stdout):
+    """
+    Pull the run telemetry out of result.stats.
+
+    tools.totalFail is the valuable one: a run where Qwen's tool calls failed currently
+    reports identically to one where they all succeeded. Same class as permission_denials
+    -- silent failure dressed as success.
+    """
+    out = {"tools": 0, "tool_fail": 0, "tool_names": [], "ms": 0, "turns": 0,
+           "api_errors": 0, "lines_added": 0, "lines_removed": 0}
+    try:
+        parsed = json.loads((stdout or "").strip())
+        msgs = parsed if isinstance(parsed, list) else [parsed]
+    except Exception:
+        return out
+    for m in reversed(msgs):
+        if not isinstance(m, dict) or m.get("type") != "result":
+            continue
+        out["ms"] = m.get("duration_ms") or 0
+        out["turns"] = m.get("num_turns") or 0
+        st = m.get("stats") or {}
+        t = st.get("tools") or {}
+        out["tools"] = t.get("totalCalls") or 0
+        out["tool_fail"] = t.get("totalFail") or 0
+        out["tool_names"] = sorted((t.get("byName") or {}).keys())
+        f = st.get("files") or {}
+        out["lines_added"] = f.get("totalLinesAdded") or 0
+        out["lines_removed"] = f.get("totalLinesRemoved") or 0
+        for mv in (st.get("models") or {}).values():
+            out["api_errors"] += ((mv.get("api") or {}).get("totalErrors") or 0)
+        break
+    return out
 
 
 def parse_qwen_json(stdout):
