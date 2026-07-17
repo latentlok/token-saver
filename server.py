@@ -122,9 +122,26 @@ TOOL = {
                 "type": "string",
                 "enum": ["plan", "default", "auto-edit", "auto", "yolo"],
                 "description": (
-                    "Tool-approval policy. Default 'yolo' auto-approves shell/edit/write "
-                    "-- required headless, since 'default' auto-denies with no TTY. Use "
-                    "'plan' for read-only analysis."
+                    "Tool-approval policy. 'yolo' (default) auto-approves shell/edit/write "
+                    "-- required headless, since 'default' auto-denies with no TTY.\n\n"
+                    "USE 'plan' FOR ANY VAGUE TASK. This is not a nicety -- it is the only "
+                    "safe way to delegate underspecified work. In plan mode Qwen physically "
+                    "cannot write, so it investigates and returns options instead of "
+                    "inventing scope.\n\n"
+                    "TWO-PHASE WORKFLOW for vague work:\n"
+                    "  1. PLAN:    qwen_delegate(task=<the vague ask>, approval_mode='plan')\n"
+                    "              -> returns a PLAN with options + a SESSION id. No verify\n"
+                    "                 needed; nothing can change.\n"
+                    "  2. Present the options to the user and let them choose.\n"
+                    "  3. EXECUTE: qwen_delegate(task='Implement option 2 only...',\n"
+                    "              session_id=<from step 1>, approval_mode='yolo',\n"
+                    "              verify=<a real gate>)\n"
+                    "              -> resumes warm, already holding the investigation.\n\n"
+                    "Why this matters (measured): given a vague task in yolo, Qwen did NOT "
+                    "stop and ask -- it invented a 4-feature plan, silently changed a public "
+                    "API, and all 909 upstream tests still passed because none asserted the "
+                    "changed behaviour. A vague task cannot be gated; a chosen plan item can. "
+                    "Never delegate a vague task straight to yolo."
                 ),
             },
             "timeout_sec": {
