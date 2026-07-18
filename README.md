@@ -81,6 +81,10 @@ version — see [docs/FINDINGS.md](docs/FINDINGS.md) for the evidence:
   identical results. But at 147k, compaction fired, deleted 64% of history, and it then
   claimed to have read files it never opened.
 
+**Testing this?** Start with [docs/TESTING.md](docs/TESTING.md) — a self-contained brief
+with the current state, the tool surface, the measured failure modes to expect, and a
+step-by-step test plan.
+
 ## Install
 
     git clone <this repo> ~/projects/qwen-delegate
