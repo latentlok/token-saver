@@ -1,5 +1,5 @@
 ---
-description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Routes builds/changes to the qwen-manager; answers read-only questions directly and cheaply.
+description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove: bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase ("how does X work", "where is Y handled", "is there already a Z") — those are answered read-only and cheaply. Routes builds to the qwen-manager subagent in the background; answers questions directly.
 argument-hint: <a task or question about code; name the repo if it isn't obvious>
 ---
 
@@ -25,8 +25,9 @@ follow-up, reuse the returned `session_id` — it's a warm conversation.
 
 **A build or change** — "add X", "fix Y", "make Z usable from the CLI", "refactor W":
 → This needs the full plan → decide → spec → build → verify loop. **Spawn the
-`qwen-manager` subagent** with the goal (not the steps) and the repo path. Let it run
-the loop. Relay its report.
+`qwen-manager` subagent in the background** (`run_in_background: true`) with the goal
+(not the steps) and the repo path. Let it run the loop; you get a notification when it
+finishes. Relay its report then.
 
 **Genuinely ambiguous about WHAT to build, or an irreversible / outward-facing call**
 (delete data, change a public API, pick a product direction):
@@ -35,10 +36,20 @@ the loop. Relay its report.
 ## 2. Dispatch — do not do the work
 
 - **Question:** one `qwen_query`, verify the load-bearing bits, relay. That's it.
-- **Build:** hand the goal to `qwen-manager` and let it own the spec and the gate. It
-  returns `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`. Do not read the whole
-  codebase or write the code yourself when a delegated call can do it — that is the
-  token you are here to save.
+  Questions run **synchronously** — they take ~20s and the user is waiting on the answer.
+- **Build:** hand the goal to `qwen-manager` **in the background** and let it own the
+  spec and the gate. It returns `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`.
+  Do not read the whole codebase or write the code yourself when a delegated call can
+  do it — that is the token you are here to save.
+
+  Builds take minutes, not seconds: a gate-verified delegation runs plan → spec →
+  build → iterate → verify. Blocking on that wastes the user's time for no benefit,
+  since you are not going to read the work anyway — you are going to read a verdict.
+  Fire it, tell the user it is running and roughly what it will do, and carry on with
+  whatever else they need. Relay the report when the notification arrives.
+
+  **Never invent or predict what a running manager will report.** If the user asks
+  before it lands, say it is still running.
 - If the task is large or spans multiple modules, still hand it to one `qwen-manager`;
   it decomposes and drives the sub-steps. You are not the builder.
 

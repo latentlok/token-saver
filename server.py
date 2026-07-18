@@ -974,6 +974,7 @@ def run_qwen(args):
         "task": task,
         "verify": verify,
         "on_compaction": on_compaction,
+        "sessions": [session_id] if session_id else [],
         "max_iter": max_iter,
         "session_hint": session_id,
     }
@@ -997,6 +998,12 @@ def run_qwen(args):
         accum_stats(ctx["cum"], meta.get("stats"))
         if sid:
             session_id = sid  # resume this session on retry
+        # Every session this run touched. A discard starts a NEW one, so counting
+        # compactions off the final session_id alone would report the fresh session's
+        # total and silently drop the discarded session's -- a run could show
+        # "discards: 1, compactions: 0", which is self-contradictory.
+        if sid and sid not in ctx["sessions"]:
+            ctx["sessions"].append(sid)
 
         if err:
             trail.append(f"attempt {attempt}: {err}")
@@ -1386,7 +1393,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             },
             "changed_files": changed,
             "resumed": bool(ctx.get("session_hint")),
-            "compactions": compaction_state(session_id)[0],
+            "compactions": sum(compaction_state(s)[0] for s in ctx.get("sessions", [])),
+            "sessions": len(ctx.get("sessions", [])),
             "reinjections": ctx.get("reinjects", 0),
             "discards": ctx.get("discards", 0),
             "on_compaction": ctx.get("on_compaction"),

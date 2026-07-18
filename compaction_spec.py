@@ -244,6 +244,25 @@ class DiscardActuallyDiscards(Base):
         self.assertGreaterEqual(len(seen), 2)
         self.assertEqual(seen[1], "sess-A", "reinject must stay in the warm session")
 
+    def test_discarded_session_still_counted_in_compactions(self):
+        """
+        Regression: the logged count was read off the FINAL session_id, which a discard
+        has already replaced. A run could report discards=1 alongside compactions=0 --
+        self-contradictory, and it hid the discarded session's compactions entirely.
+        """
+        rec = {}
+        real_write = server.write_runlog
+        server.write_runlog = lambda cwd, r: rec.update(r)
+        try:
+            self.drive("discard")
+        finally:
+            server.write_runlog = real_write
+        self.assertGreaterEqual(rec.get("discards", 0), 1, "a discard should be recorded")
+        self.assertGreaterEqual(
+            rec.get("compactions", 0), 1,
+            "the discarded session's compactions must still be counted -- "
+            f"got compactions={rec.get('compactions')} with discards={rec.get('discards')}")
+
 
 class HookContract(Base):
     """The hook is what makes detection real; its wiring must not silently drop out."""
