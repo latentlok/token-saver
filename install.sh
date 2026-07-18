@@ -92,8 +92,18 @@ for skill in "$REPO"/skills/*/; do
     say "-> $SKILLS_DIR/$name (symlink; preloaded via the manager's skills: frontmatter)"
 done
 
+# ---------- 5. commands (the front door) ----------
+echo "installing commands"
+COMMANDS_DIR="$CLAUDE_DIR/commands"
+mkdir -p "$COMMANDS_DIR"
+for cmd in "$REPO"/commands/*.md; do
+    [ -f "$cmd" ] || continue
+    ln -sfn "$cmd" "$COMMANDS_DIR/$(basename "$cmd")"
+    say "-> $COMMANDS_DIR/$(basename "$cmd")  (invoke as /$(basename "$cmd" .md))"
+done
+
 echo
-echo "installed. RESTART Claude Code to load the server, agent, and skills."
+echo "installed. RESTART Claude Code to load the server, agent, skills, and commands."
 echo
 echo "Not done for you (machine-specific, and one of them is a secret):"
 echo "  - Qwen's model provider + API key -> ~/.qwen/settings.json"

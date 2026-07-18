@@ -120,7 +120,17 @@ a TypeScript project with no config. If your project uses a different convention
 
 ## Use
 
-Hand a task to the subagent the way you'd hand it to an engineer — the goal, not the steps:
+The front door is **`/delegate <task or question>`** — it routes the work to the free
+model and spends your context only on judgment and relay:
+
+    /delegate how does auth flow from the request handler to the token check?
+    /delegate make the CLI in ./tools usable without PYTHONPATH
+
+Questions are answered read-only and cheap; builds go to the `qwen-manager` subagent,
+which runs the full plan → decide → spec → build → verify loop.
+
+Or hand a task straight to the subagent the way you'd hand it to an engineer — the goal,
+not the steps:
 
 > "The stuff in `qwen-agent-test` is only usable from Python. Make it usable from the
 > command line."
@@ -143,6 +153,8 @@ Or call the tool directly for something already specified:
     agents/qwen-manager.md the subagent: judgment, spec authoring, escalation policy
     templates/QWEN.md      per-project rules for the Qwen worker
     docs/FINDINGS.md       the measurements every design decision rests on
+    commands/delegate.md   the front door — /delegate <task or question>
+    .claude-plugin/plugin.json   plugin manifest (token-saver)
     install.sh             idempotent installer (once per machine)
     init-project.sh        bootstrap a project (once per project, any language)
 
