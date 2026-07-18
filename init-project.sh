@@ -81,6 +81,37 @@ PY
     say "QWEN.md     written"
 fi
 
+# ---------- register in the global project index ----------
+# Pointer index only (paths, no metrics) so an aggregator can find each project's
+# .qwen-delegate/runs.jsonl. The server registers on first write too, so projects set up
+# before this existed still get picked up; this just registers them earlier.
+python3 - "$TARGET" <<'PY'
+import json, os, sys, time
+target = sys.argv[1]
+reg = os.path.expanduser("~/.qwen-delegate/projects.jsonl")
+try:
+    os.makedirs(os.path.dirname(reg), exist_ok=True)
+    known = set()
+    if os.path.isfile(reg):
+        with open(reg) as f:
+            for line in f:
+                try:
+                    known.add((json.loads(line) or {}).get("path"))
+                except Exception:
+                    continue
+    if target in known:
+        print("  registry    already registered")
+    else:
+        with open(reg, "a") as f:
+            f.write(json.dumps({
+                "path": target,
+                "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }) + "\n")
+        print(f"  registry    added to {reg}")
+except Exception as e:
+    print(f"  registry    WARNING: not registered ({e!r})")
+PY
+
 echo
 echo "  next:"
 echo "    1. read $DEST — check the test command and add any project-specific rules"

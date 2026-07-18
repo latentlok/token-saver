@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 QWEN_BIN = os.environ.get("QWEN_BIN", "qwen")
 RESULT_CAP = 3000
@@ -34,6 +35,20 @@ VERIFY_CAP = 2500
 DEFAULT_TIMEOUT = 900
 MAX_TIMEOUT = 7200
 DEFAULT_MAX_ITER = 3
+
+# ---------- run log ----------
+# Per-project, because the plugin is used in real projects and the numbers belong with
+# the code they describe. The global file is a pointer INDEX only (paths, no metrics) so
+# an aggregator can find the per-project logs; it is never itself a metrics store.
+RUNLOG_DIR = ".qwen-delegate"
+RUNLOG_FILE = "runs.jsonl"
+PROJECT_REGISTRY = os.environ.get("QWEN_DELEGATE_REGISTRY") or os.path.expanduser(
+    "~/.qwen-delegate/projects.jsonl"
+)
+TASK_HEAD_CHARS = 200
+# Prose estimate for the verdict returned to Claude. Raw char count is logged alongside,
+# so this divisor can be re-derived later without losing data.
+VERDICT_CHARS_PER_TOKEN = 4.0
 
 # Files the guard protects: Claude-authored specs that define what correct means.
 # Language-agnostic by convention -- any basename containing `_spec.` or `.spec.`:
@@ -642,8 +657,25 @@ def run_query(args):
     text, denials, sid, err, meta = invoke_qwen(
         prompt, cwd, "plan", timeout, session_id, suffix=suffix
     )
+    def _log_query(status, verdict):
+        write_runlog(cwd, leverage_record(
+            "qwen_query", cwd, status, verdict,
+            meta.get("stats") or {}, meta.get("peak", 0),
+            extra={
+                "session": sid,
+                "approval_mode": "plan",
+                "format": fmt,
+                "question": digest(question),
+                "focus": focus or None,
+                "resumed": bool(session_id),
+            },
+        ))
+
+    # Errors are logged too: a timed-out or unparseable query still burned the tokens.
     if err:
-        return f"STATUS: error\n{err}"
+        verdict = f"STATUS: error\n{err}"
+        _log_query("error", verdict)
+        return verdict
 
     lines = ["STATUS: ok", f"SESSION: {sid or 'unknown'}"]
 
@@ -675,7 +707,9 @@ def run_query(args):
 
     label = "map" if fmt == "map" else "answer"
     lines.append(f"--- {label} ---\n{truncate(text, RESULT_CAP + 1500)}")
-    return "\n".join(lines)
+    verdict = "\n".join(lines)
+    _log_query("ok", verdict)
+    return verdict
 
 
 def run_investigate(args):
@@ -875,6 +909,12 @@ def run_qwen(args):
         "preflight": preflight,
         "guard_on": guard_on,
         "cwd": cwd,
+        # Run totals for the log. ctx["meta"] is last-attempt only; this is every attempt.
+        "cum": cum_zero(),
+        "task": task,
+        "verify": verify,
+        "max_iter": max_iter,
+        "session_hint": session_id,
     }
 
     for attempt in range(1, max_iter + 1):
@@ -886,6 +926,7 @@ def run_qwen(args):
         )
         ctx["meta"] = meta
         ctx["peak"] = max(ctx.get("peak", 0), meta.get("peak", 0))
+        accum_stats(ctx["cum"], meta.get("stats"))
         if sid:
             session_id = sid  # resume this session on retry
 
@@ -1159,7 +1200,35 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         lines.append("NOTE: no verify command -- this is Qwen's unverified claim.")
 
     lines.append(f"--- qwen result ---\n{truncate(strip_handoff(result_text), RESULT_CAP)}")
-    return "\n".join(lines)
+    verdict = "\n".join(lines)
+
+    # Logged LAST: every diff above is taken against the pre-run snapshot, so the log
+    # file must not exist in the tree until they are done. (It is gitignored regardless
+    # -- belt and braces, because getting this wrong would corrupt the CHANGED report.)
+    cum = ctx.get("cum") or cum_zero()
+    changed = 0
+    if guard_on:
+        post = snapshot(cwd)
+        changed = len([p for p in post if post.get(p) != ctx["pre_status"].get(p)])
+    write_runlog(cwd, leverage_record(
+        "qwen_delegate", cwd, status, verdict, cum, ctx.get("peak", 0),
+        extra={
+            "session": session_id,
+            "approval_mode": ctx.get("approval_mode"),
+            "attempts": len(trail),
+            "max_iterations": max_iter,
+            "task": digest(ctx.get("task")),
+            "gate": {
+                "cmd": digest(ctx.get("verify")),
+                "preflight_passed": ctx.get("preflight"),
+            },
+            "changed_files": changed,
+            "resumed": bool(ctx.get("session_hint")),
+            "blocked_shell": len(ctx.get("meta", {}).get("blocked") or []),
+            "denials": len(denials or []),
+        },
+    ))
+    return verdict
 
 
 def context_window():
@@ -1213,6 +1282,67 @@ def peak_context(stdout):
     return best
 
 
+def tok_zero():
+    return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "thoughts": 0}
+
+
+def tok_add(dst, src):
+    for k in dst:
+        dst[k] += int(src.get(k) or 0)
+    return dst
+
+
+def accum_stats(cum, st):
+    """
+    Sum one attempt's telemetry into the run total.
+
+    ctx["meta"] holds only the LAST attempt, so a 3-attempt run costs roughly 3x what a
+    last-attempt reading reports. Cost accounting has to see the whole run: the iterate
+    loop is precisely where free tokens get spent.
+    """
+    st = st or {}
+    for k in ("tokens", "tokens_main", "tokens_overhead"):
+        tok_add(cum[k], st.get(k) or {})
+    for k in ("ms", "turns", "tools", "tool_fail", "api_errors",
+              "lines_added", "lines_removed"):
+        cum[k] = (cum.get(k) or 0) + (st.get(k) or 0)
+    for k in ("tool_names", "models"):
+        cum[k] = sorted(set(cum.get(k) or []) | set(st.get(k) or []))
+    # Worst case wins: one blended attempt makes the whole run's main/overhead split
+    # unreliable, so the run must not claim a clean bySource provenance.
+    seen = {cum.get("token_source", "none"), st.get("token_source", "none")}
+    cum["token_source"] = ("blended" if "blended" in seen
+                           else "bySource" if "bySource" in seen else "none")
+    cum["attempts"] = (cum.get("attempts") or 0) + 1
+    return cum
+
+
+def cum_zero():
+    return {"tokens": tok_zero(), "tokens_main": tok_zero(),
+            "tokens_overhead": tok_zero(), "ms": 0, "turns": 0, "tools": 0,
+            "tool_fail": 0, "api_errors": 0, "lines_added": 0, "lines_removed": 0,
+            "tool_names": [], "models": [], "attempts": 0, "token_source": "none"}
+
+
+def norm_tokens(t):
+    """
+    Normalise one `tokens` object to {prompt, completion, total, cached, thoughts}.
+
+    `-o json` emits the INTERNAL camelCase shape, where the output count is named
+    `candidates` (verified against a live run, not the bundled schema -- the snake_case
+    `completion` spelling in the CLI source belongs to the statusLine hook, a different
+    serializer). Both spellings are accepted so this survives an upstream rename.
+    """
+    t = t or {}
+    return {
+        "prompt": int(t.get("prompt") or 0),
+        "completion": int(t.get("candidates") or t.get("completion") or 0),
+        "total": int(t.get("total") or 0),
+        "cached": int(t.get("cached") or 0),
+        "thoughts": int(t.get("thoughts") or 0),
+    }
+
+
 def parse_stats(stdout):
     """
     Pull the run telemetry out of result.stats.
@@ -1220,9 +1350,16 @@ def parse_stats(stdout):
     tools.totalFail is the valuable one: a run where Qwen's tool calls failed currently
     reports identically to one where they all succeeded. Same class as permission_denials
     -- silent failure dressed as success.
+
+    Tokens are split main vs overhead via stats.models[*].bySource. Qwen runs an internal
+    `managed-auto-memory-extractor` sub-agent whose spend is real but is not task work --
+    measured at 10,428 of 29,421 prompt tokens (35%) on a one-word prompt. Reporting a
+    single blended total would overstate what the task itself cost.
     """
     out = {"tools": 0, "tool_fail": 0, "tool_names": [], "ms": 0, "turns": 0,
-           "api_errors": 0, "lines_added": 0, "lines_removed": 0}
+           "api_errors": 0, "lines_added": 0, "lines_removed": 0,
+           "tokens": tok_zero(), "tokens_main": tok_zero(),
+           "tokens_overhead": tok_zero(), "models": [], "token_source": "none"}
     try:
         parsed = json.loads((stdout or "").strip())
         msgs = parsed if isinstance(parsed, list) else [parsed]
@@ -1241,10 +1378,150 @@ def parse_stats(stdout):
         f = st.get("files") or {}
         out["lines_added"] = f.get("totalLinesAdded") or 0
         out["lines_removed"] = f.get("totalLinesRemoved") or 0
-        for mv in (st.get("models") or {}).values():
+        for mid, mv in (st.get("models") or {}).items():
             out["api_errors"] += ((mv.get("api") or {}).get("totalErrors") or 0)
+            out["models"].append(mid)
+            tok_add(out["tokens"], norm_tokens(mv.get("tokens")))
+            by = mv.get("bySource") or {}
+            if by:
+                out["token_source"] = "bySource"
+                for src, sv in by.items():
+                    bucket = "tokens_main" if src == "main" else "tokens_overhead"
+                    tok_add(out[bucket], norm_tokens(sv.get("tokens")))
+            else:
+                # No per-source breakdown: attribute everything to the task rather than
+                # silently dropping it. Overstates main, never invents tokens.
+                #
+                # Recorded, because otherwise this is indistinguishable from a real
+                # zero-overhead run -- a metric reading 0 when it actually measured
+                # nothing is the silent-failure class this system exists to catch.
+                out["token_source"] = "blended"
+                tok_add(out["tokens_main"], norm_tokens(mv.get("tokens")))
         break
     return out
+
+
+# ---------- run log ----------
+#
+# Every delegation and query appends one JSON object to <cwd>/.qwen-delegate/runs.jsonl.
+# The point is the leverage ratio: free tokens burned by Qwen vs tokens returned into
+# Claude's context. That ratio was the product's headline claim on the strength of one
+# hand-measured session; logging turns it into something continuously measured.
+#
+# Two rules this code must never break:
+#   1. A logging failure must never fail a delegation. Everything here is best-effort.
+#   2. Nothing is written into the working tree before the blast-radius diff is taken,
+#      or the log would be counted as Qwen's own work.
+
+
+def digest(text):
+    """Truncated head + full-text hash. Enough to identify and group runs without
+    parking whole prompts (which can embed real source) on disk."""
+    text = text or ""
+    return {
+        "head": text[:TASK_HEAD_CHARS],
+        "sha256": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16],
+        "chars": len(text),
+    }
+
+
+def runlog_dir(cwd):
+    """
+    Create <cwd>/.qwen-delegate/ holding a self-ignoring .gitignore.
+
+    The `*` pattern makes git ignore every file in the directory INCLUDING the .gitignore
+    itself, so `git status --porcelain` never reports it. That is load-bearing: snapshot()
+    and blast_radius() diff the working tree to attribute changes to Qwen, and an
+    un-ignored log file would show up as Qwen's work -- and would also trip the
+    "refuses to run if the tree is dirty" precondition. Self-ignoring leaves the
+    project's own .gitignore untouched.
+    """
+    d = os.path.join(cwd, RUNLOG_DIR)
+    os.makedirs(d, exist_ok=True)
+    gi = os.path.join(d, ".gitignore")
+    if not os.path.exists(gi):
+        with open(gi, "w") as f:
+            f.write("*\n")
+    return d
+
+
+def register_project(cwd):
+    """Add cwd to the global pointer index if absent. Paths only -- an aggregator reads
+    this to find the per-project logs. Deliberately not a metrics store: the numbers
+    stay with the project that produced them."""
+    try:
+        os.makedirs(os.path.dirname(PROJECT_REGISTRY), exist_ok=True)
+        known = set()
+        if os.path.isfile(PROJECT_REGISTRY):
+            with open(PROJECT_REGISTRY) as f:
+                for line in f:
+                    try:
+                        known.add((json.loads(line) or {}).get("path"))
+                    except Exception:
+                        continue  # a corrupt line must not hide the rest
+        if cwd in known:
+            return
+        with open(PROJECT_REGISTRY, "a") as f:
+            f.write(json.dumps({"path": cwd, "first_seen": now_iso()}) + "\n")
+    except Exception as e:
+        log(f"warning: project registry update failed: {e!r}")
+
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def write_runlog(cwd, record):
+    """Append one run record. Best-effort by contract -- never raises."""
+    try:
+        path = os.path.join(runlog_dir(cwd), RUNLOG_FILE)
+        with open(path, "a") as f:
+            f.write(json.dumps(record, sort_keys=True) + "\n")
+        register_project(cwd)
+    except Exception as e:
+        log(f"warning: run log write failed: {e!r}")
+
+
+def leverage_record(tool, cwd, status, verdict, stats, peak, extra=None):
+    """
+    Assemble the common half of a run record.
+
+    `verdict` is the exact string handed back to Claude, so verdict_chars measures the
+    real context cost -- the denominator of the whole thesis.
+    """
+    tokens = stats.get("tokens") or tok_zero()
+    v_chars = len(verdict or "")
+    v_tokens = round(v_chars / VERDICT_CHARS_PER_TOKEN)
+    rec = {
+        "ts": now_iso(),
+        "tool": tool,
+        "status": status,
+        "cwd": cwd,
+        "tokens": tokens,
+        "tokens_main": stats.get("tokens_main") or tok_zero(),
+        "tokens_overhead": stats.get("tokens_overhead") or tok_zero(),
+        # "bySource" = split is real; "blended" = everything attributed to main because
+        # Qwen reported no per-source breakdown, so overhead=0 means "unmeasured".
+        "token_source": stats.get("token_source") or "none",
+        "peak_context": peak,
+        "verdict_chars": v_chars,
+        "verdict_tokens_est": v_tokens,
+        # The number this whole system exists to make large.
+        "leverage": round(tokens["total"] / v_tokens, 1) if v_tokens else None,
+        "duration_ms": stats.get("ms") or 0,
+        "turns": stats.get("turns") or 0,
+        "tools": {
+            "calls": stats.get("tools") or 0,
+            "fail": stats.get("tool_fail") or 0,
+            "names": stats.get("tool_names") or [],
+        },
+        "api_errors": stats.get("api_errors") or 0,
+        "lines_added": stats.get("lines_added") or 0,
+        "lines_removed": stats.get("lines_removed") or 0,
+        "models": stats.get("models") or [],
+    }
+    rec.update(extra or {})
+    return rec
 
 
 def parse_qwen_json(stdout):
