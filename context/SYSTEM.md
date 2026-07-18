@@ -110,6 +110,12 @@ on real success), `approval_mode`, `max_iterations`, `session_id`, `shell_allow`
 Prefer `auto-edit` over `yolo`: the iterate loop is **server-driven**, so Qwen never needs
 a shell to converge, and arbitrary execution at user privilege stays unreachable.
 
+> **`scoped` is not a sandbox.** Measured: blocked from `pip list`, Qwen wrote a Python
+> file that shells out and ran it via `pytest` — which is on the allowlist. Any permitted
+> command that executes a file Qwen can write is arbitrary execution. `scoped` raises the
+> cost of stepping outside; it does not prevent it. For untrusted work prefer `auto-edit`,
+> where the shell is simply absent. See FINDINGS.
+
 ---
 
 ## 5. How to drive it
@@ -191,6 +197,7 @@ only for direction, outward-facing changes, or irreversible calls.
 
 | doc | for |
 |---|---|
+| `docs/PRINCIPLES.md` | **the short version.** The structural rules everything else is a corollary of. Read first if you want the reasoning rather than the details. |
 | `context/TESTING.md` | testing the system — state, test plan, expected outcomes |
 | `docs/FINDINGS.md` | **the evidence.** Every measurement behind every guard. Read before concluding a protection is paranoid — each was bought with a real failure. |
 | `docs/ARCHITECTURE.md` | how it works, component by component |

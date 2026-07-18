@@ -296,6 +296,7 @@ runlog_spec.py           gate for the run log + token accounting (Claude-authore
 agents/qwen-manager.md   the manager subagent: judgment, spec authoring, escalation
 templates/QWEN.md        per-project worker rules (copied + edited per project)
 docs/ARCHITECTURE.md     this file — how it works
+docs/PRINCIPLES.md       the structural rules, abstracted from the measurements
 docs/FINDINGS.md         the measurements every design decision rests on
 install.sh               per-machine setup: register MCP, set timeouts, symlink agent
 init-project.sh          per-project setup: detect test cmd, write QWEN.md, require git

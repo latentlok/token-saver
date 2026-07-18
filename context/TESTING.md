@@ -191,8 +191,20 @@ delegation above:
 
 ## 7. Where the reasoning lives
 
+- `../docs/PRINCIPLES.md` — the structural rules, abstracted. Start here for the reasoning.
 - `../docs/FINDINGS.md` — every measurement behind every design decision. **Read this before
   concluding a guard is paranoid**; each one was bought with a real failure.
+
+**Two things that will confuse a test run if you don't know them:**
+
+1. **Your fixture is part of the input.** Qwen reads file contents, comments *and*
+   `git log`. Two contradiction trials were invalidated by a docstring saying "deliberately
+   contradictory" and by a commit message that did the same. Keep fixture wording and
+   history neutral.
+2. **A guard that never fires has not been tested.** `QWEN.md`'s spec rule is strong enough
+   that Qwen refuses to touch a spec even under direct order — so the auto-revert path is
+   unreachable until you remove `QWEN.md` and re-run. Do that deliberately, in a scratch
+   repo.
 - `../docs/ARCHITECTURE.md` — how it works, component by component.
 - `../agents/qwen-manager.md` — the manager's full workflow.
 - `../skills/lld-principles/SKILL.md` — the design discipline it must follow.

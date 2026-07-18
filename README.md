@@ -63,8 +63,10 @@ command — is the only thing trusted to say "it worked." Full detail in
 
 ## Why it's built this way
 
-Every protection here exists because the naive version failed, measurably. The short
-version — see [docs/FINDINGS.md](docs/FINDINGS.md) for the evidence:
+Every protection here exists because the naive version failed, measurably. One sentence
+generates all of them — *put each decision where it cannot be faked* — and
+[docs/PRINCIPLES.md](docs/PRINCIPLES.md) works through the corollaries. The specific
+failures behind them, with numbers, are in [docs/FINDINGS.md](docs/FINDINGS.md):
 
 - **Qwen fabricates.** Day one it wrote correct `fib()` code and reported "all three
   tests pass ✅" with pytest not installed. Its self-report is never evidence, so a
@@ -157,6 +159,7 @@ Or call the tool directly for something already specified:
     runlog_spec.py         gate for the run log + token accounting
     agents/qwen-manager.md the subagent: judgment, spec authoring, escalation policy
     templates/QWEN.md      per-project rules for the Qwen worker
+    docs/PRINCIPLES.md     the structural rules, abstracted from the measurements
     docs/FINDINGS.md       the measurements every design decision rests on
     commands/delegate.md   the front door — /delegate <task or question>
     context/               agent-facing reference: SYSTEM.md, TESTING.md
