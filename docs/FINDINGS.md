@@ -334,6 +334,90 @@ of its shell attempts denied**. Same convergence; arbitrary execution unreachabl
 
 Corollary: denied tool calls in a restricted mode are the *design*, not a defect.
 
+## The leverage ratio was a claim, not a measurement
+
+The headline — ~19M free tokens processed, ~61k returned — came from **one hand-measured
+session**. The server parsed `result.stats` on every run and then threw the token counts
+away, so nothing accumulated. The run log exists to make the product's central claim a
+tracked number rather than an anecdote.
+
+**First measured data, 3 real runs (2 delegations + 1 query), all gates green:**
+
+| tool | free tokens | returned (est) | leverage |
+|---|---|---|---|
+| delegate | 64,968 | 428 | 151.8x |
+| query | 42,394 | 200 | 212.0x |
+| delegate | 109,607 | 412 | 266.0x |
+| **total** | **216,969** | **1,040** | **208.6x** |
+
+Same order of magnitude as the original claim. The denominator is the verdict string
+actually handed back, measured at the point it is returned — not an estimate of it.
+
+## Qwen's token report hides a sub-agent that is a third of the spend
+
+`stats.models[*].bySource` splits `main` from `managed-auto-memory-extractor`, an internal
+Qwen sub-agent. On a **one-word prompt** ("reply with exactly the word: ping"):
+
+    total  prompt 29,421   =   main 18,993   +   extractor 10,428  (35%)
+
+Real spend, but not task work. A single blended total overstates what the task cost.
+
+**It fires inconsistently** — that probe showed 10,428 extractor tokens; three subsequent
+real runs reported a genuine zero. So `overhead: 0` is ambiguous on its face, and the
+ambiguity is the dangerous part: it reads identically whether the extractor was idle or
+the breakdown was simply absent. The log records `token_source` (`bySource` = the split is
+real; `blended` = everything attributed to main because no breakdown was reported) so a
+zero can never quietly mean "unmeasured". Same principle as `gate_suspect`: a metric that
+can fail must say so.
+
+## The documented JSON schema is for a different serializer
+
+The CLI bundle documents `"tokens": {"prompt", "completion", ...}` in snake_case — and
+that schema belongs to the **statusLine hook**, not `-o json`. A live run emits the
+internal camelCase shape, where the output count is named **`candidates`**:
+
+    stats.models["qwen3.6:27b-agent"] = {
+      api:    {totalRequests, totalErrors, totalLatencyMs},
+      tokens: {prompt, candidates, total, cached, thoughts},
+      bySource: {main: {...}, "managed-auto-memory-extractor": {...}}
+    }
+
+Reading the bundle instead of probing would have produced a parser that silently returned
+zero for every completion count. `norm_tokens` accepts both spellings. **Probe the tool,
+do not read its docs** — the same lesson as the approval modes.
+
+## Last-attempt telemetry under-reports the iterate loop
+
+`ctx["meta"]` is overwritten on every attempt, so a reading taken from it describes only
+the final attempt. A 3-attempt run costs roughly 3x what that reports — and the iterate
+loop is *precisely* where free tokens get spent, so the under-count lands hardest on the
+runs that matter most. The log accumulates across attempts (`accum_stats`).
+
+## A log written into the workspace corrupts the measurement it records
+
+The server snapshots the git tree, runs Qwen, then diffs to attribute changes. A log file
+written into that tree would be reported as Qwen's own work in `CHANGED`, and would trip
+the "refuses to run when a spec is dirty" precondition.
+
+Fix: `.qwen-delegate/` contains a `.gitignore` holding `*`, which ignores every file in
+the directory **including itself**. `git status --porcelain` never reports it, so
+`snapshot()` cannot see it, and the project's own `.gitignore` stays untouched. The log is
+also written last, after every diff has been taken — belt and braces.
+
+## Mutation testing caught a bad test, not just bad code
+
+13 mutations against `runlog_spec.py`; all 13 eventually caught, but **two survived the
+first pass**:
+
+1. A hardcoded `token_source: "bySource"` in the record builder — nothing asserted the
+   field was propagated rather than constant.
+2. `cum[k] = st.get(k)` (keep the latest attempt's provenance instead of worst-case).
+   The test happened to order the blended attempt **last**, so "keep the latest" passed by
+   coincidence. Asserting both orders kills it.
+
+The second is the more useful failure: the test was green, tested the right function, and
+was still blind. Ordering inside a test is part of what the test asserts.
+
 ## Numbers
 
 - **Python source ≈ 5.54 bytes/token**, not 4.0 (measured: 379,571 bytes → 68,564 tokens).
@@ -347,6 +431,10 @@ Corollary: denied tool calls in a restricted mode are the *design*, not a defect
 - **MCP transport**: `MCP_TOOL_TIMEOUT` defaults ~28h; the real ceiling is the **30-min
   stdio idle window** (the server blocks silently in `subprocess.run`). Calls >120s are
   auto-backgrounded with a completion notification — not a failure.
+- **Measured leverage: 208.6x** over the first 3 logged runs (216,969 free tokens in,
+  1,040 est. tokens returned). Per-run range 151.8x–266.0x.
+- **Baseline context per delegation ≈ 19k tokens** before any task work (QWEN.md + system
+  + tool preamble) — independently confirms the ~17.6k session-reload figure.
 
 ## Sessions
 

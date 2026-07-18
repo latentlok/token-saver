@@ -154,6 +154,7 @@ Or call the tool directly for something already specified:
 ## Layout
 
     server.py              the MCP server. stdio JSON-RPC, zero deps.
+    runlog_spec.py         gate for the run log + token accounting
     agents/qwen-manager.md the subagent: judgment, spec authoring, escalation policy
     templates/QWEN.md      per-project rules for the Qwen worker
     docs/FINDINGS.md       the measurements every design decision rests on
@@ -185,6 +186,22 @@ Or call the tool directly for something already specified:
 | **handoff** | `HANDOFF/FILES/NEXT`, with `FILES` cross-checked against disk |
 | **context** | peak vs the compaction threshold |
 | **timing** | actual vs budget, so the estimate can be calibrated |
+| **run log** | per-project JSONL: tokens burned vs tokens returned, per call |
+
+## The run log
+
+Every call appends one record to `<project>/.qwen-delegate/runs.jsonl` — tokens burned on
+free hardware against tokens returned into Claude's context, plus attempts, timing, tools,
+and truncated+hashed task/gate text. **Measured leverage so far: 208.6×** (216,969 free
+tokens in, 1,040 returned, across 3 runs).
+
+The directory self-ignores (a `.gitignore` containing `*`), so the log never shows up in
+`git status` — which matters, because the server diffs the working tree to attribute
+changes to Qwen, and a visible log file would be counted as Qwen's work.
+
+`~/.qwen-delegate/projects.jsonl` indexes which projects have used the plugin — paths
+only, no metrics, so an aggregator can find each project's log. Override with
+`QWEN_DELEGATE_REGISTRY`.
 
 ## Approval modes (measured, not documented upstream)
 

@@ -209,6 +209,40 @@ Beyond the core loop, the verdict carries signals learned from real failures:
 
 ---
 
+## 7a. The run log — measuring the thing the system exists to do
+
+Every `qwen_delegate` and `qwen_query` call appends one JSON object to
+`<cwd>/.qwen-delegate/runs.jsonl`. The point is the **leverage ratio**: free tokens burned
+by Qwen against tokens returned into Claude's context. That was the product's headline
+claim on the strength of one hand-measured session; the log makes it continuously
+measured (first data: **208.6x** across 3 runs).
+
+Each record carries token counts (split `main` vs Qwen's internal memory-extractor
+sub-agent, with a `token_source` field marking whether that split is real or unavailable),
+peak context, wall time, attempts, tool calls and failures, changed-file count, and
+truncated-plus-hashed task and gate text. Counts are accumulated **across attempts** —
+`ctx["meta"]` holds only the last one, and the iterate loop is where tokens actually go.
+
+Two invariants this code must not break:
+
+1. **A logging failure must never fail a delegation.** Every write is best-effort; a
+   failure logs a stderr warning and returns.
+2. **The log must be invisible to git.** `snapshot()`/`blast_radius()` attribute working
+   tree changes to Qwen, so a visible log file would be reported as Qwen's own work and
+   would trip the dirty-tree precondition. `.qwen-delegate/` holds a `.gitignore`
+   containing `*`, which ignores the whole directory including itself; the record is also
+   written after every diff is taken.
+
+Logs are **per-project**, because the plugin is used in real projects and the numbers
+belong with the code they describe. `~/.qwen-delegate/projects.jsonl` is a **pointer index
+only** — paths, no metrics — written by `init-project.sh` at setup and by the server on
+first write, so an aggregator can find every project's log. Override its location with
+`QWEN_DELEGATE_REGISTRY`.
+
+The gate for all of this is `runlog_spec.py` (34 tests, mutation-tested: 13/13 caught).
+
+---
+
 ## 7b. `qwen_investigate` — reading, offloaded
 
 The server exposes a second tool for the cheap half of the work: **understanding a
@@ -258,12 +292,20 @@ read beforehand by Claude or Qwen.
 
 ```
 server.py               the MCP server — the whole broker, stdlib only
+runlog_spec.py           gate for the run log + token accounting (Claude-authored)
 agents/qwen-manager.md   the manager subagent: judgment, spec authoring, escalation
 templates/QWEN.md        per-project worker rules (copied + edited per project)
 docs/ARCHITECTURE.md     this file — how it works
 docs/FINDINGS.md         the measurements every design decision rests on
 install.sh               per-machine setup: register MCP, set timeouts, symlink agent
 init-project.sh          per-project setup: detect test cmd, write QWEN.md, require git
+```
+
+Written at runtime, not in the repo:
+
+```
+<project>/.qwen-delegate/runs.jsonl   per-project run log (self-ignoring dir)
+~/.qwen-delegate/projects.jsonl       pointer index of projects that have used the plugin
 ```
 
 ## 10. Lifecycle summary

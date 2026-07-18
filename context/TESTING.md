@@ -24,6 +24,9 @@ comes from — Qwen burns millions of tokens, you ingest a verdict.
 | worker model | `qwen3.6:27b-agent` on Ollama over Tailscale | configured in `~/.qwen/settings.json` (has the API key — never in the repo) |
 | idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=5400000` | 90 min (the real ceiling; server blocks silently) |
 | Firecrawl | `localhost:3002` (podman) | optional, gives Qwen web access |
+| run log | `<cwd>/.qwen-delegate/runs.jsonl` | per-project, self-ignoring, one record per call |
+| project index | `~/.qwen-delegate/projects.jsonl` | paths only; `QWEN_DELEGATE_REGISTRY` overrides |
+| log gate | `runlog_spec.py` | 34 tests, mutation-tested 13/13 caught |
 
 Install/update is `./install.sh` (idempotent, symlinks everything). Per-project setup is
 `./init-project.sh <repo>` — it detects the test command, writes `QWEN.md`, and **refuses
@@ -139,6 +142,22 @@ That contrast is the core finding; confirm both halves.
 Expect a report: `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`. Check that
 **`VERIFIED` names a command it actually ran**, and that `DECIDED` shows real calls made
 (not a menu handed back — a manager that returns options has failed its job).
+
+### I. Run log + token accounting
+Run `python3 runlog_spec.py` in the repo (34 tests) — that is the gate. Then, after any
+delegation above:
+
+1. `cat <repo>/.qwen-delegate/runs.jsonl` → one JSON record per call, delegate **and**
+   query. Check `leverage` (free tokens ÷ returned tokens) looks sane — measured range so
+   far 151.8–266.0×.
+2. **The hazard check:** `git status --porcelain` must NOT list `.qwen-delegate/`. If it
+   does, the log is being misattributed to Qwen in `CHANGED` and will trip the dirty-tree
+   precondition.
+3. **Multi-attempt runs:** force a retry (test C.2) and confirm the record's token totals
+   are the sum across attempts, not just the last one.
+4. Check `token_source` before believing `tokens_overhead: 0` — `blended` means the split
+   was unavailable and the zero is *unmeasured*, not real.
+5. `cat ~/.qwen-delegate/projects.jsonl` → the project appears exactly once.
 
 ---
 

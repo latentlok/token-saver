@@ -45,8 +45,9 @@ reusable underneath it.
 
 | component | path | role |
 |---|---|---|
-| engine | `server.py` | MCP server: delegate/query, gate, git guards. Zero deps. |
+| engine | `server.py` | MCP server: delegate/query, gate, git guards, run log. Zero deps. |
 | safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode |
+| log gate | `runlog_spec.py` | spec for the run log + token accounting (34 tests) |
 | manager | `agents/qwen-manager.md` | the code unit: decides, specs, delegates, verifies |
 | discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into the manager |
 | front door | `commands/delegate.md` | `/delegate <task or question>` |
@@ -54,8 +55,35 @@ reusable underneath it.
 | manifest | `.claude-plugin/plugin.json` | plugin identity |
 
 Installed by `./install.sh` (idempotent, symlinks everything). Per-project setup is
-`./init-project.sh <repo>` — detects the test command, writes `QWEN.md`, **refuses
-non-git projects**.
+`./init-project.sh <repo>` — detects the test command, writes `QWEN.md`, registers the
+project in the global index, and **refuses non-git projects**.
+
+---
+
+## 3b. The run log
+
+Every call appends one JSON record to `<cwd>/.qwen-delegate/runs.jsonl`. It measures the
+thing the system exists to do — **leverage: free tokens burned ÷ tokens returned to you**
+(first measured data: 208.6× over 3 runs, range 151.8–266.0×).
+
+Per record: token counts (`main` vs Qwen's memory-extractor sub-agent, summed across
+*all* attempts), `token_source`, peak context, wall time, attempts, tools, changed-file
+count, and truncated+hashed task and gate text.
+
+Three things to know:
+
+- **`token_source` decides whether `tokens_overhead: 0` means anything.** `bySource` = the
+  split is real. `blended` = no breakdown was reported, everything got attributed to
+  `main`, and 0 means *unmeasured*. Never read a zero without checking this field.
+- **The log is invisible to git** (`.qwen-delegate/` self-ignores via a `.gitignore`
+  containing `*`) and is written *after* every diff. If it ever shows up in `CHANGED`,
+  that is a bug — it would be misattributed to Qwen.
+- **`qwen_query` writes it too.** Queries are read-only with respect to your code, but
+  they do create `.qwen-delegate/` on disk. They burn real tokens (~20k baseline), so
+  excluding them would understate spend.
+
+`~/.qwen-delegate/projects.jsonl` is a **pointer index only** (paths, no metrics) so an
+aggregator can find every project's log. Relocate with `QWEN_DELEGATE_REGISTRY`.
 
 ---
 
@@ -150,6 +178,8 @@ only for direction, outward-facing changes, or irreversible calls.
   rules bind. Use `session_id` only for follow-ups on the *same* task.
 - **Timing** (fitted, 198 real calls): `seconds ≈ input/10,882 + output/70`. Set
   `timeout_sec` with 2–3× headroom. Calls >120s are auto-backgrounded — normal.
+- **The run log is the record.** Per-project `.qwen-delegate/runs.jsonl`; check
+  `token_source` before trusting a zero in `tokens_overhead`.
 - **Read the verdict's signals:** `gate_suspect` = your gate is broken, not the code.
   `success_but_preflight_passed` = the gate was already green, so the pass proves nothing.
   `NEW PUBLIC SURFACE` = new contracts Qwen added (deterministic scan, zero tokens —
