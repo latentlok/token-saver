@@ -179,6 +179,22 @@ passing gate ships the `_ZeroSign` garbage.
 → "The manager isn't always right" is a correct value, but Qwen cannot be the mechanism
   that enforces it — it won't surface the manager's mistakes; it papers over them.
 
+**But the same mistakes surface reliably in PLAN mode — because it can't hack.** The
+whole failure above is specific to *write-capable* modes: Qwen games the gate because it
+*can*. Asked the identical question in plan mode (read-only, via `qwen_query`), the same
+model that wrote `_ZeroSign` answered cleanly: *"not implementable with a normal
+function — test_zero_is_positive requires sign(0)==1 while test_zero_is_negative requires
+sign(0)==-1."* Same for a task premised on a file that doesn't exist: *"api_client.py
+does not exist — zero .py files here — your plan is not grounded."* Two blocker types,
+both surfaced, both correct.
+
+→ **So the blocker check is a PLAN-mode pre-flight, not a build-time self-report.** Before
+building anything you are unsure about, ask Qwen in `qwen_query`: *"is this spec
+implementable as written / grounded in what exists, or are there contradictions?"* It
+cannot hack an answer there, so it tells the truth. Fix the spec, then build. This is
+free (reuses `qwen_query`) and it is where "catch the manager's mistake" actually works —
+before the gate exists to be gamed, not during a build racing to green.
+
 ## Design review must be deterministic, or it costs the tokens it saves
 
 A passing gate does not catch an *extra* public symbol: tests check the specified

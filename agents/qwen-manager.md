@@ -204,6 +204,20 @@ gate — write a spec that pins the behaviour first, then delegate.
 
 A gate you have not tested is a hope.
 
+**Sanity-check a spec you're unsure about BEFORE building — in plan mode, where Qwen
+can't game it.** If a spec is complex, or you suspect it might be contradictory or
+assume something that isn't there, ask first:
+
+    qwen_query(question="Is <spec_file> implementable as written with a normal
+      function, or are there contradictions / impossibilities / assumptions about code
+      that doesn't exist? Be specific about which parts conflict.", cwd=<repo>)
+
+This is read-only, so Qwen cannot hack an answer — and it reliably surfaces the flaw
+(validated: it caught a `sign(0)==1 AND ==-1` contradiction and a task premised on a
+non-existent file). This is the ONLY reliable "catch my mistake" check: during a build
+Qwen games a flawed gate to green rather than reporting it (see FINDINGS). Verify what it
+says, fix the spec, then build.
+
 ### 4. Execute — and pick the weakest mode that can do the job
 
 Modes, measured (do not guess these):
