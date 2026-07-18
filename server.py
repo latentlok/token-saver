@@ -135,13 +135,37 @@ TOOL = {
                     "warm context. Worker tokens are free -- raise this for fiddly tasks."
                 ),
             },
+            "on_compaction": {
+                "type": "string",
+                "enum": ["reinject", "discard"],
+                "description": (
+                    "YOUR call on what happens if Qwen's session gets compacted mid-run. "
+                    "Compaction summarises history away and is the documented trigger for "
+                    "fabrication -- after one, Qwen claimed to have read 13 files it never "
+                    "opened.\n\n"
+                    "'reinject' (default) -- keep the WARM session and restore the task "
+                    "into it. Cheap, keeps the files it has already read. But the "
+                    "compaction summary REMAINS IN ITS HISTORY, and that summary is the "
+                    "thing that fabricates. You are placing good context beside possibly "
+                    "false context.\n\n"
+                    "'discard' -- abandon the session, restart cold against the same "
+                    "working tree. Costs a fresh ~21.6k preamble and everything it had "
+                    "learned, but it is the ONLY option that removes the corrupted "
+                    "summary, and the fresh session re-reads QWEN.md, which is what makes "
+                    "the rules bind.\n\n"
+                    "Choose 'discard' when correctness matters more than latency: long "
+                    "multi-file work, anything where a false 'I already did that' would "
+                    "be expensive, or when a compacted run has already reported something "
+                    "you could not verify. Worker tokens are free -- a cold restart costs "
+                    "latency only."
+                ),
+            },
             "session_id": {
                 "type": "string",
                 "description": (
                     "Resume a prior Qwen session (the SESSION value from an earlier call) "
-                    "to continue THAT task with warm context, skipping ~17.6k tokens of "
-                    "reload. Sessions are cwd-scoped: pass the same cwd or the id will not "
-                    "resolve.\n\n"
+                    "to continue THAT task with warm context. Sessions are cwd-scoped: "
+                    "pass the same cwd or the id will not resolve.\n\n"
                     "STATEFUL when the follow-up builds directly on what Qwen just did "
                     "('now add X to the function you wrote', 'fix the edge case you "
                     "missed'). It still has the code and reasoning in context.\n\n"
@@ -871,6 +895,9 @@ def run_qwen(args):
     timeout = max(30, min(MAX_TIMEOUT, int(args.get("timeout_sec") or DEFAULT_TIMEOUT)))
     max_iter = max(1, min(10, int(args.get("max_iterations") or DEFAULT_MAX_ITER)))
     session_id = args.get("session_id")
+    on_compaction = args.get("on_compaction") or "reinject"
+    if on_compaction not in ("reinject", "discard"):
+        on_compaction = "reinject"
 
     if not os.path.isabs(cwd):
         return f"STATUS: error\ncwd must be an absolute path, got: {cwd}"
@@ -946,6 +973,7 @@ def run_qwen(args):
         "cum": cum_zero(),
         "task": task,
         "verify": verify,
+        "on_compaction": on_compaction,
         "max_iter": max_iter,
         "session_hint": session_id,
     }
@@ -995,14 +1023,20 @@ def run_qwen(args):
                     f"instead of editing it."
                 )
                 if was_compacted_since_ack(session_id):
-                    log(f"session {session_id} was compacted -- re-injecting task context")
                     ack_compaction(session_id)
-                    ctx["reinjections"] = ctx.get("reinjections", 0) + 1
                     send_suffix = True
+                    if on_compaction == "discard":
+                        log(f"session {session_id} compacted -- discarding, restarting cold")
+                        ctx["discards"] = ctx.get("discards", 0) + 1
+                        session_id = None
+                    else:
+                        log(f"session {session_id} compacted -- re-injecting task context")
+                        ctx["reinjects"] = ctx.get("reinjects", 0) + 1
                     prompt += (
                         f"\n\nYour conversation history was summarised (compacted), so "
-                        f"you may have lost the original instructions. Work from what "
-                        f"follows, do not reconstruct it.\n\nOriginal task:\n{task}"
+                        f"you may have lost the original instructions and any summary of "
+                        f"your earlier work may be inaccurate. Re-read the files; do not "
+                        f"reconstruct it.\n\nOriginal task:\n{task}"
                     )
                 continue
             return render(
@@ -1044,10 +1078,14 @@ def run_qwen(args):
             )
 
         if attempt < max_iter:
-            prompt, reinjected = retry_prompt(session_id, task, verify, v_out)
-            if reinjected:
-                ctx["reinjections"] = ctx.get("reinjections", 0) + 1
-                send_suffix = True
+            prompt, action = retry_prompt(session_id, task, verify, v_out, on_compaction)
+            if action != "none":
+                ctx[action + "s"] = ctx.get(action + "s", 0) + 1
+                send_suffix = True  # a restored/cold session needs the handoff format
+                if action == "discard":
+                    # Dropping the id is what actually discards it: the next invoke runs
+                    # without -r, so nothing of the compacted history carries over.
+                    session_id = None
             continue
 
         return render(
@@ -1064,17 +1102,30 @@ def run_qwen(args):
     return render("verify_failed", session_id, trail, result_text, denials, max_iter, ctx)
 
 
-def retry_prompt(session_id, task, verify, v_out):
+def retry_prompt(session_id, task, verify, v_out, on_compaction="reinject"):
     """
-    The prompt for attempt N+1, which resumes the SAME session. Returns (prompt, reinjected).
+    The prompt for attempt N+1. Returns (prompt, action) where action is one of
+    "none" | "reinject" | "discard".
 
-    The session already holds the task, the handoff instructions and (via QWEN.md) the
-    rules -- so re-sending them makes Qwen hold two copies of everything and grows the
-    context that caused the compaction in the first place. Send only the delta.
+    Normally the session is intact and already holds the task, the handoff instructions
+    and (via QWEN.md) the rules -- so re-sending them makes Qwen hold two copies of
+    everything and grows the context that caused the compaction. Send only the delta.
 
-    Unless the session was compacted since we last handled it, in which case that history
-    is gone and the task must be restored. `ack_compaction` makes this fire exactly once
-    per compaction: compacted once then resumed twice re-injects on the first resume only.
+    If it was compacted since we last handled it, the caller's policy decides:
+
+      reinject  keep the warm session and restore the task into it. Cheap, keeps the
+                files it has already read -- but the compaction SUMMARY STAYS IN THE
+                HISTORY. That summary is exactly what has been observed to fabricate
+                ("claimed to have read files it never opened"), so this places correct
+                context alongside possibly-false context and hopes the former wins.
+
+      discard   abandon the session and start cold with the full task. Costs a fresh
+                ~21.6k preamble and loses everything it learned -- but it is the only
+                option that removes the corrupted summary, and it re-reads QWEN.md,
+                which is what makes the rules bind.
+
+    Either way `ack_compaction` fires once per compaction, so compacted-once-then-
+    resumed-twice acts on the first resume only.
     """
     failure = (
         f"The verification command failed. This is the real output:\n\n"
@@ -1082,17 +1133,28 @@ def retry_prompt(session_id, task, verify, v_out):
         f"Fix the code so this command passes."
     )
     if not was_compacted_since_ack(session_id):
-        return failure, False
+        return failure, "none"
+
+    ack_compaction(session_id)
+
+    if on_compaction == "discard":
+        log(f"session {session_id} was compacted -- discarding it, restarting cold")
+        return (
+            f"A previous attempt at this task was made in a session that has been "
+            f"discarded, so you are starting fresh. Work already on disk may be partial "
+            f"or wrong -- read the current state rather than assuming.\n\n"
+            f"{failure}\n\nVerify command: {verify}\n\nTask:\n{task}"
+        ), "discard"
 
     log(f"session {session_id} was compacted -- re-injecting task context")
-    ack_compaction(session_id)
     return (
         f"{failure}\n\n"
         f"Your conversation history was summarised (compacted), so you may have lost the "
-        f"original instructions. Do not reconstruct what you think you did -- work from "
+        f"original instructions, and any summary of your earlier work may be inaccurate. "
+        f"Do not reconstruct what you think you did -- re-read the files and work from "
         f"what follows.\n\n"
         f"Verify command: {verify}\n\nOriginal task:\n{task}"
-    ), True
+    ), "reinject"
 
 
 def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_verify=None):
@@ -1200,13 +1262,23 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if st.get("api_errors"):
         lines.append(f"API ERRORS: {st['api_errors']} request(s) errored during this run.")
 
-    if ctx.get("reinjections"):
-        lines.append(
-            f"COMPACTED: this session was compacted mid-run "
-            f"({ctx['reinjections']}x) and the task was re-injected. Compaction is lossy "
-            f"-- treat any claim about work done BEFORE it as unverified, and check "
-            f"CHANGED rather than the narrative."
-        )
+    if ctx.get("reinjects") or ctx.get("discards"):
+        if ctx.get("discards"):
+            lines.append(
+                f"COMPACTED: this session was compacted mid-run and DISCARDED "
+                f"({ctx['discards']}x); work restarted cold against the same tree. The "
+                f"corrupted summary is gone, but so is everything it had learned -- and "
+                f"the files on disk are from the abandoned attempt. Check CHANGED."
+            )
+        else:
+            lines.append(
+                f"COMPACTED: this session was compacted mid-run ({ctx['reinjects']}x) "
+                f"and the task was re-injected into the WARM session. The compaction "
+                f"summary is still in its history and that summary is exactly what has "
+                f"been observed to fabricate -- treat any claim about work done before "
+                f"the compaction as unverified, and check CHANGED, not the narrative. "
+                f"Re-delegate with on_compaction='discard' if you need a clean slate."
+            )
 
     if status == "gate_suspect":
         lines.append(
@@ -1269,7 +1341,9 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         lines.append(
             f"CONTINUE: to follow up on THIS task with warm context, pass "
             f"session_id=\"{session_id}\" and the same cwd (sessions are cwd-scoped). "
-            f"Skips ~17.6k tokens of reload. Do NOT reuse it for an unrelated task -- a "
+            f"It keeps what Qwen already read, so it need not re-derive it -- but it does "
+            f"NOT reduce prompt tokens: resuming replays the history on top of the same "
+            f"preamble, so context grows. Do NOT reuse it for an unrelated task -- a "
             f"fresh session re-reads QWEN.md, which is what makes the rules bind, and "
             f"keeps one task's reasoning from contaminating the next."
         )
@@ -1313,7 +1387,9 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             "changed_files": changed,
             "resumed": bool(ctx.get("session_hint")),
             "compactions": compaction_state(session_id)[0],
-            "reinjections": ctx.get("reinjections", 0),
+            "reinjections": ctx.get("reinjects", 0),
+            "discards": ctx.get("discards", 0),
+            "on_compaction": ctx.get("on_compaction"),
             "blocked_shell": len(ctx.get("meta", {}).get("blocked") or []),
             "denials": len(denials or []),
         },

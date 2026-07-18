@@ -93,12 +93,12 @@ class ReinjectExactlyOnce(Base):
         """The exact scenario: compacted, resumed twice, no second compaction."""
         write_marker("s1", events=1, acked=0)
 
-        p1, r1 = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
-        self.assertTrue(r1, "first resume after compaction must re-inject")
+        p1, a1 = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
+        self.assertEqual(a1, "reinject", "first resume after compaction must re-inject")
         self.assertIn(TASK, p1)
 
-        p2, r2 = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
-        self.assertFalse(r2, "second resume must NOT re-inject again")
+        p2, a2 = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
+        self.assertEqual(a2, "none", "second resume must NOT re-inject again")
         self.assertNotIn(TASK, p2, "task must not be duplicated into the session")
 
     def test_ack_is_persisted_not_just_in_memory(self):
@@ -109,11 +109,11 @@ class ReinjectExactlyOnce(Base):
     def test_later_compaction_rearms(self):
         write_marker("s1", events=1, acked=0)
         server.retry_prompt("s1", TASK, VERIFY, V_OUT)          # acks 1
-        _, r = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
-        self.assertFalse(r)
+        _, a = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
+        self.assertEqual(a, "none")
         write_marker("s1", events=2, acked=1)                   # compacted again
-        p, r = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
-        self.assertTrue(r, "a NEW compaction must re-arm re-injection")
+        p, a = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
+        self.assertEqual(a, "reinject", "a NEW compaction must re-arm re-injection")
         self.assertIn(TASK, p)
 
     def test_events_are_not_deleted_by_acking(self):
@@ -126,14 +126,61 @@ class ReinjectExactlyOnce(Base):
         write_marker("s1", events=3, acked=0)
         server.retry_prompt("s1", TASK, VERIFY, V_OUT)
         self.assertEqual(read_marker("s1")["acked"], 3)
-        _, r = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
-        self.assertFalse(r)
+        _, a = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
+        self.assertEqual(a, "none")
+
+
+class PolicyIsTheCallersChoice(Base):
+    """The manager decides warm-vs-cold; the server must not decide for it."""
+
+    def test_default_is_reinject(self):
+        write_marker("s1", events=1, acked=0)
+        _, action = server.retry_prompt("s1", TASK, VERIFY, V_OUT)
+        self.assertEqual(action, "reinject")
+
+    def test_discard_is_honoured(self):
+        write_marker("s1", events=1, acked=0)
+        p, action = server.retry_prompt("s1", TASK, VERIFY, V_OUT,
+                                        on_compaction="discard")
+        self.assertEqual(action, "discard")
+        self.assertIn(TASK, p, "a cold session needs the whole task")
+
+    def test_discard_tells_qwen_it_is_starting_fresh(self):
+        """Otherwise it assumes continuity it does not have and trusts stale work."""
+        write_marker("s1", events=1, acked=0)
+        p, _ = server.retry_prompt("s1", TASK, VERIFY, V_OUT, on_compaction="discard")
+        self.assertIn("discarded", p.lower())
+        self.assertIn("partial", p.lower())
+
+    def test_policy_is_irrelevant_when_not_compacted(self):
+        for policy in ("reinject", "discard"):
+            p, action = server.retry_prompt("s-clean", TASK, VERIFY, V_OUT,
+                                            on_compaction=policy)
+            self.assertEqual(action, "none", f"{policy} must not act on an intact session")
+            self.assertNotIn(TASK, p)
+
+    def test_both_policies_ack_so_neither_repeats(self):
+        for policy in ("reinject", "discard"):
+            write_marker(f"s-{policy}", events=1, acked=0)
+            _, a1 = server.retry_prompt(f"s-{policy}", TASK, VERIFY, V_OUT,
+                                        on_compaction=policy)
+            _, a2 = server.retry_prompt(f"s-{policy}", TASK, VERIFY, V_OUT,
+                                        on_compaction=policy)
+            self.assertNotEqual(a1, "none")
+            self.assertEqual(a2, "none", f"{policy} must not act twice for one compaction")
+
+    def test_unknown_policy_falls_back_to_reinject(self):
+        """A typo must not silently become 'discard' and throw away a session."""
+        write_marker("s1", events=1, acked=0)
+        _, action = server.retry_prompt("s1", TASK, VERIFY, V_OUT,
+                                        on_compaction="nonsense")
+        self.assertEqual(action, "reinject")
 
 
 class DeltaOnly(Base):
     def test_intact_session_gets_only_the_failure(self):
-        p, r = server.retry_prompt("s-intact", TASK, VERIFY, V_OUT)
-        self.assertFalse(r)
+        p, a = server.retry_prompt("s-intact", TASK, VERIFY, V_OUT)
+        self.assertEqual(a, "none")
         self.assertIn(V_OUT, p, "the real error must still be fed back")
         self.assertNotIn(TASK, p, "task is already in the session")
         self.assertNotIn(VERIFY, p, "verify command is already in the session")
@@ -150,6 +197,52 @@ class DeltaOnly(Base):
         p, _ = server.retry_prompt("s3", TASK, VERIFY, V_OUT)
         self.assertIn("compact", p.lower())
         self.assertIn("do not reconstruct", p.lower())
+
+
+class DiscardActuallyDiscards(Base):
+    """
+    retry_prompt only says what to do. What makes a discard real is run_qwen dropping the
+    session id, so the next invocation runs without -r. Drive the real loop with a stubbed
+    Qwen and watch what session id attempt 2 receives.
+    """
+
+    def drive(self, policy):
+        seen = []
+        real_invoke, real_verify, real_git = (
+            server.invoke_qwen, server.run_verify, server.is_git_repo)
+
+        def fake_invoke(task, cwd, mode, timeout, session_id, **kw):
+            seen.append(session_id)
+            # attempt 1 establishes a session and then gets compacted
+            if len(seen) == 1:
+                write_marker("sess-A", events=1, acked=0)
+            return "done", [], "sess-A", None, {"peak": 1, "stats": {}, "blocked": []}
+
+        server.invoke_qwen = fake_invoke
+        # Output must DIFFER between preflight and post-run, or gate_suspect correctly
+        # bails before any retry happens and this test never exercises the branch.
+        server.run_verify = lambda v, c: (len(seen) >= 2, f"boom {len(seen)}")
+        server.is_git_repo = lambda c: False                       # skip git machinery
+        try:
+            server.run_qwen({"task": TASK, "cwd": "/tmp", "verify": VERIFY,
+                             "approval_mode": "auto-edit", "max_iterations": 3,
+                             "on_compaction": policy})
+        finally:
+            server.invoke_qwen, server.run_verify, server.is_git_repo = (
+                real_invoke, real_verify, real_git)
+        return seen
+
+    def test_discard_clears_the_session_id(self):
+        seen = self.drive("discard")
+        self.assertGreaterEqual(len(seen), 2, "should have retried")
+        self.assertIsNone(seen[1],
+                          "attempt 2 must start cold -- a retained id means -r is still "
+                          "passed and the compacted history carries over")
+
+    def test_reinject_keeps_the_session_id(self):
+        seen = self.drive("reinject")
+        self.assertGreaterEqual(len(seen), 2)
+        self.assertEqual(seen[1], "sess-A", "reinject must stay in the warm session")
 
 
 class HookContract(Base):

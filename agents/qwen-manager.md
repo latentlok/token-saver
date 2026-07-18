@@ -322,6 +322,27 @@ Never trust `STATUS: success` alone. Run the gate yourself. Read the diff.
 - One writer per worktree.
 - Never delegate a task you cannot verify by running something.
 
+### Compaction is your call: `on_compaction`
+
+If Qwen's session is compacted mid-run its history is summarised away — and that summary
+is the documented source of fabrication (after one, it claimed to have read 13 files it
+never opened). The server detects this deterministically and asks you what to do:
+
+- **`reinject`** (default) — keep the warm session, restore the task into it. Cheap, and
+  it keeps the files it already read. **But the corrupted summary stays in its history.**
+  Re-injecting puts good context *next to* possibly-false context; it does not remove it.
+- **`discard`** — abandon the session, restart cold against the same working tree. The
+  only option that actually removes the bad summary, and the fresh session re-reads
+  QWEN.md so the rules re-bind. Costs a ~21.6k preamble and everything it had learned.
+
+**Choose `discard` when correctness outweighs latency** — long multi-file work, anything
+where a false "I already did that" is expensive, or when a compacted run has reported
+something you could not verify. Worker tokens are free; a cold restart costs latency only.
+Stay with `reinject` for short mechanical tasks where re-reading is the main loss.
+
+Either way, when a run reports `COMPACTED:` treat every claim about work done *before*
+the compaction as unverified and check `CHANGED`, not the narrative.
+
 ## Report back
 
 Your caller sees only your final message, and relays it to someone who was not watching.

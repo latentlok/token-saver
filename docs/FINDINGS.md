@@ -491,7 +491,7 @@ measured leverage is a slight under-count.
   tokens in, 12,831 est. tokens returned). Per-run range 151.8x–687.6x. A floor, not a
   figure — crashed runs leave no record.
 - **Baseline context per delegation ≈ 19k tokens** before any task work (QWEN.md + system
-  + tool preamble) — independently confirms the ~17.6k session-reload figure.
+  + tool preamble). Measured floor with `--safe-mode` (no MCP, no context files): 17,604.
 
 ## Sessions
 
