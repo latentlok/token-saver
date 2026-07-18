@@ -81,8 +81,19 @@ mkdir -p "$AGENTS_DIR"
 ln -sfn "$REPO/agents/qwen-manager.md" "$AGENTS_DIR/qwen-manager.md"
 say "-> $AGENTS_DIR/qwen-manager.md (symlink; git pull updates it in place)"
 
+# ---------- 4. shared skills (preloaded into the manager) ----------
+echo "installing skills"
+SKILLS_DIR="$CLAUDE_DIR/skills"
+mkdir -p "$SKILLS_DIR"
+for skill in "$REPO"/skills/*/; do
+    [ -d "$skill" ] || continue
+    name="$(basename "$skill")"
+    ln -sfn "${skill%/}" "$SKILLS_DIR/$name"
+    say "-> $SKILLS_DIR/$name (symlink; preloaded via the manager's skills: frontmatter)"
+done
+
 echo
-echo "installed. RESTART Claude Code to load the server and the agent."
+echo "installed. RESTART Claude Code to load the server, agent, and skills."
 echo
 echo "Not done for you (machine-specific, and one of them is a secret):"
 echo "  - Qwen's model provider + API key -> ~/.qwen/settings.json"
