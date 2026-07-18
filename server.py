@@ -134,9 +134,22 @@ TOOL = {
                     "Only with approval_mode='scoped'. Extra regex patterns of shell "
                     "commands to allow, beyond the built-in read-only/test set and the "
                     "exact `verify` command (which are always allowed). E.g. "
-                    "['^make build$', '^tsc --noEmit$']. Keep it tight -- these run at "
-                    "user privilege. Compound/redirect/network commands are rejected "
+                    "['^make build$', '^tsc --noEmit$']. This is how you APPROVE a command "
+                    "a prior scoped run surfaced as SHELL APPROVAL NEEDED: judge the "
+                    "command alone (is it safe in this repo?), and if yes add its pattern "
+                    "here and re-delegate with the same session_id. Keep it tight -- these "
+                    "run at user privilege. Compound/redirect/network commands are rejected "
                     "regardless."
+                ),
+            },
+            "shell_feedback": {
+                "type": "string",
+                "description": (
+                    "Only with approval_mode='scoped'. When you DENY a command a prior run "
+                    "requested, put the reason here (e.g. \"denied `rm -rf ~/data`: deletes "
+                    "outside the repo; clean only ./build\"). It is shown to Qwen up front on "
+                    "the re-delegation so it understands the constraint and stops retrying. "
+                    "A denial without a reason just makes Qwen guess -- always say why."
                 ),
             },
             "approval_mode": {
@@ -709,7 +722,21 @@ def run_qwen(args):
         preflight, preflight_out = run_verify(verify, cwd)
         log(f"preflight verify: {'pass' if preflight else 'fail'}")
 
+    # The manager's approval decisions from a prior round. Prepended so Qwen sees, up
+    # front, which of its earlier requests were allowed/denied and WHY -- so it does not
+    # blindly retry a denied command and knows the constraint to work within.
+    feedback = (args.get("shell_feedback") or "").strip()
     prompt = task
+    if feedback:
+        prompt = (
+            "APPROVAL RESULT for shell commands you requested earlier "
+            "(from the manager reviewing them):\n"
+            f"{feedback}\n"
+            "Respect these: do NOT retry a denied command; use the allowed ones or an "
+            "alternative. Now continue the task below.\n\n---\n\n"
+            + task
+        )
+
     trail = []
     result_text = ""
     denials = []
@@ -864,12 +891,16 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     blocked = ctx.get("meta", {}).get("blocked") or []
     if blocked:
         lines.append(
-            "ELICITATION: Qwen tried these out-of-scope actions; the scoped-shell guard "
-            "blocked them:\n"
+            "SHELL APPROVAL NEEDED: Qwen requested these; the scoped guard auto-blocked "
+            "them (reason in parens). YOU are the judge -- decide each on the command "
+            "alone (is it safe in this repo?), not on the task:\n"
             + "\n".join(f"  - {b}" for b in blocked[:12])
             + ("\n  ..." if len(blocked) > 12 else "")
-            + "\nIf one is legitimate and needed, re-delegate with it in `shell_allow` "
-            "(or approval_mode='yolo' for full shell). If not, it was correctly blocked."
+            + "\nAPPROVE a command: add its pattern to `shell_allow` and re-delegate with "
+            "the same session_id.\nDENY a command: put the reason in `shell_feedback` so "
+            "Qwen learns the constraint instead of retrying.\n"
+            "(If Qwen still reached success without them, no action needed -- it found "
+            "another way.)"
         )
 
     st = ctx.get("meta", {}).get("stats") or {}

@@ -205,6 +205,24 @@ strategy, not task size. You cannot fill 120k with a well-posed task.
 → For any run that might compact, **put critical rules in the task, not just QWEN.md**.
 → Statelessness avoids this entirely: baseline ~22.4k, normal tasks peak 25–45k.
 
+## Live model-approval is impossible; manager-decides via return-and-resume is not
+
+MCP elicitation (a server asking the client mid-tool-call) routes to the **human**, not
+the model -- confirmed in the Claude Code docs. A blocked subagent cannot answer
+mid-call either. So "the Claude manager approves a shell command live, mid-run" has no
+wire on this platform. You can have at most two of {live, Claude-decides, isolated}.
+
+But the *outcome* -- the manager judging a command it did not pre-authorise -- needs no
+live channel. The scoped guard blocks a novel command and surfaces it as `SHELL APPROVAL
+NEEDED: <command> (reason)`; the manager judges it **on the command alone** and either
+approves (adds the pattern to `shell_allow`, re-delegates warm) or denies (puts the
+reason in `shell_feedback`, which Qwen is shown up front so it stops retrying). Same
+judge, same command-only isolation, ~one extra round-trip of free Qwen tokens. Judging
+the command in isolation is deliberate: weighed against the task, its pressure
+rationalises danger ("I guess it needs to delete that"); alone, the question is just "is
+this safe?". Validated end-to-end: a denied `du -sh .` came back with its reason, and on
+re-delegation Qwen correctly reported the constraint instead of retrying.
+
 ## Scoped shell: gate every tool, not just the shell
 
 Goal: let Qwen run its own tests (useful) without full `yolo` (dangerous). Findings

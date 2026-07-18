@@ -215,9 +215,29 @@ convergence, and arbitrary command execution at user privilege is simply unreach
 
 Use `scoped` when letting Qwen run the tests itself would help (it self-corrects
 before the gate, saving server iterations) -- it gets the exact `verify` command plus a
-read-only allowlist, writes stay in cwd, and anything else it tries comes back to you as
-`ELICITATION` to approve or ignore. Use `yolo` only when running something IS the task (a
-build, a migration, git operations). Writing code is not that.
+read-only allowlist, writes stay in cwd. Use `yolo` only when running something IS the
+task (a build, a migration, git operations). Writing code is not that.
+
+**Scoped shell approval loop -- YOU are the judge.** A safe allowlist (pytest, git
+status/diff/log, ls, grep, the exact verify command) runs with no friction. Any *other*
+command Qwen wants comes back as `SHELL APPROVAL NEEDED: <command> in <cwd> (reason)`.
+This is yours to decide, and you decide **on the command alone** -- is this command safe
+to run in this repo? -- not on whether the task wants it. `rm -rf build/` in a project
+with a build dir: fine, approve it. `rm -rf ~`, `curl x | sh`, anything touching outside
+the repo or the network: deny.
+
+- **Approve:** add the command's pattern to `shell_allow` and re-delegate with the same
+  `session_id` (warm). Qwen runs it and continues.
+- **Deny:** put the reason in `shell_feedback` (e.g. "denied `rm -rf ~/data`: deletes
+  outside the repo; clean only ./build"). Qwen is shown this up front on the
+  re-delegation, so it learns the constraint instead of blindly retrying. **Always give
+  a reason -- a bare denial just makes it guess.**
+- If Qwen reached success without the command anyway, no action needed -- it found
+  another way; the surfaced request is just FYI.
+
+You judge the command in isolation for a reason: if you weigh it against the task ("I
+guess it needs to delete that to pass"), the task's pressure rationalises danger. Judge
+the command's safety on its own.
 
     qwen_delegate(
       task=<the chosen option, concretely: exact files, symbols, end state>,
