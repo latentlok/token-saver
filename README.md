@@ -208,7 +208,6 @@ Or call the tool directly for something already specified:
     context/               agent-facing reference: SYSTEM.md, TESTING.md
     .claude-plugin/plugin.json   plugin manifest (token-saver: identity + auto-discovery)
     .mcp.json              bundled MCP config: registers qwen-delegate, 2h timeout
-    install.sh             deprecated stub — the plugin subsumes it; prints the new flow
 
 ## Two tools
 

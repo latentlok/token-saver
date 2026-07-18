@@ -299,7 +299,6 @@ docs/PRINCIPLES.md       the structural rules, abstracted from the measurements
 docs/FINDINGS.md         the measurements every design decision rests on
 .claude-plugin/plugin.json  plugin manifest — identity + agent/skill/command auto-discovery
 .mcp.json                bundled MCP config — registers qwen-delegate, ${CLAUDE_PLUGIN_ROOT}, 2h timeout
-install.sh               deprecated stub — the plugin subsumes it (prints the new flow)
 ```
 
 Written at runtime, not in the repo:
