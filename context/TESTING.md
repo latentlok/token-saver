@@ -83,8 +83,11 @@ produce confusing results.
 
 ## 4. Test plan
 
-Work in a scratch git repo (`git init`, commit a baseline) — never a real project.
-Run `./init-project.sh <repo>` first so `QWEN.md` exists.
+**Work in `~/scratch/<experiment-name>/`** — never in `~/projects/`, which is for real
+work only. Create a throwaway git repo there (`git init`, commit a baseline), then run
+`./init-project.sh ~/scratch/<name>` so `QWEN.md` exists. Everything under `~/scratch/`
+is disposable; delete it when done. If an experiment produces a finding worth keeping,
+write the finding into `docs/FINDINGS.md` and let the artifact go.
 
 ### A. Tools load
 Confirm `qwen_delegate` and `qwen_query` are available, and `/delegate` is invocable.
