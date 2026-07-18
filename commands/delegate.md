@@ -1,5 +1,5 @@
 ---
-description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove: bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase ("how does X work", "where is Y handled", "is there already a Z") — those are answered read-only and cheaply. Routes builds to the qwen-manager subagent in the background; answers questions directly.
+description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase (how does X work, where is Y handled, is there already a Z) — those are answered read-only and cheaply. Routes builds to the qwen-manager subagent in the background; answers questions directly.
 argument-hint: <a task or question about code; name the repo if it isn't obvious>
 ---
 

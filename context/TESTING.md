@@ -17,12 +17,12 @@ comes from — Qwen burns millions of tokens, you ingest a verdict.
 | thing | where | status |
 |---|---|---|
 | repo | `~/projects/qwen-delegate` | clean, remote `github.com/latentlok/token-saver` (private) |
-| MCP server | `server.py`, registered as `qwen-delegate` | stdio, 2h wall-clock timeout |
-| subagent | `~/.claude/agents/qwen-manager.md` → repo | symlinked |
-| skill | `~/.claude/skills/lld-principles` → repo | symlinked, preloaded via manager frontmatter |
-| command | `~/.claude/commands/delegate.md` → repo | symlinked, invoke as `/delegate` |
+| MCP server | `server.py` via bundled `.mcp.json` | stdio; `"timeout": 7200000` (2h) |
+| subagent | `agents/qwen-manager.md` | plugin-bundled, auto-discovered |
+| skill | `skills/lld-principles` | plugin-bundled, preloaded via manager frontmatter |
+| command | `commands/delegate.md` | plugin-bundled, invoke as `/delegate` |
 | worker model | `qwen3.6:27b-agent` on Ollama over Tailscale | configured in `~/.qwen/settings.json` (has the API key — never in the repo) |
-| idle timeout | `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=5400000` | 90 min (the real ceiling; server blocks silently) |
+| idle timeout | none needed on 2.1.203+ | the `.mcp.json` `timeout` floors idle to 2h; pre-2.1.203 fallback is `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` |
 | Firecrawl | `localhost:3002` (podman) | optional, gives Qwen web access |
 | run log | `<cwd>/.qwen-delegate/runs.jsonl` | per-project, self-ignoring, one record per call |
 | project index | `~/.qwen-delegate/projects.jsonl` | paths only; `QWEN_DELEGATE_REGISTRY` overrides |

@@ -89,12 +89,34 @@ assume) and [TESTING.md](context/TESTING.md) (state + step-by-step test plan).
 
 ## Install
 
-    git clone <this repo> ~/projects/qwen-delegate
-    cd ~/projects/qwen-delegate && ./install.sh
-    # restart Claude Code
+This is a **native Claude Code plugin** — no installer, no symlinks, no `claude mcp add`.
+The manifest (`.claude-plugin/plugin.json`) plus a bundled `.mcp.json` register the
+`qwen-delegate` MCP server and surface the agent, skill, and command by auto-discovery.
 
-Idempotent — re-run after any `git pull`. The agent is symlinked, so pulls take effect
-without reinstalling.
+**Local / dev** (this repo, live-editable):
+
+    git clone <this repo> ~/projects/qwen-delegate
+    claude --plugin-dir ~/projects/qwen-delegate
+
+Edit a component and pick it up in the same session with `/reload-plugins`. A `git pull`
+takes effect on the next session (or `/reload-plugins`) — nothing to reinstall.
+
+**Distribution** (an installed copy, from a marketplace):
+
+    claude plugin install token-saver@<marketplace>
+
+Verify the components loaded without starting a session:
+
+    claude --plugin-dir ~/projects/qwen-delegate plugin details token-saver
+    # -> MCP servers (1) qwen-delegate · Agents (1) qwen-manager
+    #    Skills (2) delegate, lld-principles
+
+The `.mcp.json` sets a per-server `"timeout": 7200000` (2h). On Claude Code **2.1.203+**
+that one field caps the wall clock *and* floors the stdio idle timeout to 2h, so no
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` env var is needed. On older versions, add it as a
+fallback (`~/.claude/settings.json` → `"env": { "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "7200000" }`),
+because the server blocks silently in `subprocess.run` for a whole delegation and would
+otherwise idle out at 30 min.
 
 ### What it does NOT install
 
@@ -186,8 +208,9 @@ Or call the tool directly for something already specified:
     docs/FINDINGS.md       the measurements every design decision rests on
     commands/delegate.md   the front door — /delegate <task or question>
     context/               agent-facing reference: SYSTEM.md, TESTING.md
-    .claude-plugin/plugin.json   plugin manifest (token-saver)
-    install.sh             idempotent installer (once per machine)
+    .claude-plugin/plugin.json   plugin manifest (token-saver: identity + auto-discovery)
+    .mcp.json              bundled MCP config: registers qwen-delegate, 2h timeout
+    install.sh             deprecated stub — the plugin subsumes it; prints the new flow
     init-project.sh        bootstrap a project (once per project, any language)
 
 ## Two tools

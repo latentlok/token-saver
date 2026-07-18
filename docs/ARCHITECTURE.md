@@ -298,7 +298,9 @@ templates/QWEN.md        per-project worker rules (copied + edited per project)
 docs/ARCHITECTURE.md     this file — how it works
 docs/PRINCIPLES.md       the structural rules, abstracted from the measurements
 docs/FINDINGS.md         the measurements every design decision rests on
-install.sh               per-machine setup: register MCP, set timeouts, symlink agent
+.claude-plugin/plugin.json  plugin manifest — identity + agent/skill/command auto-discovery
+.mcp.json                bundled MCP config — registers qwen-delegate, ${CLAUDE_PLUGIN_ROOT}, 2h timeout
+install.sh               deprecated stub — the plugin subsumes it (prints the new flow)
 init-project.sh          per-project setup: detect test cmd, write QWEN.md, require git
 ```
 
@@ -312,13 +314,21 @@ Written at runtime, not in the repo:
 ## 10. Lifecycle summary
 
 ```
-once per machine:   ./install.sh            → registers the MCP server + agent
-once per project:   ./init-project.sh <dir> → writes QWEN.md, requires git
+load the plugin:    claude --plugin-dir <repo>   → MCP server + agent + skill + command
+                    (or `claude plugin install token-saver@<marketplace>` for a copy)
+once per project:   ./init-project.sh <dir> → writes QWEN.md, requires git (optional;
+                    a first delegation self-configures)
 per task:           ask Claude to hand a goal to the qwen-manager subagent
                     (or call qwen_delegate directly for already-specified work)
 ```
 
-Machine config lives in `~/.claude.json` (the MCP registration + 2h wall-clock timeout)
-and `~/.claude/settings.json` (the 90-min stdio idle timeout — the real ceiling, since
-the server blocks silently in `subprocess.run` for the whole delegation and looks idle).
-Qwen's own config and API key live in `~/.qwen/settings.json` and never enter this repo.
+The plugin carries its own config: the manifest auto-discovers the agent/skill/command,
+and the bundled `.mcp.json` registers the `qwen-delegate` MCP server as
+`python3 ${CLAUDE_PLUGIN_ROOT}/server.py` with a per-server `"timeout": 7200000`. On
+Claude Code 2.1.203+ that single field is the 2h wall-clock cap *and* the floor for the
+stdio idle timeout (`max(30-min default, 7200000)` = 2h), so the old
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` env var is no longer needed — the server blocks
+silently in `subprocess.run` for a whole delegation and would otherwise look idle. On
+older versions, set that env var in `~/.claude/settings.json` as a fallback. Nothing is
+written into `~/.claude.json` or `~/.claude/settings.json` by the plugin. Qwen's own
+config and API key live in `~/.qwen/settings.json` and never enter this repo.
