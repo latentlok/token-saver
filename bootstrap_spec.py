@@ -12,8 +12,8 @@ would hurt most if broken:
 
   1. render never emits a placeholder. Detected command -> real command; nothing detected
      -> an INSTRUCTION not to guess, never a blank.
-  2. detection is the single source of truth (init-project.sh calls it), so its results
-     must match the stack conventions the script used to hard-code in bash.
+  2. detection is the single source of truth in Python (no bash copy to drift), so its
+     results must match the stack conventions for each ecosystem.
   3. the write is atomic and backs up a legacy file -- a torn or silently-lost QWEN.md is
      worse than none.
   4. failure is best-effort: a bootstrap that raises would kill the delegation it is
@@ -174,29 +174,6 @@ class Notice(unittest.TestCase):
     def test_notice_offers_the_claude_md_block(self):
         note = server.bootstrap_notice("npm test", "/r/QWEN.md")
         self.assertIn("CLAUDE.md", note)
-
-
-class InitScriptUsesThePythonDetector(unittest.TestCase):
-    """The script must not carry a second copy of detection that can drift from Python."""
-
-    def test_script_calls_server_detect(self):
-        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "init-project.sh")).read()
-        self.assertIn("server.detect_test_cmd", src,
-                      "init-project.sh must delegate detection to the Python source")
-
-    def test_script_and_python_agree_on_a_real_repo(self):
-        d = tempfile.mkdtemp(prefix="boot-agree-")
-        with open(os.path.join(d, "Cargo.toml"), "w") as f:
-            f.write("[package]\n")
-        py = server.detect_test_cmd(d)
-        got = subprocess.run(
-            ["python3", "-c",
-             f"import sys; sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r}); "
-             f"import server; print(server.detect_test_cmd({d!r}))"],
-            capture_output=True, text=True).stdout.strip()
-        self.assertEqual(py, got)
-        self.assertEqual(py, "cargo test")
 
 
 if __name__ == "__main__":

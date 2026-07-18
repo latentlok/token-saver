@@ -75,7 +75,7 @@ PROJECT_CONFIG = ".qwen-delegate.json"
 WORKER_RULES_FILE = "QWEN.md"
 # Placeholders a human was supposed to replace. A QWEN.md still carrying one is worse than
 # no QWEN.md: the worker reads the line as an instruction and runs (or invents) whatever
-# it names. init-project.sh no longer writes these; older ones are still out there.
+# it names. The server never writes these; older hand-made ones are still out there.
 RULES_PLACEHOLDERS = ("<EDIT ME", "<-- EDIT")
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -351,8 +351,18 @@ def worker_rules_status(cwd):
     return ("ok", p)
 
 
-def _init_script():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "init-project.sh")
+def bootstrap_failed_refusal(cwd, reason):
+    """The rules file could not be written (IO error, template drift). Refuse rather than
+    run unconfigured, and tell the caller how to fix it by hand -- there is no setup
+    script to fall back to."""
+    return (
+        "STATUS: error\n"
+        f"Could not create {WORKER_RULES_FILE} in {cwd} automatically.\n\n"
+        f"{reason} Without it the worker's rules are not loaded and it degrades silently, "
+        f"so the run is refused. Create {WORKER_RULES_FILE} at the repo root by hand (any "
+        f"content satisfies the check; copy templates/QWEN.md and set the test command), "
+        f"then delegate again."
+    )
 
 
 def unconfigured_reason(cwd, state, path):
@@ -403,9 +413,8 @@ def nongit_refusal(cwd):
 # adding the policy block stays consent-gated (offered in the result, applied only if the
 # user says yes).
 
-# Ordered detectors: (predicate(cwd) -> bool, command). First match wins. Kept in Python
-# so it is the SINGLE source of truth -- init-project.sh calls this, rather than carrying
-# a second copy in bash that drifts.
+# Ordered detectors, first match wins. Detection lives here in Python so there is one
+# source of truth and no bash copy to drift out of sync.
 def detect_test_cmd(cwd):
     j = lambda *p: os.path.join(cwd, *p)  # noqa: E731
     try:
@@ -525,8 +534,7 @@ def unconfigured_notice(cwd, state, path):
     return (
         f"SETUP: {unconfigured_reason(cwd, state, path)} Answers are read-only so nothing "
         f"can be damaged, but treat this one as an especially weak lead. A delegation here "
-        f"will create {WORKER_RULES_FILE} automatically; or run {_init_script()} {cwd} to "
-        f"set the test command up front."
+        f"will create {WORKER_RULES_FILE} automatically."
     )
 
 
@@ -1197,7 +1205,8 @@ def run_qwen(args):
             return nongit_refusal(cwd)
         cmd, path = bootstrap_worker_rules(cwd)
         if not path:
-            return unconfigured_refusal(cwd, rules_state, rules_path)
+            return bootstrap_failed_refusal(
+                cwd, unconfigured_reason(cwd, rules_state, rules_path))
         log(f"bootstrapped {WORKER_RULES_FILE} for {cwd} (test_cmd={cmd or 'none'})")
         bootstrap_note = bootstrap_notice(cmd, path)
 

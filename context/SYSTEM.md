@@ -48,7 +48,7 @@ reusable underneath it.
 | engine | `server.py` | MCP server: delegate/query, gate, git guards, run log. Zero deps. |
 | safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode |
 | log gate | `runlog_spec.py` | spec for the run log + token accounting |
-| setup gate | `setup_spec.py` | spec for the first-use entry path + `init-project.sh` |
+| setup gate | `setup_spec.py` | spec for the first-use entry path (self-configure / refuse) |
 | bootstrap gate | `bootstrap_spec.py` | spec for self-configuration (detection, rendering, atomic write) |
 | compaction gate | `compaction_spec.py` | spec for compaction detection + the resume branch |
 | head guard | `headguard_spec.py` | spec for detecting a worker commit hiding work from the guards |
@@ -64,9 +64,9 @@ Loaded as a **native Claude Code plugin** — `claude --plugin-dir <repo>` for d
 auto-discovers the agent/skill/command; `.mcp.json` registers the MCP server with a 2h
 timeout that also floors the idle timeout on 2.1.203+ (no env var). No installer, no
 symlinks, no `claude mcp add`. **Per-project setup is automatic** — the first
-`qwen_delegate` into a git repo self-configures. Running `./init-project.sh <repo>` is
-still *optional*: use it to set the test command up front, or to add the `CLAUDE.md`
-policy block (append-only, marker-guarded).
+`qwen_delegate` into a git repo self-configures (writes `QWEN.md`). Two optional follow-ups
+stay with you: set the test command if it wasn't detected, and add the `CLAUDE.md` policy
+block (paste `templates/CLAUDE-snippet.md`, marker-guarded, or ask Claude to append it).
 
 **First delegation into a git repo self-configures instead of failing.** With no `QWEN.md`
 the worker's standing rules are not loaded and it degrades *silently* (edits protected

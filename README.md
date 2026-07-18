@@ -147,14 +147,11 @@ A **non-git** project is refused (`git init` first): there is no rollback withou
 it can't self-configure safely. `qwen_query` never writes as a side effect of a read — it
 warns and proceeds.
 
-Optional, if you'd rather configure up front:
-
-    ./init-project.sh /path/to/any/project [--test-cmd 'CMD'] [--claude-md]
-
-Use it to pin the test command (`--test-cmd ''` declares the project has none), or to add
-the delegation policy block to the project's **`CLAUDE.md`** (`--claude-md`) — append-only
-and marker-guarded, so it never clobbers or duplicates what's already there. It also
-registers the project in the global index.
+Two things stay in your hands, both optional. If the test command wasn't detected, set the
+`- Run tests with:` line in the generated `QWEN.md`. And to make Claude reach for
+delegation automatically, add the delegation policy block to the project's **`CLAUDE.md`**
+— paste `templates/CLAUDE-snippet.md` (it's marker-guarded, so re-adding it never
+duplicates), or just ask Claude to add it. Neither is required to delegate.
 
 The project **must be a git repo**. There is no sandbox: git history is the rollback,
 the spec guard needs git to detect and revert edits, and the server refuses to run if a
@@ -200,7 +197,8 @@ Or call the tool directly for something already specified:
 
     server.py              the MCP server. stdio JSON-RPC, zero deps.
     runlog_spec.py         gate for the run log + token accounting
-    setup_spec.py          gate for the first-use preconditions + init-project.sh
+    setup_spec.py          gate for the first-use preconditions (self-configure / refuse)
+    bootstrap_spec.py      gate for self-configuration (detection, placeholder-free render)
     agents/qwen-manager.md the subagent: judgment, spec authoring, escalation policy
     templates/QWEN.md      per-project rules for the Qwen worker
     templates/CLAUDE-snippet.md  the delegation policy block for a project's CLAUDE.md
@@ -211,7 +209,6 @@ Or call the tool directly for something already specified:
     .claude-plugin/plugin.json   plugin manifest (token-saver: identity + auto-discovery)
     .mcp.json              bundled MCP config: registers qwen-delegate, 2h timeout
     install.sh             deprecated stub — the plugin subsumes it; prints the new flow
-    init-project.sh        bootstrap a project (once per project, any language)
 
 ## Two tools
 

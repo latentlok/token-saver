@@ -3,8 +3,12 @@ Paste this into your project's CLAUDE.md to make delegation the default for mech
 work. Without it, delegation depends on Claude happening to remember the plugin exists;
 with it, the policy is in context every session.
 
-`init-project.sh` can append it for you.
+Ask Claude to add it, or paste the block below yourself — everything between the
+begin / end markers, the markers included. The markers let a re-add detect the block
+and skip it, so it is never duplicated.
 -->
+
+<!-- qwen-delegate:begin (managed block; delete from begin to end to remove) -->
 
 ## Delegating mechanical work
 
@@ -39,3 +43,6 @@ spending your context. Treat its answers as leads to verify, not as truth.
 - A gate you have not tested is a hope. Break the thing it watches and confirm it fails
   before trusting a pass.
 - Prefer `auto-edit`. `scoped` grants a shell and is not a sandbox.
+
+<!-- qwen-delegate:end -->
+

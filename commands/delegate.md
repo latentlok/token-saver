@@ -67,7 +67,10 @@ summary of unverified work is the one failure this whole tool exists to prevent.
 
 **If a result carries a `SETUP:` line**, the project was just self-configured on its first
 delegation. Relay it and act on its two open questions: if it says the test command could
-not be detected, ask the user for it (and offer to set it, `init-project.sh <repo>
---test-cmd 'CMD'`); and offer to add the delegation policy block to their `CLAUDE.md`
-(`init-project.sh <repo> --claude-md`) so future mechanical work routes here automatically.
-Remind them the new `QWEN.md` is uncommitted.
+not be detected, ask the user for it and, once they answer, set it by editing the
+`- Run tests with:` line in the project's `QWEN.md`; and offer to add the delegation policy
+block to their `CLAUDE.md` so future mechanical work routes here automatically. If they say
+yes, append the block from the plugin's `templates/CLAUDE-snippet.md` to their `CLAUDE.md`
+yourself — **guard on the `qwen-delegate:begin` marker (and the `## Delegating mechanical
+work` heading) so a second run never duplicates it**, and never rewrite their existing
+content. Remind them the new `QWEN.md` is uncommitted.

@@ -235,9 +235,8 @@ Two invariants this code must not break:
 
 Logs are **per-project**, because the plugin is used in real projects and the numbers
 belong with the code they describe. `~/.qwen-delegate/projects.jsonl` is a **pointer index
-only** — paths, no metrics — written by `init-project.sh` at setup and by the server on
-first write, so an aggregator can find every project's log. Override its location with
-`QWEN_DELEGATE_REGISTRY`.
+only** — paths, no metrics — written by the server on first write, so an aggregator can
+find every project's log. Override its location with `QWEN_DELEGATE_REGISTRY`.
 
 The gate for all of this is `runlog_spec.py` (34 tests, mutation-tested: 13/13 caught).
 
@@ -280,8 +279,8 @@ Nothing in the mechanism is Python-specific:
   `.qwen-delegate.json` → `{"spec_globs": [...]}`.
 - The gate is *your* shell command — `pytest`, `npm test`, `cargo test`, `go test`, a
   script. The server only reads its exit code.
-- `init-project.sh` detects the test command for common ecosystems and writes `QWEN.md`;
-  it refuses non-git projects, because git is the only rollback.
+- The server detects the test command for common ecosystems and writes `QWEN.md` itself on
+  the first delegation; it refuses non-git projects, because git is the only rollback.
 
 Verified end-to-end on an unseen TypeScript project and an unseen Python library, neither
 read beforehand by Claude or Qwen.
@@ -301,7 +300,6 @@ docs/FINDINGS.md         the measurements every design decision rests on
 .claude-plugin/plugin.json  plugin manifest — identity + agent/skill/command auto-discovery
 .mcp.json                bundled MCP config — registers qwen-delegate, ${CLAUDE_PLUGIN_ROOT}, 2h timeout
 install.sh               deprecated stub — the plugin subsumes it (prints the new flow)
-init-project.sh          per-project setup: detect test cmd, write QWEN.md, require git
 ```
 
 Written at runtime, not in the repo:
@@ -316,8 +314,8 @@ Written at runtime, not in the repo:
 ```
 load the plugin:    claude --plugin-dir <repo>   → MCP server + agent + skill + command
                     (or `claude plugin install token-saver@<marketplace>` for a copy)
-once per project:   ./init-project.sh <dir> → writes QWEN.md, requires git (optional;
-                    a first delegation self-configures)
+once per project:   nothing — the first delegation into a git repo writes QWEN.md itself
+                    (non-git is refused: git is the only rollback)
 per task:           ask Claude to hand a goal to the qwen-manager subagent
                     (or call qwen_delegate directly for already-specified work)
 ```

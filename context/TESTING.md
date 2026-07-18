@@ -28,9 +28,9 @@ comes from — Qwen burns millions of tokens, you ingest a verdict.
 | project index | `~/.qwen-delegate/projects.jsonl` | paths only; `QWEN_DELEGATE_REGISTRY` overrides |
 | log gate | `runlog_spec.py` | 34 tests, mutation-tested 13/13 caught |
 
-Install/update is `./install.sh` (idempotent, symlinks everything). Per-project setup is
-`./init-project.sh <repo>` — it detects the test command, writes `QWEN.md`, and **refuses
-non-git projects** (git is the only rollback; there is no sandbox).
+Loaded as a native plugin (`claude --plugin-dir <repo>`). Per-project setup is automatic —
+the first `qwen_delegate` into a git repo writes `QWEN.md` itself; a **non-git project is
+refused** (git is the only rollback; there is no sandbox).
 
 ---
 
@@ -87,8 +87,8 @@ produce confusing results.
 ## 4. Test plan
 
 **Work in `~/scratch/<experiment-name>/`** — never in `~/projects/`, which is for real
-work only. Create a throwaway git repo there (`git init`, commit a baseline), then run
-`./init-project.sh ~/scratch/<name>` so `QWEN.md` exists. Everything under `~/scratch/`
+work only. Create a throwaway git repo there (`git init`, commit a baseline); the first
+delegation writes `QWEN.md` itself. Everything under `~/scratch/`
 is disposable; delete it when done. If an experiment produces a finding worth keeping,
 write the finding into `docs/FINDINGS.md` and let the artifact go.
 

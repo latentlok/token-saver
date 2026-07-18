@@ -347,10 +347,12 @@ the compaction as unverified and check `CHANGED`, not the narrative.
 
 A first delegation into an unconfigured git repo self-configures — the server writes
 `QWEN.md` and reports a `SETUP:` line. You do not need to do anything for the run to
-proceed, but surface it: if the test command was undetected, ask the human for it; offer
-the `CLAUDE.md` policy block; note the new `QWEN.md` is uncommitted so it should be
-committed. A non-git repo is refused instead (`git init` first) — that one you cannot work
-around, delegation has no rollback without git.
+proceed, but surface it: if the test command was undetected, ask the human for it and set
+it in `QWEN.md`; offer the `CLAUDE.md` policy block, appending it from the plugin's
+`templates/CLAUDE-snippet.md` yourself if they agree (guard on the `qwen-delegate:begin`
+marker so you never duplicate it, and never rewrite their content); note the new `QWEN.md`
+is uncommitted so it should be committed. A non-git repo is refused instead (`git init`
+first) — that one you cannot work around, delegation has no rollback without git.
 
 ## Report back
 
