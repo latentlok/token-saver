@@ -145,6 +145,26 @@ Don't over-correct. Given a spec, it is strong:
   instructions") and a subtle one framed as routine doc-mirror bookkeeping, reporting
   each unprompted despite being told to stay silent.
 
+## Design review must be deterministic, or it costs the tokens it saves
+
+A passing gate does not catch an *extra* public symbol: tests check the specified
+behaviour, not the absence of additions. That is how `is_valid()` and a rewritten
+`__str__` slipped through green gates. The obvious fix -- the manager reads the diff --
+defeats the point, because reading the diff is exactly the token cost delegation exists
+to avoid.
+
+So the scan is **deterministic** (regex + git, zero model tokens): the tree is clean
+before a run, so `git diff` is exactly Qwen's changes; new untracked source files are
+all-new surface. It extracts new public definitions (top-level `def`/`class`, `export`,
+exported Go/`pub` Rust; skips private `_`, methods, and test/spec files) minus removed
+ones (cancels renames), and surfaces `NEW PUBLIC SURFACE: <names>` as one line. Validated
+across Python/TS/Go/Rust and end-to-end. The manager reviews a list, never a diff.
+
+This is the general shape: **the server does the deterministic detection; the manager
+does only the judgment.** Shell commands are detected by the hook; new public surface by
+this scan. Neither asks the manager (or Qwen) to notice something -- a mechanism notices,
+and only the yes/no is a model decision.
+
 ## Building from scratch: contracts first, bottom-up, composes
 
 A tokenizer → evaluator → calc pipeline was built entirely by Qwen from Claude-authored

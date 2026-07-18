@@ -23,6 +23,7 @@ diagnostics go to stderr.
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -330,6 +331,82 @@ def snapshot(cwd):
     fact rewritten the file.
     """
     return {p: (code, file_sha(cwd, p)) for p, code in status_map(cwd).items()}
+
+
+# Public-definition patterns per language. Applied to a diff line's content. A new
+# top-level match = new public surface (a name others can depend on -- a contract).
+PUBLIC_DEF = [
+    (r"^def\s+([a-zA-Z]\w*)", False),              # python def (top-level only)
+    (r"^class\s+([A-Za-z]\w*)", False),            # python/other class
+    (r"^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z]\w*)", True),  # JS/TS function
+    (r"^export\s+(?:const|let|var|class|interface|type|enum)\s+([A-Za-z]\w*)", True),
+    (r"^func\s+\(?[^)]*\)?\s*([A-Z]\w*)", False),  # go exported func/method
+    (r"^type\s+([A-Z]\w*)", False),                # go exported type
+    (r"^pub\s+(?:fn|struct|enum|trait|type)\s+([A-Za-z]\w*)", True),  # rust
+    (r"^public\s+.*?\b([A-Z]\w*)\s*\(", True),     # java/c# method (rough)
+]
+_TESTY = ("_spec.", ".spec.", "_qwen.", "_test.", "test_", "/tests/", "/test/", "conftest")
+
+
+def _publics_in_line(content):
+    """Public symbol names defined on this (de-plussed) diff line, or []."""
+    indented = content[:1].isspace()
+    body = content.strip()
+    out = []
+    for pat, allow_indented in PUBLIC_DEF:
+        if indented and not allow_indented:
+            continue  # a top-level def that's now indented is a method -- skip
+        m = re.match(pat, body)
+        if m:
+            name = m.group(1)
+            if not name.startswith("_"):  # private by convention
+                out.append(name)
+    return out
+
+
+def new_public_symbols(cwd):
+    """
+    DETERMINISTIC (no model). New public symbols Qwen introduced vs the pre-run commit:
+    the design choices that become contracts. The tree was clean before the run, so
+    `git diff` is exactly Qwen's changes; untracked new source files are all-new surface.
+    Test/spec files are excluded (new symbols there are expected). Returns {file: [names]}.
+    """
+    out = {}
+    # 1. tracked changes: added publics minus removed publics (cancels renames/moves)
+    rc, changed = git(cwd, "diff", "--name-only")
+    for path in (changed.splitlines() if rc == 0 else []):
+        if not path.strip() or any(t in path for t in _TESTY):
+            continue
+        rc2, diff = git(cwd, "diff", "--", path)
+        if rc2 != 0:
+            continue
+        added, removed = [], []
+        for line in diff.splitlines():
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if line.startswith("+"):
+                added += _publics_in_line(line[1:])
+            elif line.startswith("-"):
+                removed += _publics_in_line(line[1:])
+        net = [s for s in dict.fromkeys(added) if added.count(s) > removed.count(s)]
+        if net:
+            out[path] = net
+    # 2. brand-new untracked source files: every public symbol is new
+    for path, code in status_map(cwd).items():
+        if code != "??" or any(t in path for t in _TESTY):
+            continue
+        full = os.path.join(cwd, path)
+        try:
+            if os.path.isfile(full) and os.path.getsize(full) < 2_000_000:
+                names = []
+                with open(full, errors="replace") as f:
+                    for line in f:
+                        names += _publics_in_line(line)
+                if names:
+                    out[path] = list(dict.fromkeys(names))
+        except Exception:
+            pass
+    return out
 
 
 def blast_radius(cwd, pre):
@@ -866,6 +943,22 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     if guard_on:
         lines.append(blast_radius(cwd, ctx["pre_status"]))
+        # Deterministic (no model tokens): new public symbols Qwen introduced -- the
+        # design choices that become contracts. The manager reviews this one line
+        # instead of reading the whole diff. A passing gate does NOT catch an EXTRA
+        # public symbol; this does.
+        pubs = new_public_symbols(cwd)
+        if pubs:
+            flat = ", ".join(
+                f"{n} ({f.split('/')[-1]})" for f, ns in pubs.items() for n in ns
+            )
+            lines.append(
+                "NEW PUBLIC SURFACE (deterministic scan -- review the list, not the "
+                f"diff): {flat}\n"
+                "These are new names others can depend on. Keep any you intended; if "
+                "one is unrequested scope, re-delegate a spec that forbids it. (Internal "
+                "names and test symbols are not listed.)"
+            )
 
     # Context used, so Claude can size the next delegation.
     peak = ctx.get("peak", 0)

@@ -259,6 +259,15 @@ tools the mode denies. It is not a defect. The gate decides.
 
 ### 5. Verify independently, then decide
 
+**Design review costs you nothing — read the one line, not the diff.** The verdict's
+`NEW PUBLIC SURFACE:` line is a deterministic scan (no tokens) of the new public symbols
+Qwen introduced — the design choices that become contracts. A passing gate does NOT
+catch an *extra* public symbol (tests check what you specified, not what Qwen added on
+the side; this is how `is_valid()` slipped in). So: glance at that list. Anything you
+intended, keep. Anything unrequested, re-delegate a spec that forbids it. Do NOT read
+the whole diff to find these — that would burn the tokens delegation exists to save.
+
+
 Never trust `STATUS: success` alone. Run the gate yourself. Read the diff.
 
 - `CHANGED:` is the filesystem's account — trust it over Qwen's prose. If they
