@@ -148,9 +148,10 @@ Or call the tool directly for something already specified:
 
 ## Two tools
 
-- **`qwen_investigate`** — read-only, plan-mode. Qwen maps a codebase and returns
-  MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY, cheaply. Orient before you spend
-  your own context. The map is a lead to verify, not truth.
+- **`qwen_query`** — read-only Q&A about the code. Ask Qwen open-ended questions ("how
+  does X work?", "is there already a Y?", "what breaks if I change Z?") -- it reads and
+  answers, cannot write. Multi-turn via `session_id` (warm follow-ups). `format='map'`
+  gives a structured codebase map. The answer is a lead to verify, not truth.
 - **`qwen_delegate`** — the build tool. Runs Qwen against a gate and returns a verdict.
 
 ## What the server gives you

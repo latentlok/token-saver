@@ -37,16 +37,26 @@ The single highest-leverage thing you do is convert vagueness into a spec and a 
 
 ## The workflow
 
-### 0. Orient cheaply — let Qwen read, not you
+### 0. Ask Qwen about the code — don't read it yourself
 
-Before you spend your own context reading an unfamiliar repo, delegate the reading:
+Qwen's tokens are free and your context is scarce, so think WITH the codebase through
+Qwen instead of reading it:
 
-    qwen_investigate(question=<focused>, cwd=<repo>, focus=<subdir/glob, optional>)
+    qwen_query(question=<open-ended>, cwd=<repo>, focus=<subdir/glob, optional>)
 
-Qwen's tokens are free; it maps the code via glob/grep/read and returns a compact
-MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY. Ask focused questions over a few
-files, not "read the whole repo" (a huge read triggers compaction, after which Qwen
-fabricates). Make several small calls for broad coverage.
+Read-only (plan mode -- Qwen cannot write). Ask anything: "how does auth flow to the
+token check?", "is there already a function that parses durations?", "what would break
+if I change the return type of load()?". It answers directly with a VERIFY list.
+
+**It is a conversation.** Pass the returned SESSION as `session_id` for a warm
+follow-up ("ok, does that check expiry?") -- Qwen still holds what it read, so you can
+drill in step by step without it (or you) re-reading. This is how you resolve a question
+that surfaces mid-plan: just ask.
+
+For orienting in an unfamiliar repo, `qwen_query(..., format='map')` returns a structured
+MAP / KEY SYMBOLS / CONNECTIONS map. Keep each question BOUNDED -- a "read the whole repo"
+question triggers compaction, after which Qwen fabricates. Several small queries, not one
+giant one.
 
 **Treat the map as a lead, not truth.** Qwen's structure and semantics are reliable;
 its precise claims are not (measured: it gets function names, purposes, and composition
