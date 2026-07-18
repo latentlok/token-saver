@@ -423,20 +423,54 @@ def spec_files(cwd):
     return sorted({p for p in out.splitlines() if p.strip()})
 
 
-def violated_specs(cwd):
-    """Tracked spec files with uncommitted modifications."""
+def violated_specs(cwd, base=None):
+    """
+    Tracked spec files that differ from `base` (default: HEAD, i.e. uncommitted edits).
+
+    Pass the PRE-RUN sha as base when checking after a run. Plain `git diff` compares the
+    working tree to HEAD, so a worker that edits a spec and then COMMITS it moves HEAD
+    with it and the diff comes back empty -- the guard sees nothing and the weakened spec
+    survives. Measured: same edit, uncommitted -> ['calc_spec.py'], committed -> [].
+    Diffing against the sha the run started from closes that.
+    """
     specs = spec_files(cwd)
     if not specs:
         return []
-    rc, out = git(cwd, "diff", "--name-only", "--", *specs)
+    args = ["diff", "--name-only"] + ([base] if base else []) + ["--"] + specs
+    rc, out = git(cwd, *args)
     if rc != 0 or not out:
         return []
     return [p for p in out.splitlines() if p.strip()]
 
 
-def revert_specs(cwd, paths):
+def revert_specs(cwd, paths, base=None):
+    """Restore spec files from `base` (default: HEAD).
+
+    Base matters for the same reason: if the worker committed its edit, HEAD now holds
+    the WEAKENED spec, so restoring from HEAD would faithfully restore the sabotage.
+    """
     if paths:
-        git(cwd, "checkout", "--", *paths)
+        git(cwd, "checkout", *([base] if base else []), "--", *paths)
+
+
+def committed_during_run(cwd, pre_sha):
+    """(moved, commit_count, files) for commits made since pre_sha. ([] if HEAD is same.)
+
+    The worker is told not to commit -- QWEN.md says so, and `scoped` hard-denies it --
+    but in `yolo` nothing enforces it, and it has been observed committing anyway. That
+    matters beyond tidiness: a commit hides the change from `git status`, so CHANGED
+    reports nothing while work really happened, and it invalidates the printed rollback.
+    """
+    if not pre_sha:
+        return False, 0, []
+    now = head_sha(cwd)
+    if not now or now == pre_sha:
+        return False, 0, []
+    rc, out = git(cwd, "rev-list", "--count", f"{pre_sha}..HEAD")
+    count = int(out) if rc == 0 and out.strip().isdigit() else 0
+    rc, out = git(cwd, "diff", "--name-only", pre_sha, "HEAD")
+    files = [p for p in (out or "").splitlines() if p.strip()] if rc == 0 else []
+    return True, count, files
 
 
 def head_sha(cwd):
@@ -1131,9 +1165,11 @@ def run_qwen(args):
             )
 
         # spec guard: Qwen must never edit Claude's protected spec files
-        cheated = violated_specs(cwd) if guard_on else []
+        # Diff against the sha the run STARTED from, not HEAD: if Qwen edited a spec and
+        # committed it, HEAD moved with it and a plain diff sees nothing.
+        cheated = violated_specs(cwd, base=pre_sha) if guard_on else []
         if cheated:
-            revert_specs(cwd, cheated)
+            revert_specs(cwd, cheated, base=pre_sha)
             names = ", ".join(cheated)
             trail.append(
                 f"attempt {attempt}: SPEC VIOLATION -- edited {names} (auto-reverted)"
@@ -1424,8 +1460,35 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             "its result. Tighten the gate to test the specific new behavior."
         )
 
+    # Qwen is told not to commit, but nothing enforces that in yolo -- and a commit hides
+    # its work from `git status`, so CHANGED goes quiet while the tree really moved.
+    moved, n_commits, committed_files = (
+        committed_during_run(cwd, ctx["pre_sha"]) if guard_on else (False, 0, []))
+    if moved:
+        shown = ", ".join(committed_files[:10]) + (" ..." if len(committed_files) > 10 else "")
+        lines.append(
+            f"COMMITTED: Qwen moved HEAD during this run ({n_commits} commit(s), "
+            f"{ctx['pre_sha']} -> {head_sha(cwd)}). It was told not to. Consequences you "
+            f"must account for:\n"
+            f"  - CHANGED above is INCOMPLETE: committed files no longer show in "
+            f"git status. Actually changed: {shown or '(none)'}\n"
+            f"  - the spec guard was still enforced (it diffs against the pre-run sha, "
+            f"not HEAD), but review those files yourself\n"
+            f"  - rollback needs a reset, not a checkout -- see ROLLBACK below"
+        )
+
     if guard_on and ctx["pre_sha"]:
-        if ctx["pre_clean"]:
+        if moved:
+            # `git checkout .` cannot undo a commit; advising it here would leave the
+            # commits in place and read as a successful rollback.
+            safety = ("safe -- tree was clean" if ctx["pre_clean"]
+                      else "CAUTION: tree was ALREADY dirty")
+            lines.append(
+                f"ROLLBACK: git reset --hard {ctx['pre_sha']} && git clean -fd   "
+                f"({safety} at {ctx['pre_sha']} before this run. A plain "
+                f"`git checkout .` will NOT undo the commit(s) above.)"
+            )
+        elif ctx["pre_clean"]:
             lines.append(
                 f"ROLLBACK: git checkout . && git clean -fd   "
                 f"(safe -- tree was clean at {ctx['pre_sha']} before this run)"
@@ -1511,6 +1574,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                 "preflight_passed": ctx.get("preflight"),
             },
             "changed_files": changed,
+            "head_moved": moved,
+            "commits_by_worker": n_commits,
             "resumed": bool(ctx.get("session_hint")),
             "compactions": sum(compaction_state(s)[0] for s in ctx.get("sessions", [])),
             "sessions": len(ctx.get("sessions", [])),
