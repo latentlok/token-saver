@@ -1,8 +1,9 @@
-# Testing brief — read this first
+# Testing brief
 
 You are testing **token-saver**, a Claude Code plugin that delegates work to a free local
-model under supervision. This file is a self-contained handoff: everything you need to
-test it without prior context.
+model under supervision. This file is self-contained, but read
+[SYSTEM.md](SYSTEM.md) first if you want the full mental model — it is the canonical
+reference for how the system works and what you must not assume.
 
 **The one-line thesis:** a smart, expensive model (you) orchestrates; a not-smart, free
 model (Qwen, on local hardware) executes; an objective gate decides whether it worked, so
@@ -168,8 +169,8 @@ Expect a report: `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`. Check that
 
 ## 7. Where the reasoning lives
 
-- `docs/FINDINGS.md` — every measurement behind every design decision. **Read this before
+- `../docs/FINDINGS.md` — every measurement behind every design decision. **Read this before
   concluding a guard is paranoid**; each one was bought with a real failure.
-- `docs/ARCHITECTURE.md` — how it works, component by component.
-- `agents/qwen-manager.md` — the manager's full workflow.
-- `skills/lld-principles/SKILL.md` — the design discipline it must follow.
+- `../docs/ARCHITECTURE.md` — how it works, component by component.
+- `../agents/qwen-manager.md` — the manager's full workflow.
+- `../skills/lld-principles/SKILL.md` — the design discipline it must follow.

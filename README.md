@@ -81,9 +81,9 @@ version — see [docs/FINDINGS.md](docs/FINDINGS.md) for the evidence:
   identical results. But at 147k, compaction fired, deleted 64% of history, and it then
   claimed to have read files it never opened.
 
-**Testing this?** Start with [docs/TESTING.md](docs/TESTING.md) — a self-contained brief
-with the current state, the tool surface, the measured failure modes to expect, and a
-step-by-step test plan.
+**Working with this as an agent?** `context/` holds the Claude-facing reference:
+[SYSTEM.md](context/SYSTEM.md) (canonical — what it is, how to drive it, what not to
+assume) and [TESTING.md](context/TESTING.md) (state + step-by-step test plan).
 
 ## Install
 
@@ -158,6 +158,7 @@ Or call the tool directly for something already specified:
     templates/QWEN.md      per-project rules for the Qwen worker
     docs/FINDINGS.md       the measurements every design decision rests on
     commands/delegate.md   the front door — /delegate <task or question>
+    context/               agent-facing reference: SYSTEM.md, TESTING.md
     .claude-plugin/plugin.json   plugin manifest (token-saver)
     install.sh             idempotent installer (once per machine)
     init-project.sh        bootstrap a project (once per project, any language)
