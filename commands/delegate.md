@@ -64,3 +64,10 @@ Report what actually landed, not what was claimed:
 Never launder Qwen's or the manager's self-report. Pass through only what was verified by
 a gate or by you. A truthful "the gate failed, here's why" is a good outcome; a confident
 summary of unverified work is the one failure this whole tool exists to prevent.
+
+**If a result carries a `SETUP:` line**, the project was just self-configured on its first
+delegation. Relay it and act on its two open questions: if it says the test command could
+not be detected, ask the user for it (and offer to set it, `init-project.sh <repo>
+--test-cmd 'CMD'`); and offer to add the delegation policy block to their `CLAUDE.md`
+(`init-project.sh <repo> --claude-md`) so future mechanical work routes here automatically.
+Remind them the new `QWEN.md` is uncommitted.

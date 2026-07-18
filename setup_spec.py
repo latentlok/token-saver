@@ -9,10 +9,13 @@ are simply not loaded, and measured, it then edits protected spec files, games g
 expands scope -- while the run still reports success. So the load-bearing cases, in order
 of what would hurt most if broken:
 
-  1. qwen_delegate must REFUSE an unconfigured project, and must not invoke Qwen at all.
-     A refusal that still ran the worker would be worse than no check.
-  2. A QWEN.md carrying an unreplaced placeholder counts as unconfigured. It is worse
-     than an absent one: the worker reads the placeholder as an instruction.
+  1. qwen_delegate must never run an unconfigured project degraded. In a git repo it
+     self-configures -- writes QWEN.md (detecting the test command, or instructing the
+     worker not to guess one; NEVER a placeholder) and proceeds. In a non-git repo it
+     REFUSES and does not invoke Qwen: there is no rollback, so it cannot self-configure
+     safely.
+  2. A QWEN.md carrying an unreplaced placeholder counts as unconfigured -- the worker
+     reads the placeholder as an instruction -- so it is regenerated, not run as-is.
   3. The repo boundary must hold in both directions -- a subdirectory of a configured
      repo IS configured (Qwen loads context hierarchically), a QWEN.md above the repo
      top level is NOT this project's rules.
@@ -157,8 +160,10 @@ class PlaceholderIsNotConfigured(Base):
 # ---------- 2. the delegate entry path refuses ----------
 
 
-class DelegateRefusesUnconfigured(Base):
-    """Drive the real run_qwen with a stubbed Qwen and watch whether it is ever called."""
+class DelegateSelfConfigures(Base):
+    """Drive the real run_qwen with a stubbed Qwen. New contract: a git repo with no rules
+    is self-configured (QWEN.md written) and PROCEEDS; only a non-git repo is refused,
+    because it cannot roll back and so cannot be configured safely."""
 
     def drive(self, cwd):
         calls = []
@@ -177,44 +182,58 @@ class DelegateRefusesUnconfigured(Base):
             server.invoke_qwen, server.run_verify = real_invoke, real_verify
         return out, calls
 
-    def test_missing_rules_refuses_and_never_runs_qwen(self):
+    def test_git_repo_without_rules_is_bootstrapped_and_runs(self):
         r = make_repo(self.td)
         out, calls = self.drive(r)
-        self.assertTrue(out.startswith("STATUS: error"), out[:200])
-        self.assertEqual(calls, [], "refusal must happen BEFORE the worker is invoked")
+        self.assertFalse(out.startswith("STATUS: error"), out[:200])
+        self.assertEqual(calls, [r], "after self-configuring, the worker must run")
+        self.assertTrue(os.path.isfile(os.path.join(r, "QWEN.md")),
+                        "a git repo must be configured, not refused")
+        self.assertIn("SETUP:", out, "the caller must be told it was configured")
 
-    def test_placeholder_rules_refuse_and_never_run_qwen(self):
+    def test_bootstrapped_rules_carry_no_placeholder(self):
+        """The point of the whole change: self-configuration must NOT reintroduce the
+        placeholder the refusal existed to prevent."""
+        r = make_repo(self.td)
+        self.drive(r)
+        text = open(os.path.join(r, "QWEN.md")).read()
+        for marker in server.RULES_PLACEHOLDERS:
+            self.assertNotIn(marker, text)
+        self.assertEqual(server.worker_rules_status(r)[0], "ok")
+
+    def test_placeholder_rules_are_regenerated_not_run_asis(self):
         r = make_repo(self.td)
         write_rules(r, "- Run tests with: `<EDIT ME: your test command>`\n")
         out, calls = self.drive(r)
-        self.assertTrue(out.startswith("STATUS: error"), out[:200])
-        self.assertEqual(calls, [])
+        self.assertEqual(calls, [r])
+        self.assertEqual(server.worker_rules_status(r)[0], "ok",
+                         "a placeholder file must be regenerated before the worker runs")
 
-    def test_configured_project_is_not_refused(self):
-        """The check must not be a blanket refusal -- it has to let real work through."""
+    def test_configured_project_runs_without_a_setup_note(self):
+        """An already-configured project must NOT be re-bootstrapped or nagged."""
         r = make_repo(self.td)
         write_rules(r)
         out, calls = self.drive(r)
-        self.assertFalse(out.startswith("STATUS: error\nProject not configured"), out[:200])
         self.assertEqual(calls, [r], "a configured project must reach the worker")
+        self.assertNotIn("SETUP:", out)
 
-    def test_refusal_names_the_exact_fix(self):
-        """
-        An unactionable refusal just relocates the friction. It must name the script and
-        the path, so the reader can copy one line and be done.
-        """
-        r = make_repo(self.td)
-        out, _ = self.drive(r)
-        self.assertIn("init-project.sh", out)
-        self.assertIn(r, out)
-        self.assertIn("QWEN.md", out)
+    def test_non_git_project_is_refused_and_never_runs_qwen(self):
+        d = os.path.join(self.td, "plain")
+        os.makedirs(d)
+        out, calls = self.drive(d)
+        self.assertTrue(out.startswith("STATUS: error"), out[:200])
+        self.assertEqual(calls, [], "a non-git repo must be refused BEFORE the worker runs")
+        self.assertFalse(os.path.isfile(os.path.join(d, "QWEN.md")),
+                         "must not write rules into a dir it cannot roll back")
 
-    def test_refusal_explains_why_it_matters(self):
-        r = make_repo(self.td)
-        out, _ = self.drive(r)
+    def test_non_git_refusal_says_git_init_and_why(self):
+        d = os.path.join(self.td, "plain")
+        os.makedirs(d)
+        out, _ = self.drive(d)
+        self.assertIn("git init", out)
         low = out.lower()
-        self.assertTrue(any(k in low for k in ("spec file", "scope", "rules")),
-                        "refusal must say what goes wrong without it, not just 'run this'")
+        self.assertTrue(any(k in low for k in ("rollback", "sandbox")),
+                        "must say WHY git is required, not just 'run this'")
 
 
 # ---------- 3. the query entry path warns, and does not refuse ----------

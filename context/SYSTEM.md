@@ -47,26 +47,38 @@ reusable underneath it.
 |---|---|---|
 | engine | `server.py` | MCP server: delegate/query, gate, git guards, run log. Zero deps. |
 | safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode |
-| log gate | `runlog_spec.py` | spec for the run log + token accounting (34 tests) |
-| setup gate | `setup_spec.py` | spec for the first-use preconditions + `init-project.sh` (31 tests) |
+| log gate | `runlog_spec.py` | spec for the run log + token accounting |
+| setup gate | `setup_spec.py` | spec for the first-use entry path + `init-project.sh` |
+| bootstrap gate | `bootstrap_spec.py` | spec for self-configuration (detection, rendering, atomic write) |
+| compaction gate | `compaction_spec.py` | spec for compaction detection + the resume branch |
+| head guard | `headguard_spec.py` | spec for detecting a worker commit hiding work from the guards |
 | manager | `agents/qwen-manager.md` | the code unit: decides, specs, delegates, verifies |
 | discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into the manager |
 | front door | `commands/delegate.md` | `/delegate <task or question>` |
 | worker rules | `templates/QWEN.md` | per-project standing rules Qwen auto-loads |
 | manifest | `.claude-plugin/plugin.json` | plugin identity |
 
-Installed by `./install.sh` (idempotent, symlinks everything). Per-project setup is
-`./init-project.sh <repo>` — detects the test command (asks, or `--test-cmd`, and never
-writes a placeholder), writes `QWEN.md`, offers the `CLAUDE.md` policy block
-(append-only, marker-guarded), registers the project, and **refuses non-git projects**.
+Installed once by `./install.sh` (idempotent, symlinks everything). **Per-project setup
+is automatic** — the first `qwen_delegate` into a git repo self-configures. Running
+`./init-project.sh <repo>` is now *optional*: use it to set the test command up front, or
+to add the `CLAUDE.md` policy block (append-only, marker-guarded).
 
-**`qwen_delegate` refuses to run in a project with no `QWEN.md`**, or one whose `QWEN.md`
-still carries an unreplaced placeholder, and names the exact command to fix it. Without
-that file the worker's rules are simply not loaded and it degrades *silently* — the same
-reason the server refuses when a spec file is dirty: stop rather than guess. The lookup
-walks up to the repo top level (Qwen loads context hierarchically, so a subdirectory of a
-configured repo is configured) and no further. `qwen_query` warns instead of refusing: it
-cannot write, so refusing would be friction with no safety payoff.
+**First delegation into a git repo self-configures instead of failing.** With no `QWEN.md`
+the worker's standing rules are not loaded and it degrades *silently* (edits protected
+specs, games gates, expands scope). Rather than refuse with "go run a script", the server
+writes `QWEN.md` itself: it detects the test command, or — failing that — writes an
+instruction *not to guess one*. It **never writes a placeholder**, which is the failure a
+wrong/blank command would be. The result carries a `SETUP:` line so you can relay it; act
+on its two open questions — supply the test command if it was undetected, and offer the
+`CLAUDE.md` block. Only the test command is project-specific and unguessable; the rest is
+the fixed worker contract, safe to write unattended.
+
+Two things still stop a run: a **non-git** project is refused (no rollback, so it cannot
+self-configure — fix with `git init`), and a **placeholder-carrying legacy `QWEN.md`** is
+regenerated (backed up first). The rules lookup walks up to the repo top level (Qwen loads
+context hierarchically, so a subdirectory of a configured repo is configured) and no
+further. `qwen_query` never writes files as a side effect of a read — it warns and
+proceeds, and a delegation later configures the project.
 
 ---
 

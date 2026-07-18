@@ -74,19 +74,11 @@ say "git         ok"
 # "<EDIT ME: your test command>" is worse than one with no testing section at all: the
 # worker reads it as an instruction and will run it, or invent a command of its own. So
 # the command is either real or explicitly declared absent -- never a blank to fill in.
+# Detection lives in server.py (detect_test_cmd) as the single source of truth. Calling
+# it here rather than re-implementing in bash is deliberate: the two used to drift -- this
+# script even hardcoded the registry path while the server honoured an override.
 detect_test_cmd() {
-    if [ -f "$TARGET/package.json" ] && grep -q '"test"' "$TARGET/package.json" 2>/dev/null; then
-        echo "npm test"; return
-    fi
-    if [ -f "$TARGET/Cargo.toml" ];  then echo "cargo test"; return; fi
-    if [ -f "$TARGET/go.mod" ];      then echo "go test ./..."; return; fi
-    if [ -f "$TARGET/Gemfile" ];     then echo "bundle exec rspec"; return; fi
-    if [ -x "$TARGET/venv/bin/pytest" ];  then echo "venv/bin/pytest -q"; return; fi
-    if [ -x "$TARGET/.venv/bin/pytest" ]; then echo ".venv/bin/pytest -q"; return; fi
-    if [ -f "$TARGET/pyproject.toml" ] || [ -f "$TARGET/setup.py" ]; then
-        echo "python -m pytest -q"; return
-    fi
-    echo ""
+    python3 -c "import sys; sys.path.insert(0, '$REPO'); import server; print(server.detect_test_cmd('$TARGET'))"
 }
 
 if [ "$TEST_CMD_SET" -eq 1 ]; then

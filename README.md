@@ -106,30 +106,33 @@ is never in this repo. Configure it once per machine:
 
       qwen mcp add -s user -e FIRECRAWL_API_URL=http://localhost:3002 --trust firecrawl npx -- -y firecrawl-mcp
 
-### Per-project setup
+### Per-project setup — none required
 
-    ./init-project.sh /path/to/any/project
+**The first delegation into a git repo configures it for you.** With no `QWEN.md`, the
+server writes one itself — detecting the test command (`npm test`, `cargo test`, `go test
+./...`, `bundle exec rspec`, `venv/bin/pytest`, …), or, when it can't, recording that the
+project has none rather than guessing. It **never writes a placeholder**. The result
+carries a `SETUP:` line; if the test command wasn't detected, tell Claude what it is.
 
-Run this once per project. It:
+That file is what makes the worker's rules bind — Qwen re-reads it every session, which is
+why delegations are stateless. Without it the worker has no rule against editing a
+protected spec file, expanding scope, or reporting work it did not do, and measured, it
+does all three — so the server creates it before running rather than proceed degraded. Any
+`QWEN.md` at the repo root satisfies the check; hand-write your own if you want different
+rules.
 
-- detects the test command (`npm test`, `cargo test`, `go test ./...`, `bundle exec
-  rspec`, `venv/bin/pytest`, …), asking you if it cannot tell — override with
-  `--test-cmd 'CMD'`, or pass `--test-cmd ''` to declare the project has none;
-- writes **`QWEN.md`**, the worker's standing rules;
-- offers to add the delegation policy block to the project's **`CLAUDE.md`**
-  (`--claude-md` / `--no-claude-md`) — append-only and marker-guarded, so it never
-  clobbers or duplicates what is already there;
-- registers the project in the global index;
-- refuses if the project isn't a git repo.
+A **non-git** project is refused (`git init` first): there is no rollback without git, so
+it can't self-configure safely. `qwen_query` never writes as a side effect of a read — it
+warns and proceeds.
 
-**`qwen_delegate` refuses to run in a project with no `QWEN.md`** and tells you to run
-this script. That file is what makes the worker's rules bind — Qwen re-reads it every
-session, which is why delegations are stateless. Without it the worker has no rule
-against editing a protected spec file, expanding scope, or reporting work it did not do,
-and measured, it does all three. The failure is silent, so the entry path stops instead
-of proceeding degraded. `qwen_query` only warns — it cannot write, so there is nothing
-to protect. Any `QWEN.md` at the repo root satisfies the check; hand-write your own if
-you want different rules.
+Optional, if you'd rather configure up front:
+
+    ./init-project.sh /path/to/any/project [--test-cmd 'CMD'] [--claude-md]
+
+Use it to pin the test command (`--test-cmd ''` declares the project has none), or to add
+the delegation policy block to the project's **`CLAUDE.md`** (`--claude-md`) — append-only
+and marker-guarded, so it never clobbers or duplicates what's already there. It also
+registers the project in the global index.
 
 The project **must be a git repo**. There is no sandbox: git history is the rollback,
 the spec guard needs git to detect and revert edits, and the server refuses to run if a

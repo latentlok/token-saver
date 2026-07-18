@@ -343,6 +343,15 @@ Stay with `reinject` for short mechanical tasks where re-reading is the main los
 Either way, when a run reports `COMPACTED:` treat every claim about work done *before*
 the compaction as unverified and check `CHANGED`, not the narrative.
 
+### First delegation into a repo: `SETUP:`
+
+A first delegation into an unconfigured git repo self-configures — the server writes
+`QWEN.md` and reports a `SETUP:` line. You do not need to do anything for the run to
+proceed, but surface it: if the test command was undetected, ask the human for it; offer
+the `CLAUDE.md` policy block; note the new `QWEN.md` is uncommitted so it should be
+committed. A non-git repo is refused instead (`git init` first) — that one you cannot work
+around, delegation has no rollback without git.
+
 ## Report back
 
 Your caller sees only your final message, and relays it to someone who was not watching.

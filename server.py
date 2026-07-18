@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -372,16 +373,146 @@ def unconfigured_reason(cwd, state, path):
     )
 
 
-def unconfigured_refusal(cwd, state, path):
+def nongit_refusal(cwd):
+    """Missing rules AND not a git repo: cannot self-configure safely, so refuse.
+
+    Auto-writing QWEN.md needs a repo to write into safely -- and more fundamentally,
+    delegation itself needs git: it is the only rollback, the spec guard reverts through
+    it, and there is no sandbox. So the fix here is `git init`, not the rules file.
+    """
     return (
         "STATUS: error\n"
-        "Project not configured for delegation.\n\n"
-        f"{unconfigured_reason(cwd, state, path)}\n\n"
-        "Fix it (once per project):\n"
-        f"    {_init_script()} {cwd}\n\n"
-        f"Then commit the result and delegate again. Any {WORKER_RULES_FILE} at the repo "
-        f"root satisfies this check -- hand-write your own if you want different worker "
-        f"rules."
+        f"{cwd} is not a git repository.\n\n"
+        "Delegation needs one: git history is the only rollback (there is no sandbox and "
+        "the worker runs at your full privilege), and the spec guard detects and reverts "
+        "tampering through it.\n\n"
+        "Fix it:\n"
+        "    git init && git add -A && git commit -m 'baseline'\n\n"
+        f"Then delegate again -- I will create {WORKER_RULES_FILE} automatically."
+    )
+
+
+# ---------- self-configuration (auto-bootstrap) ----------
+#
+# A first delegation into a real repo should just work, not fail with "run this script".
+# So when a git repo has no QWEN.md, the server writes one itself: it detects the test
+# command, or -- when it cannot -- writes an instruction NOT to guess one. It never writes
+# a placeholder, which is the failure the refusal was guarding against. The test command
+# is the only project-specific part; everything else is the fixed worker contract, safe to
+# write unattended. CLAUDE.md is deliberately NOT touched here: it is the user's file, so
+# adding the policy block stays consent-gated (offered in the result, applied only if the
+# user says yes).
+
+# Ordered detectors: (predicate(cwd) -> bool, command). First match wins. Kept in Python
+# so it is the SINGLE source of truth -- init-project.sh calls this, rather than carrying
+# a second copy in bash that drifts.
+def detect_test_cmd(cwd):
+    j = lambda *p: os.path.join(cwd, *p)  # noqa: E731
+    try:
+        pkg = j("package.json")
+        if os.path.isfile(pkg):
+            with open(pkg, errors="replace") as f:
+                if '"test"' in f.read():
+                    return "npm test"
+    except Exception:
+        pass
+    if os.path.isfile(j("Cargo.toml")):
+        return "cargo test"
+    if os.path.isfile(j("go.mod")):
+        return "go test ./..."
+    if os.path.isfile(j("Gemfile")):
+        return "bundle exec rspec"
+    if os.access(j("venv", "bin", "pytest"), os.X_OK):
+        return "venv/bin/pytest -q"
+    if os.access(j(".venv", "bin", "pytest"), os.X_OK):
+        return ".venv/bin/pytest -q"
+    if os.path.isfile(j("pyproject.toml")) or os.path.isfile(j("setup.py")):
+        return "python -m pytest -q"
+    return ""
+
+
+# The line in templates/QWEN.md that the test command replaces. If the template drifts,
+# rendering must fail loudly rather than emit a QWEN.md with a stale or empty testing rule.
+TEMPLATE_TESTING_OLD = (
+    "- Run tests with: `venv/bin/pytest`      <-- EDIT: your project's real test command.\n"
+    "  Never a bare `pytest` unless it is genuinely on PATH."
+)
+
+
+def render_worker_rules(test_cmd):
+    """Return the QWEN.md text for this project: the template with its testing block
+    resolved and its human-facing banner stripped. `test_cmd=''` means the project
+    declares it has no tests, which is written as an instruction, not a blank."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "templates", WORKER_RULES_FILE)
+    s = open(src, errors="replace").read()
+    if test_cmd:
+        testing = (
+            f"- Run tests with: `{test_cmd}`\n"
+            "  Use exactly that command. Do not substitute a bare `pytest`/`npm test` you\n"
+            "  assume is on PATH."
+        )
+    else:
+        testing = (
+            "- No test command is configured for this project. Do NOT guess one and do NOT\n"
+            "  invent a test runner. If the task requires running tests, say so plainly in\n"
+            "  your report and stop."
+        )
+    if TEMPLATE_TESTING_OLD not in s:
+        raise RuntimeError("QWEN.md template drifted: testing block not found")
+    s = s.replace(TEMPLATE_TESTING_OLD, testing)
+    s = re.sub(r"^#\n# TEMPLATE .*?stateless by default\.\n", "", s, flags=re.S | re.M)
+    if "TEMPLATE" in s.split("\n\n")[0]:
+        raise RuntimeError("QWEN.md template drifted: banner not stripped")
+    return s
+
+
+def bootstrap_worker_rules(cwd):
+    """Create QWEN.md so a first delegation just works. Returns (test_cmd, path), or
+    (None, None) on failure so the caller can fall back to refusing. Best-effort and
+    never raises. A pre-existing placeholder/legacy file is backed up, not silently lost.
+
+    Written atomically via a temp file: a torn QWEN.md read mid-write by Qwen would be
+    worse than none."""
+    try:
+        dest = os.path.join(os.path.realpath(cwd), WORKER_RULES_FILE)
+        if os.path.exists(dest):
+            try:
+                shutil.copy(dest, dest + ".bak")
+            except Exception:
+                pass
+        cmd = detect_test_cmd(cwd)
+        text = render_worker_rules(cmd)
+        tmp = dest + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, dest)
+        register_project(os.path.realpath(cwd))
+        return (cmd, dest)
+    except Exception as e:
+        log(f"warning: could not bootstrap {WORKER_RULES_FILE} in {cwd}: {e!r}")
+        return (None, None)
+
+
+def bootstrap_notice(test_cmd, path):
+    """The SETUP line prepended to a verdict when the rules file was just auto-created.
+    Tells the caller what happened, what still needs a human, and to commit it."""
+    if test_cmd:
+        cmd_line = (
+            f"detected the test command as `{test_cmd}` and wrote it in -- tell me if that "
+            f"is wrong."
+        )
+    else:
+        cmd_line = (
+            "could not detect a test command, so it instructs the worker not to guess one. "
+            "If this project has tests, tell me how to run them and I will set it -- gates "
+            "are weaker without it."
+        )
+    return (
+        f"SETUP: first delegation here, so I created {path} (the worker's standing rules) "
+        f"and {cmd_line} It is uncommitted -- commit it so the rules bind on every run. I "
+        f"can also add a delegation policy block to this project's CLAUDE.md so I reach for "
+        f"the worker automatically; say the word and I will."
     )
 
 
@@ -393,8 +524,9 @@ def unconfigured_notice(cwd, state, path):
     """
     return (
         f"SETUP: {unconfigured_reason(cwd, state, path)} Answers are read-only so nothing "
-        f"can be damaged, but treat this one as an especially weak lead. Configure with: "
-        f"{_init_script()} {cwd}"
+        f"can be damaged, but treat this one as an especially weak lead. A delegation here "
+        f"will create {WORKER_RULES_FILE} automatically; or run {_init_script()} {cwd} to "
+        f"set the test command up front."
     )
 
 
@@ -1045,21 +1177,29 @@ def run_qwen(args):
     if not os.path.isdir(cwd):
         return f"STATUS: error\ncwd does not exist or is not a directory: {cwd}"
 
-    # Refuse an unconfigured project rather than run it degraded. This is the same call
-    # the spec-dirty check below makes: when the system cannot guarantee the safety
-    # property, it stops with instructions instead of guessing. Auto-writing QWEN.md was
-    # the alternative and it is worse -- the file's project-specific half (the test
-    # command) cannot be guessed, and a wrong one is exactly the placeholder failure this
-    # check exists to catch. Silent degradation is the thing being fixed; do not replace
-    # it with a silent guess.
-    rules_state, rules_path = worker_rules_status(cwd)
-    if rules_state != "ok":
-        log(f"refusing: worker rules {rules_state} for {cwd}")
-        return unconfigured_refusal(cwd, rules_state, rules_path)
-
     guard_on = is_git_repo(cwd)
     if not guard_on:
         log(f"warning: {cwd} is not a git repo -- spec guard and rollback unavailable")
+
+    # An unconfigured project must not run degraded -- without QWEN.md the worker has no
+    # rule against editing a protected spec, expanding scope, or reporting work it never
+    # did. But refusing outright made a first delegation fail with "go run a script".
+    # Instead: in a git repo, self-configure -- write QWEN.md (detecting the test command,
+    # or instructing the worker not to guess one; never a placeholder) and carry on. Only
+    # the test command is project-specific and unguessable, and the honest "no command"
+    # instruction is a safe answer to that. Non-git is different: it cannot roll back at
+    # all, so it is refused, not bootstrapped.
+    bootstrap_note = None
+    rules_state, rules_path = worker_rules_status(cwd)
+    if rules_state != "ok":
+        if not guard_on:
+            log(f"refusing: {rules_state} rules and non-git {cwd}")
+            return nongit_refusal(cwd)
+        cmd, path = bootstrap_worker_rules(cwd)
+        if not path:
+            return unconfigured_refusal(cwd, rules_state, rules_path)
+        log(f"bootstrapped {WORKER_RULES_FILE} for {cwd} (test_cmd={cmd or 'none'})")
+        bootstrap_note = bootstrap_notice(cmd, path)
 
     # The guard reverts any spec file that differs from HEAD after a run, and cannot
     # tell who edited it. If a spec is ALREADY dirty, that revert would silently
@@ -1128,6 +1268,7 @@ def run_qwen(args):
         "verify": verify,
         "on_compaction": on_compaction,
         "sessions": [session_id] if session_id else [],
+        "bootstrap_note": bootstrap_note,
         "max_iter": max_iter,
         "session_hint": session_id,
     }
@@ -1331,6 +1472,11 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     lines.append(f"ATTEMPTS: {len(trail)}/{max_iter}")
     for t in trail:
         lines.append(f"  - {t}")
+
+    # Prominent: the project was just self-configured. Relay it and act on the two open
+    # questions (test command if undetected, CLAUDE.md policy block).
+    if ctx.get("bootstrap_note"):
+        lines.append(ctx["bootstrap_note"])
 
     if guard_on:
         lines.append(blast_radius(cwd, ctx["pre_status"]))
