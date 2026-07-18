@@ -40,6 +40,15 @@ DEFAULT_MAX_ITER = 3
 # Per-project, because the plugin is used in real projects and the numbers belong with
 # the code they describe. The global file is a pointer INDEX only (paths, no metrics) so
 # an aggregator can find the per-project logs; it is never itself a metrics store.
+# ---------- compaction markers ----------
+# Written by compact_hook.py when the CLI compacts a session, read here before resuming
+# it. Durable by necessity: the check happens on a LATER process than the compaction.
+COMPACT_DIR = os.environ.get("QCOMPACT_DIR") or os.path.expanduser(
+    "~/.qwen-delegate/compacted"
+)
+HOOK_COMPACT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "compact_hook.py")
+
 RUNLOG_DIR = ".qwen-delegate"
 RUNLOG_FILE = "runs.jsonl"
 PROJECT_REGISTRY = os.environ.get("QWEN_DELEGATE_REGISTRY") or os.path.expanduser(
@@ -737,15 +746,35 @@ def scoped_setup(cwd, verify, shell_allow):
     with open(sys_settings, "w") as f:
         json.dump({"hooks": {"PreToolUse": [
             {"matcher": ".*", "hooks": [
-                {"type": "command", "command": f"python3 {HOOK_SCRIPT}"}]}]}}, f)
+                {"type": "command", "command": f"python3 {HOOK_SCRIPT}"}]}],
+            **compact_hooks()}}, f)
     env = {
         "QWEN_CODE_SYSTEM_SETTINGS_PATH": sys_settings,
         "QGATE_CWD": os.path.realpath(cwd),
         "QGATE_VERIFY": verify or "",
         "QGATE_DENYLOG": denylog,
         "QGATE_EXTRA": json.dumps(shell_allow or []),
+        "QCOMPACT_DIR": COMPACT_DIR,
     }
     return env, denylog, td
+
+
+def compact_hooks():
+    """The PreCompact/PostCompact hook block. Needed in EVERY mode -- any session can be
+    compacted, and a missed marker means resuming a session whose task was summarised
+    away."""
+    entry = [{"hooks": [{"type": "command", "command": f"python3 {HOOK_COMPACT}"}]}]
+    return {"PreCompact": entry, "PostCompact": entry}
+
+
+def compact_setup():
+    """Hook-only settings for non-scoped modes (scoped_setup covers scoped itself)."""
+    td = tempfile.mkdtemp(prefix="qcompact-")
+    sys_settings = os.path.join(td, "settings.json")
+    with open(sys_settings, "w") as f:
+        json.dump({"hooks": compact_hooks()}, f)
+    return {"QWEN_CODE_SYSTEM_SETTINGS_PATH": sys_settings,
+            "QCOMPACT_DIR": COMPACT_DIR}, td
 
 
 def invoke_qwen(task, cwd, approval_mode, timeout, session_id,
@@ -757,6 +786,9 @@ def invoke_qwen(task, cwd, approval_mode, timeout, session_id,
     if approval_mode == "scoped":
         real_mode = "yolo"  # yolo so the hook is consulted; the hook does the gating
         scoped_env, denylog, tempdir = scoped_setup(cwd, verify, shell_allow)
+    else:
+        # Compaction hooks still have to be installed: any mode can be compacted.
+        scoped_env, tempdir = compact_setup()
 
     cmd = [
         QWEN_BIN, "-p", task + suffix,
@@ -897,6 +929,7 @@ def run_qwen(args):
     trail = []
     result_text = ""
     denials = []
+    send_suffix = False  # set when a retry re-injects after compaction
     ctx = {
         "approval_mode": approval_mode,
         "timeout": timeout,
@@ -920,9 +953,16 @@ def run_qwen(args):
     for attempt in range(1, max_iter + 1):
         log(f"attempt {attempt}/{max_iter} cwd={cwd} resume={session_id or '-'}")
 
+        # The handoff instructions are already in the session from attempt 1, so
+        # re-appending them on a retry just duplicates them. Send again only when
+        # re-injecting after a compaction, which is exactly when they may have been
+        # summarised away.
+        suffix = HANDOFF_SUFFIX if (attempt == 1 or send_suffix) else ""
+        send_suffix = False
+
         result_text, denials, sid, err, meta = invoke_qwen(
             prompt, cwd, approval_mode, timeout, session_id,
-            verify=verify, shell_allow=args.get("shell_allow"),
+            suffix=suffix, verify=verify, shell_allow=args.get("shell_allow"),
         )
         ctx["meta"] = meta
         ctx["peak"] = max(ctx.get("peak", 0), meta.get("peak", 0))
@@ -945,13 +985,25 @@ def run_qwen(args):
                 f"attempt {attempt}: SPEC VIOLATION -- edited {names} (auto-reverted)"
             )
             if attempt < max_iter:
+                # Same delta-only rule as the verify retry: the session still holds the
+                # task unless it was compacted.
                 prompt = (
                     f"You edited a protected specification file ({names}). That file "
                     f"defines what correct means and has been reverted. Never modify a "
                     f"protected spec file. Fix the implementation code so it satisfies the "
                     f"spec as written. If you believe the spec is wrong, stop and say so "
-                    f"instead of editing it.\n\nOriginal task:\n{task}"
+                    f"instead of editing it."
                 )
+                if was_compacted_since_ack(session_id):
+                    log(f"session {session_id} was compacted -- re-injecting task context")
+                    ack_compaction(session_id)
+                    ctx["reinjections"] = ctx.get("reinjections", 0) + 1
+                    send_suffix = True
+                    prompt += (
+                        f"\n\nYour conversation history was summarised (compacted), so "
+                        f"you may have lost the original instructions. Work from what "
+                        f"follows, do not reconstruct it.\n\nOriginal task:\n{task}"
+                    )
                 continue
             return render(
                 "spec_violation", session_id, trail, result_text, denials, max_iter, ctx
@@ -992,13 +1044,10 @@ def run_qwen(args):
             )
 
         if attempt < max_iter:
-            prompt = (
-                f"The verification command failed. This is the real output:\n\n"
-                f"```\n{truncate(v_out, VERIFY_CAP)}\n```\n\n"
-                f"Fix the code so this command passes. Do not modify any protected spec file "
-                f"-- fix the implementation. Run the command yourself to confirm before "
-                f"reporting.\n\nVerify command: {verify}\n\nOriginal task:\n{task}"
-            )
+            prompt, reinjected = retry_prompt(session_id, task, verify, v_out)
+            if reinjected:
+                ctx["reinjections"] = ctx.get("reinjections", 0) + 1
+                send_suffix = True
             continue
 
         return render(
@@ -1013,6 +1062,37 @@ def run_qwen(args):
         )
 
     return render("verify_failed", session_id, trail, result_text, denials, max_iter, ctx)
+
+
+def retry_prompt(session_id, task, verify, v_out):
+    """
+    The prompt for attempt N+1, which resumes the SAME session. Returns (prompt, reinjected).
+
+    The session already holds the task, the handoff instructions and (via QWEN.md) the
+    rules -- so re-sending them makes Qwen hold two copies of everything and grows the
+    context that caused the compaction in the first place. Send only the delta.
+
+    Unless the session was compacted since we last handled it, in which case that history
+    is gone and the task must be restored. `ack_compaction` makes this fire exactly once
+    per compaction: compacted once then resumed twice re-injects on the first resume only.
+    """
+    failure = (
+        f"The verification command failed. This is the real output:\n\n"
+        f"```\n{truncate(v_out, VERIFY_CAP)}\n```\n\n"
+        f"Fix the code so this command passes."
+    )
+    if not was_compacted_since_ack(session_id):
+        return failure, False
+
+    log(f"session {session_id} was compacted -- re-injecting task context")
+    ack_compaction(session_id)
+    return (
+        f"{failure}\n\n"
+        f"Your conversation history was summarised (compacted), so you may have lost the "
+        f"original instructions. Do not reconstruct what you think you did -- work from "
+        f"what follows.\n\n"
+        f"Verify command: {verify}\n\nOriginal task:\n{task}"
+    ), True
 
 
 def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_verify=None):
@@ -1120,6 +1200,14 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if st.get("api_errors"):
         lines.append(f"API ERRORS: {st['api_errors']} request(s) errored during this run.")
 
+    if ctx.get("reinjections"):
+        lines.append(
+            f"COMPACTED: this session was compacted mid-run "
+            f"({ctx['reinjections']}x) and the task was re-injected. Compaction is lossy "
+            f"-- treat any claim about work done BEFORE it as unverified, and check "
+            f"CHANGED rather than the narrative."
+        )
+
     if status == "gate_suspect":
         lines.append(
             "GATE SUSPECT: the verify command produced identical output before and after "
@@ -1224,6 +1312,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             },
             "changed_files": changed,
             "resumed": bool(ctx.get("session_hint")),
+            "compactions": compaction_state(session_id)[0],
+            "reinjections": ctx.get("reinjections", 0),
             "blocked_shell": len(ctx.get("meta", {}).get("blocked") or []),
             "denials": len(denials or []),
         },
@@ -1522,6 +1612,54 @@ def leverage_record(tool, cwd, status, verdict, stats, peak, extra=None):
     }
     rec.update(extra or {})
     return rec
+
+
+# ---------- compaction state ----------
+#
+# The question at resume time is not "was this session ever compacted" but "was it
+# compacted since I last dealt with it". A boolean would re-inject on every subsequent
+# resume forever. So the hook appends events and the server keeps a watermark:
+#
+#   events > acked  ->  history was summarised since last time; re-inject, then ack
+#   events == acked ->  intact as far as we are concerned; send only the delta
+#
+# Compacted once then resumed twice therefore re-injects exactly once. A later compaction
+# pushes events ahead of acked and re-arms it. Events are kept rather than deleted so the
+# history stays inspectable.
+
+
+def compaction_state(session_id):
+    """(events_seen, acked). (0, 0) when there is no marker -- never compacted."""
+    if not session_id:
+        return 0, 0
+    try:
+        with open(os.path.join(COMPACT_DIR, f"{session_id}.json")) as f:
+            state = json.load(f)
+        return len(state.get("events") or []), int(state.get("acked") or 0)
+    except Exception:
+        return 0, 0
+
+
+def was_compacted_since_ack(session_id):
+    seen, acked = compaction_state(session_id)
+    return seen > acked
+
+
+def ack_compaction(session_id):
+    """Mark every compaction seen so far as handled. Idempotent."""
+    if not session_id:
+        return
+    path = os.path.join(COMPACT_DIR, f"{session_id}.json")
+    try:
+        with open(path) as f:
+            state = json.load(f)
+        state["acked"] = len(state.get("events") or [])
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        log(f"warning: could not ack compaction for {session_id}: {e!r}")
 
 
 def parse_qwen_json(stdout):
