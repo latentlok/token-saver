@@ -529,25 +529,48 @@ none — a name can be grepped, a guessed line cannot. If you did not actually r
 something, say so under VERIFY instead of asserting you confirmed it.
 """
 
-INVESTIGATE_TOOL = {
-    "name": "qwen_investigate",
+# Freeform read-only answer -- the default query format. Grounded (cite file:symbol),
+# with a VERIFY section, because Qwen's conclusions are often plausibly wrong.
+ANSWER_SUFFIX = """
+
+---
+You are in read-only mode. Do NOT write, edit, or propose code changes -- only read
+(glob/grep/targeted reads) and answer. Do not read whole files "to be thorough"; stay
+small.
+
+Answer the question directly and concretely. Cite evidence by NAME and file
+(`validate_token in auth/tokens.py`), never by line number -- you do not track line
+numbers reliably, and a name can be grepped while a guessed line cannot. If you are
+inferring rather than confirming, say so. Finish with:
+
+VERIFY: <the specific claims a decision should not rest on until checked against source,
+each with the symbol/path to grep. If you did not actually read something, say so here
+rather than asserting you confirmed it.>
+"""
+
+QUERY_TOOL = {
+    "name": "qwen_query",
     "description": (
-        "Delegate READ-ONLY investigation of a codebase to the local Qwen worker, and get "
-        "back a compact structured map -- cheaply. Qwen reads the code (its tokens are "
-        "free); you get a summary instead of spending your own context on ten files.\n\n"
-        "Runs in plan mode: Qwen physically cannot write, so this is always safe and needs "
-        "no gate. Use it to orient before planning or delegating: 'where does X live', "
-        "'how do these modules connect', 'what is the public surface of Y'.\n\n"
-        "Returns MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY. The VERIFY section "
-        "lists the load-bearing claims you must confirm against source yourself -- Qwen's "
-        "investigation is broad but its conclusions are often wrong in plausible ways, so "
-        "treat the map as a lead (where to look), not as truth. Read the actual source for "
-        "anything a decision hinges on.\n\n"
-        "Keep each call BOUNDED and stateless. Ask one focused question over a few files, "
-        "not 'read the whole repo' -- a huge read pushes Qwen past its compaction threshold, "
-        "after which it fabricates having read things it did not. For broad coverage, make "
-        "several small calls, not one giant one. The response reports peak context so you "
-        "can see whether it stayed safe."
+        "Ask the local Qwen worker an open-ended question ABOUT the code, READ-ONLY. Qwen "
+        "reads (glob/grep/targeted reads) and answers; it cannot write, edit, or change "
+        "anything (plan mode -- structurally safe, no gate needed). Its tokens are free, so "
+        "you get an answer instead of spending your own context on the files.\n\n"
+        "Use it to think with the codebase without touching it: 'how does auth flow from "
+        "the handler to the token check?', 'is there already a function that parses "
+        "durations?', 'what would break if I changed the return type of load()?', 'where "
+        "is retry handled?'. This is a conversation: pass the returned SESSION as "
+        "`session_id` to ask a warm follow-up ('ok, does that check expiry?').\n\n"
+        "format='answer' (default) gives a direct prose answer with a VERIFY list. "
+        "format='map' gives a structured MAP / KEY SYMBOLS / CONNECTIONS / ANSWER / VERIFY "
+        "-- use it to orient in an unfamiliar repo (this is the old qwen_investigate).\n\n"
+        "Treat the answer as a LEAD, not truth: Qwen's reading is broad but its conclusions "
+        "are often wrong in plausible ways (it once mapped a library perfectly yet fabricated "
+        "every line number). The VERIFY section says what to confirm against source before a "
+        "decision rests on it.\n\n"
+        "Keep each question BOUNDED. Ask over a few files, not 'read the whole repo' -- a huge "
+        "read pushes Qwen past compaction, after which it fabricates having read things. Make "
+        "several small queries, not one giant one; the response reports peak context so you "
+        "can see it stayed safe."
     ),
     "inputSchema": {
         "type": "object",
@@ -555,27 +578,38 @@ INVESTIGATE_TOOL = {
             "question": {
                 "type": "string",
                 "description": (
-                    "A focused question to answer by reading the code, e.g. 'What is the "
-                    "public API of the parser module and where is each entry point?' or "
-                    "'How does auth flow from the request handler to the token check?' "
-                    "Scope it so a few files answer it -- not the whole repo at once."
+                    "The question to answer by reading the code. Open-ended is fine "
+                    "('how does X work', 'why might Y fail', 'is there already a Z'). Scope "
+                    "it so a few files answer it, not the whole repo at once."
                 ),
             },
-            "cwd": {
+            "cwd": {"type": "string", "description": "Absolute path to the repository."},
+            "format": {
                 "type": "string",
-                "description": "Absolute path to the repository to investigate.",
+                "enum": ["answer", "map"],
+                "description": (
+                    "'answer' (default): direct prose answer + VERIFY. 'map': structured "
+                    "codebase map (MAP/KEY SYMBOLS/CONNECTIONS/ANSWER/VERIFY) for orienting."
+                ),
+            },
+            "session_id": {
+                "type": "string",
+                "description": (
+                    "Resume a prior query conversation (the SESSION from an earlier "
+                    "qwen_query) to ask a warm follow-up -- Qwen still holds what it read. "
+                    "Same cwd required. Omit to start fresh."
+                ),
             },
             "focus": {
                 "type": "string",
                 "description": (
-                    "Optional: narrow the search, e.g. a subdirectory ('src/parser'), a "
-                    "glob ('**/*.ts'), or specific files. Keeps the read bounded and cheap. "
-                    "Omit to let Qwen scope it from the question."
+                    "Optional: narrow the reading to a subdir ('src/parser'), glob "
+                    "('**/*.ts'), or files. Keeps it bounded and cheap."
                 ),
             },
             "timeout_sec": {
                 "type": "integer",
-                "description": f"Kill the investigation after this many seconds (default {DEFAULT_TIMEOUT}).",
+                "description": f"Kill the query after this many seconds (default {DEFAULT_TIMEOUT}).",
             },
         },
         "required": ["question", "cwd"],
@@ -583,10 +617,12 @@ INVESTIGATE_TOOL = {
 }
 
 
-def run_investigate(args):
+def run_query(args):
     question = args["question"]
     cwd = args["cwd"]
     focus = args.get("focus")
+    fmt = args.get("format") or "answer"
+    session_id = args.get("session_id")
     timeout = max(30, min(MAX_TIMEOUT, int(args.get("timeout_sec") or DEFAULT_TIMEOUT)))
 
     if not os.path.isabs(cwd):
@@ -594,20 +630,22 @@ def run_investigate(args):
     if not os.path.isdir(cwd):
         return f"STATUS: error\ncwd does not exist or is not a directory: {cwd}"
 
-    prompt = f"Investigate this codebase and answer the question.\n\nQUESTION: {question}"
+    suffix = INVESTIGATE_SUFFIX if fmt == "map" else ANSWER_SUFFIX
+    verb = "Map this codebase to answer" if fmt == "map" else "Answer this question about the code"
+    prompt = f"{verb}.\n\nQUESTION: {question}"
     if focus:
         prompt += f"\n\nFOCUS your reading on: {focus}"
 
-    log(f"investigate cwd={cwd} focus={focus or '-'}")
+    log(f"query cwd={cwd} fmt={fmt} focus={focus or '-'} resume={session_id or '-'}")
 
     # plan mode: read-only by construction. No verify, no git snapshot -- nothing changes.
     text, denials, sid, err, meta = invoke_qwen(
-        prompt, cwd, "plan", timeout, None, suffix=INVESTIGATE_SUFFIX
+        prompt, cwd, "plan", timeout, session_id, suffix=suffix
     )
     if err:
         return f"STATUS: error\n{err}"
 
-    lines = [f"STATUS: ok", f"SESSION: {sid or 'unknown'}"]
+    lines = ["STATUS: ok", f"SESSION: {sid or 'unknown'}"]
 
     # Compaction is the failure mode for a read that got too big: past it Qwen fabricates.
     peak = meta.get("peak", 0)
@@ -618,8 +656,8 @@ def run_investigate(args):
         if peak >= auto_at:
             lines.append(
                 f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%) -- COMPACTION LIKELY FIRED. "
-                f"This read was too big; parts of the map may be fabricated. Re-run with a "
-                f"tighter `focus`, or split into smaller questions."
+                f"This read was too big; parts of the answer may be fabricated. Re-run with "
+                f"a tighter `focus`, or split into smaller questions."
             )
         elif pct >= 60:
             lines.append(
@@ -635,8 +673,16 @@ def run_investigate(args):
     if st.get("tools"):
         lines.append(f"READS: {st['tools']} tool call(s), {st.get('ms',0)/1000:.0f}s")
 
-    lines.append(f"--- map ---\n{truncate(text, RESULT_CAP + 1500)}")
+    label = "map" if fmt == "map" else "answer"
+    lines.append(f"--- {label} ---\n{truncate(text, RESULT_CAP + 1500)}")
     return "\n".join(lines)
+
+
+def run_investigate(args):
+    """Back-compat alias: the codebase map is now qwen_query(format='map')."""
+    a = dict(args)
+    a["format"] = "map"
+    return run_query(a)
 
 
 # ---------- qwen invocation ----------
@@ -1281,12 +1327,13 @@ def main():
         elif method == "ping":
             respond(rid, {})
         elif method == "tools/list":
-            respond(rid, {"tools": [TOOL, INVESTIGATE_TOOL]})
+            respond(rid, {"tools": [TOOL, QUERY_TOOL]})
         elif method == "tools/call":
             params = req.get("params") or {}
             name = params.get("name")
             args = params.get("arguments") or {}
-            handler = {"qwen_delegate": run_qwen, "qwen_investigate": run_investigate}.get(name)
+            handler = {"qwen_delegate": run_qwen, "qwen_query": run_query,
+                       "qwen_investigate": run_investigate}.get(name)
             if handler is None:
                 respond(rid, error={"code": -32602, "message": f"unknown tool: {name}"})
                 continue
