@@ -110,8 +110,26 @@ is never in this repo. Configure it once per machine:
 
     ./init-project.sh /path/to/any/project
 
-Detects the test command (`npm test`, `cargo test`, `go test ./...`, `bundle exec rspec`,
-`venv/bin/pytest`, …), writes `QWEN.md`, and refuses if the project isn't a git repo.
+Run this once per project. It:
+
+- detects the test command (`npm test`, `cargo test`, `go test ./...`, `bundle exec
+  rspec`, `venv/bin/pytest`, …), asking you if it cannot tell — override with
+  `--test-cmd 'CMD'`, or pass `--test-cmd ''` to declare the project has none;
+- writes **`QWEN.md`**, the worker's standing rules;
+- offers to add the delegation policy block to the project's **`CLAUDE.md`**
+  (`--claude-md` / `--no-claude-md`) — append-only and marker-guarded, so it never
+  clobbers or duplicates what is already there;
+- registers the project in the global index;
+- refuses if the project isn't a git repo.
+
+**`qwen_delegate` refuses to run in a project with no `QWEN.md`** and tells you to run
+this script. That file is what makes the worker's rules bind — Qwen re-reads it every
+session, which is why delegations are stateless. Without it the worker has no rule
+against editing a protected spec file, expanding scope, or reporting work it did not do,
+and measured, it does all three. The failure is silent, so the entry path stops instead
+of proceeding degraded. `qwen_query` only warns — it cannot write, so there is nothing
+to protect. Any `QWEN.md` at the repo root satisfies the check; hand-write your own if
+you want different rules.
 
 The project **must be a git repo**. There is no sandbox: git history is the rollback,
 the spec guard needs git to detect and revert edits, and the server refuses to run if a
@@ -157,8 +175,10 @@ Or call the tool directly for something already specified:
 
     server.py              the MCP server. stdio JSON-RPC, zero deps.
     runlog_spec.py         gate for the run log + token accounting
+    setup_spec.py          gate for the first-use preconditions + init-project.sh
     agents/qwen-manager.md the subagent: judgment, spec authoring, escalation policy
     templates/QWEN.md      per-project rules for the Qwen worker
+    templates/CLAUDE-snippet.md  the delegation policy block for a project's CLAUDE.md
     docs/PRINCIPLES.md     the structural rules, abstracted from the measurements
     docs/FINDINGS.md       the measurements every design decision rests on
     commands/delegate.md   the front door — /delegate <task or question>

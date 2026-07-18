@@ -48,6 +48,7 @@ reusable underneath it.
 | engine | `server.py` | MCP server: delegate/query, gate, git guards, run log. Zero deps. |
 | safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode |
 | log gate | `runlog_spec.py` | spec for the run log + token accounting (34 tests) |
+| setup gate | `setup_spec.py` | spec for the first-use preconditions + `init-project.sh` (31 tests) |
 | manager | `agents/qwen-manager.md` | the code unit: decides, specs, delegates, verifies |
 | discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into the manager |
 | front door | `commands/delegate.md` | `/delegate <task or question>` |
@@ -55,8 +56,17 @@ reusable underneath it.
 | manifest | `.claude-plugin/plugin.json` | plugin identity |
 
 Installed by `./install.sh` (idempotent, symlinks everything). Per-project setup is
-`./init-project.sh <repo>` — detects the test command, writes `QWEN.md`, registers the
-project in the global index, and **refuses non-git projects**.
+`./init-project.sh <repo>` — detects the test command (asks, or `--test-cmd`, and never
+writes a placeholder), writes `QWEN.md`, offers the `CLAUDE.md` policy block
+(append-only, marker-guarded), registers the project, and **refuses non-git projects**.
+
+**`qwen_delegate` refuses to run in a project with no `QWEN.md`**, or one whose `QWEN.md`
+still carries an unreplaced placeholder, and names the exact command to fix it. Without
+that file the worker's rules are simply not loaded and it degrades *silently* — the same
+reason the server refuses when a spec file is dirty: stop rather than guess. The lookup
+walks up to the repo top level (Qwen loads context hierarchically, so a subdirectory of a
+configured repo is configured) and no further. `qwen_query` warns instead of refusing: it
+cannot write, so refusing would be friction with no safety payoff.
 
 ---
 

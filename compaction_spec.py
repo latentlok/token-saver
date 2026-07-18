@@ -208,8 +208,9 @@ class DiscardActuallyDiscards(Base):
 
     def drive(self, policy):
         seen = []
-        real_invoke, real_verify, real_git = (
-            server.invoke_qwen, server.run_verify, server.is_git_repo)
+        real_invoke, real_verify, real_git, real_rules = (
+            server.invoke_qwen, server.run_verify, server.is_git_repo,
+            server.worker_rules_status)
 
         def fake_invoke(task, cwd, mode, timeout, session_id, **kw):
             seen.append(session_id)
@@ -223,13 +224,19 @@ class DiscardActuallyDiscards(Base):
         # bails before any retry happens and this test never exercises the branch.
         server.run_verify = lambda v, c: (len(seen) >= 2, f"boom {len(seen)}")
         server.is_git_repo = lambda c: False                       # skip git machinery
+        # cwd is /tmp, which has no QWEN.md, and run_qwen now refuses an unconfigured
+        # project before it ever reaches the retry loop this class tests. Satisfy the
+        # precondition the same way the git one is satisfied -- setup_spec.py owns
+        # proving the refusal itself actually fires.
+        server.worker_rules_status = lambda c: ("ok", "/tmp/QWEN.md")
         try:
             server.run_qwen({"task": TASK, "cwd": "/tmp", "verify": VERIFY,
                              "approval_mode": "auto-edit", "max_iterations": 3,
                              "on_compaction": policy})
         finally:
-            server.invoke_qwen, server.run_verify, server.is_git_repo = (
-                real_invoke, real_verify, real_git)
+            (server.invoke_qwen, server.run_verify, server.is_git_repo,
+             server.worker_rules_status) = (
+                real_invoke, real_verify, real_git, real_rules)
         return seen
 
     def test_discard_clears_the_session_id(self):

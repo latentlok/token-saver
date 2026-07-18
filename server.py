@@ -67,6 +67,16 @@ VERDICT_CHARS_PER_TOKEN = 4.0
 DEFAULT_SPEC_GLOBS = ["*_spec.*", "*.spec.*"]
 PROJECT_CONFIG = ".qwen-delegate.json"
 
+# The file that makes the worker's standing rules bind. Qwen re-reads it every session --
+# that reload is the whole reason delegations are stateless by default. Absent, the run
+# does not fail, it silently degrades: measured, the worker edits protected spec files,
+# games gates, and expands scope. Silence is the danger, so the entry path checks for it.
+WORKER_RULES_FILE = "QWEN.md"
+# Placeholders a human was supposed to replace. A QWEN.md still carrying one is worse than
+# no QWEN.md: the worker reads the line as an instruction and runs (or invents) whatever
+# it names. init-project.sh no longer writes these; older ones are still out there.
+RULES_PLACEHOLDERS = ("<EDIT ME", "<-- EDIT")
+
 PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -295,6 +305,97 @@ def git(cwd, *a):
 def is_git_repo(cwd):
     rc, out = git(cwd, "rev-parse", "--is-inside-work-tree")
     return rc == 0 and out == "true"
+
+
+def worker_rules_path(cwd):
+    """
+    The QWEN.md whose rules a run in `cwd` would actually load, or None.
+
+    Qwen loads context files hierarchically, so a subdirectory of a configured repo is
+    configured -- delegating into `repo/src` must not be refused because the rules sit at
+    `repo/`. The walk stops AT the repo top level: a QWEN.md above it belongs to some
+    other project (or to $HOME) and is not this project's rules. Outside a git repo there
+    is no top level to trust, so only `cwd` itself counts.
+    """
+    cur = os.path.realpath(cwd)
+    rc, top = git(cwd, "rev-parse", "--show-toplevel")
+    stop = os.path.realpath(top) if rc == 0 and top else cur
+    while True:
+        p = os.path.join(cur, WORKER_RULES_FILE)
+        if os.path.isfile(p):
+            return p
+        parent = os.path.dirname(cur)
+        if cur == stop or parent == cur:
+            return None
+        cur = parent
+
+
+def worker_rules_status(cwd):
+    """
+    ("ok"|"missing"|"placeholder", path_or_None) -- is this project configured to delegate?
+    """
+    p = worker_rules_path(cwd)
+    if not p:
+        return ("missing", None)
+    try:
+        with open(p, errors="replace") as f:
+            text = f.read()
+    except Exception as e:
+        # Our own IO problem, not the project's. Qwen is the reader that matters and it
+        # reads the file itself; do not block a run on a stat we could not take.
+        log(f"warning: could not read {p}: {e!r} -- treating as configured")
+        return ("ok", p)
+    if any(m in text for m in RULES_PLACEHOLDERS):
+        return ("placeholder", p)
+    return ("ok", p)
+
+
+def _init_script():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "init-project.sh")
+
+
+def unconfigured_reason(cwd, state, path):
+    """One paragraph: what is wrong and why it matters. Shared by refusal and warning."""
+    if state == "placeholder":
+        return (
+            f"{path} still contains an unreplaced placeholder "
+            f"({RULES_PLACEHOLDERS[0]}... or {RULES_PLACEHOLDERS[1]}...). The worker reads "
+            f"that line as an instruction -- it will run the placeholder as a command or "
+            f"invent a test command of its own."
+        )
+    return (
+        f"No {WORKER_RULES_FILE} governs {cwd}. That file is what makes the worker's "
+        f"standing rules bind -- it is re-read every session, which is why delegations are "
+        f"stateless. Without it the worker has no rule against editing a protected spec "
+        f"file, expanding scope, or reporting work it did not do. Measured: it does all "
+        f"three."
+    )
+
+
+def unconfigured_refusal(cwd, state, path):
+    return (
+        "STATUS: error\n"
+        "Project not configured for delegation.\n\n"
+        f"{unconfigured_reason(cwd, state, path)}\n\n"
+        "Fix it (once per project):\n"
+        f"    {_init_script()} {cwd}\n\n"
+        f"Then commit the result and delegate again. Any {WORKER_RULES_FILE} at the repo "
+        f"root satisfies this check -- hand-write your own if you want different worker "
+        f"rules."
+    )
+
+
+def unconfigured_notice(cwd, state, path):
+    """
+    The read-only counterpart. A query cannot write, so the rules that prevent damage are
+    not in play and refusing would be gratuitous friction on the cheapest way to try this
+    system out. The honesty and context-size rules still are, so say so and proceed.
+    """
+    return (
+        f"SETUP: {unconfigured_reason(cwd, state, path)} Answers are read-only so nothing "
+        f"can be damaged, but treat this one as an especially weak lead. Configure with: "
+        f"{_init_script()} {cwd}"
+    )
 
 
 def spec_globs(cwd):
@@ -678,6 +779,8 @@ def run_query(args):
     if not os.path.isdir(cwd):
         return f"STATUS: error\ncwd does not exist or is not a directory: {cwd}"
 
+    rules_state, rules_path = worker_rules_status(cwd)
+
     suffix = INVESTIGATE_SUFFIX if fmt == "map" else ANSWER_SUFFIX
     verb = "Map this codebase to answer" if fmt == "map" else "Answer this question about the code"
     prompt = f"{verb}.\n\nQUESTION: {question}"
@@ -711,6 +814,10 @@ def run_query(args):
         return verdict
 
     lines = ["STATUS: ok", f"SESSION: {sid or 'unknown'}"]
+
+    # Warn, do not refuse: see unconfigured_notice().
+    if rules_state != "ok":
+        lines.append(unconfigured_notice(cwd, rules_state, rules_path))
 
     # Compaction is the failure mode for a read that got too big: past it Qwen fabricates.
     peak = meta.get("peak", 0)
@@ -903,6 +1010,18 @@ def run_qwen(args):
         return f"STATUS: error\ncwd must be an absolute path, got: {cwd}"
     if not os.path.isdir(cwd):
         return f"STATUS: error\ncwd does not exist or is not a directory: {cwd}"
+
+    # Refuse an unconfigured project rather than run it degraded. This is the same call
+    # the spec-dirty check below makes: when the system cannot guarantee the safety
+    # property, it stops with instructions instead of guessing. Auto-writing QWEN.md was
+    # the alternative and it is worse -- the file's project-specific half (the test
+    # command) cannot be guessed, and a wrong one is exactly the placeholder failure this
+    # check exists to catch. Silent degradation is the thing being fixed; do not replace
+    # it with a silent guess.
+    rules_state, rules_path = worker_rules_status(cwd)
+    if rules_state != "ok":
+        log(f"refusing: worker rules {rules_state} for {cwd}")
+        return unconfigured_refusal(cwd, rules_state, rules_path)
 
     guard_on = is_git_repo(cwd)
     if not guard_on:

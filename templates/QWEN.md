@@ -1,6 +1,8 @@
 # Workspace rules
 #
-# TEMPLATE — copy to <your-project>/QWEN.md and edit the two marked spots below.
+# TEMPLATE — run ../init-project.sh instead of copying this by hand; it fills in the
+# testing section below and strips this banner. Copying it raw leaves a placeholder,
+# and the server refuses to delegate against a QWEN.md that still has one.
 # Qwen auto-loads this file every session. That reload is what makes these rules bind,
 # which is why delegations are stateless by default.
 

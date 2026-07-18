@@ -108,5 +108,11 @@ echo
 echo "Not done for you (machine-specific, and one of them is a secret):"
 echo "  - Qwen's model provider + API key -> ~/.qwen/settings.json"
 echo "  - Firecrawl, if you want web access -> see README"
-echo "  - Per-project rules -> cp $REPO/templates/QWEN.md <your-project>/QWEN.md"
-echo "                          then edit the paths and test command inside it."
+echo
+echo "NEXT, once per project you want to delegate in:"
+echo "    $REPO/init-project.sh /path/to/your/project"
+echo
+echo "  It writes QWEN.md (the worker's standing rules), offers to add the delegation"
+echo "  policy block to the project's CLAUDE.md, and registers the project."
+echo "  qwen_delegate REFUSES to run in a project without QWEN.md -- without it the"
+echo "  worker's rules are not loaded and it degrades silently rather than failing."
