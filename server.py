@@ -36,6 +36,7 @@ VERIFY_CAP = 2500
 DEFAULT_TIMEOUT = 900
 MAX_TIMEOUT = 7200
 DEFAULT_MAX_ITER = 3
+DEFAULT_WORKERS = 1
 
 # ---------- run log ----------
 # Per-project, because the plugin is used in real projects and the numbers belong with
@@ -144,6 +145,18 @@ TOOL = {
                     "the project's .qwen-delegate.json `max_iterations`, then the built-in "
                     f"default ({DEFAULT_MAX_ITER}); pass it only to deviate for one call. Each "
                     "attempt is a full build, so it also bounds wall time -- keep it modest."
+                ),
+            },
+            "workers": {
+                "type": "integer",
+                "description": (
+                    "Best-of-N: run up to this many INDEPENDENT candidates for the task and "
+                    "accept the first whose gate passes (1 = single candidate, the default; "
+                    "max 8). Free worker tokens, zero manager cost -- but each candidate is a "
+                    "full build, so it multiplies wall time. Usually omit: defaults to the "
+                    f"project's .qwen-delegate.json `workers`, then {DEFAULT_WORKERS}. Needs a "
+                    "`verify` gate to pick the winner and a committed base to reset between "
+                    "candidates."
                 ),
             },
             "on_compaction": {
@@ -556,6 +569,22 @@ def resolve_max_iter(cwd, arg):
     time -- keep it modest."""
     cfg = project_config(cwd).get("max_iterations")
     return max(1, min(10, int(arg or cfg or DEFAULT_MAX_ITER)))
+
+
+def resolve_workers(cwd, arg):
+    """Best-of-N breadth (#26): number of INDEPENDENT candidates to try for one task,
+    accepting the first whose gate passes. Precedence: per-call arg > project
+    `.qwen-delegate.json` workers > built-in default (1). 1 = single candidate (current
+    behaviour). Clamped to [1, 8]. Candidates cost free worker tokens + wall time only."""
+    cfg = project_config(cwd).get("workers")
+    return max(1, min(8, int(arg or cfg or DEFAULT_WORKERS)))
+
+
+def reset_worktree(cwd, sha):
+    """Reset the working tree to a committed base so the next best-of-N candidate starts
+    clean and independent. clean -fd, NEVER -fdx (-fdx destroys a gitignored venv)."""
+    git(cwd, "reset", "--hard", sha)
+    git(cwd, "clean", "-fd")
 
 
 def spec_files(cwd):
@@ -1174,6 +1203,40 @@ def run_verify(verify, cwd):
 
 
 def run_qwen(args):
+    """Best-of-N entry point (#26). Runs up to `workers` independent candidates from the
+    same committed base and accepts the first whose GATE passes -- the gate, not any
+    candidate's self-report, selects the winner. workers=1 (default) is a transparent
+    passthrough to the single-candidate path, byte-identical to before. Candidates run
+    sequentially and reset the tree between them (correct on a single-worker box); true
+    parallel execution across worktrees is the upgrade extra workers unlock. Zero Claude
+    tokens either way -- the manager is never in this loop."""
+    cwd = args.get("cwd", "")
+    verify = args.get("verify")
+    workers = resolve_workers(cwd, args.get("workers")) if os.path.isdir(cwd) else 1
+    if workers <= 1 or not verify:
+        return _delegate_once(args)
+    base_sha = head_sha(cwd) if is_git_repo(cwd) else None
+    if not base_sha:
+        # No committed base to isolate candidates against -> fall back to one candidate.
+        return _delegate_once(args)
+
+    last = None
+    for c in range(workers):
+        if c > 0:
+            reset_worktree(cwd, base_sha)  # independent candidate: clean base
+        cand = dict(args)
+        cand["session_id"] = None          # fresh session per candidate (re-reads QWEN.md)
+        log(f"best-of-{workers}: candidate {c + 1}/{workers} from {base_sha[:8]}")
+        last = _delegate_once(cand)
+        passed, _ = run_verify(verify, cwd)
+        if passed:
+            log(f"best-of-{workers}: candidate {c + 1} passed the gate -- accepting")
+            return last
+    log(f"best-of-{workers}: no candidate passed the gate")
+    return last
+
+
+def _delegate_once(args):
     task = args["task"]
     cwd = args["cwd"]
     verify = args.get("verify")
