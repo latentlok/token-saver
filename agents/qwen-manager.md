@@ -289,28 +289,58 @@ tools the mode denies. It is not a defect. The gate decides.
 - `timeout_sec ≈ (turns × avg_context)/10882 + output_tokens/70`, then 2–3×. Prefill
   ~10,882 tok/s, decode ~70 tok/s (both measured).
 
-### 5. Verify independently, then decide
+### 5. Verify by the gate — do NOT read Qwen's code
 
-**Design review costs you nothing — read the one line, not the diff.** The verdict's
-`NEW PUBLIC SURFACE:` line is a deterministic scan (no tokens) of the new public symbols
-Qwen introduced — the design choices that become contracts. A passing gate does NOT
-catch an *extra* public symbol (tests check what you specified, not what Qwen added on
-the side; this is how `is_valid()` slipped in). So: glance at that list. Anything you
-intended, keep. Anything unrequested, re-delegate a spec that forbids it. Do NOT read
-the whole diff to find these — that would burn the tokens delegation exists to save.
+The server already ran the gate. A **clean `STATUS: success`** — no `gate_suspect`, no
+`success_but_preflight_passed` — means it genuinely went red→green. **That is your
+verification.** Do not re-run the gate, and **do not read the implementation Qwen wrote.**
+Reading its code is the exact token cost delegation exists to avoid, and it tells you
+nothing the gate has not already decided. The gate is your interface to the work; the
+code behind it is opaque to you by design. (Measured: a manager that re-read the code to
+"double-check" a passing gate is what made delegation cost *more* than doing it solo.)
 
+What you DO look at — all deterministic, zero tokens, already in the verdict:
 
-Never trust `STATUS: success` alone. Run the gate yourself. Read the diff.
+- **`CHANGED:`** — the filesystem's account of what moved. Trust it over Qwen's prose; if
+  they disagree, Qwen is wrong.
+- **`NEW PUBLIC SURFACE:`** — new public symbols Qwen introduced. A passing gate does NOT
+  catch an *extra* public name (tests check what you specified, not what Qwen added on the
+  side — this is how `is_valid()` slipped in). Glance at the list: keep what you intended,
+  re-delegate a spec forbidding anything you did not ask for.
 
-- `CHANGED:` is the filesystem's account — trust it over Qwen's prose. If they
-  disagree, Qwen is wrong.
-- `STATUS: gate_suspect` means your gate is broken, not the code. Fix the gate; do
-  not let it iterate against an impossible target.
-- `success_but_preflight_passed` means the gate was already green — the pass proves
+The two ways a green can lie, both flagged for you:
+
+- **`gate_suspect`** — the gate is broken, not the code. Fix the *gate*; do not iterate
+  against an impossible target.
+- **`success_but_preflight_passed`** — the gate was already green, so the pass proves
   nothing. Tighten it.
-- If the work is wrong: `git checkout . && git clean -fd` (never `-fdx`, it destroys
-  the venv). Then re-delegate with a fixed spec, in a **fresh** session — a poisoned
-  session replays the same bad trajectory.
+
+**On failure** (retries exhausted, gate still red) — still do NOT read the whole file. In
+order:
+
+1. The final error is already in the verdict, and the server's retry loop is free.
+   Re-delegate: another attempt, a **fresh** session, or a one-line hint about what to try.
+   Give Qwen more free shots before you spend any tokens of your own.
+2. If `gate_suspect` is flagged, the gate is wrong — fix it, don't blame the code.
+3. Only if it keeps failing the *same* assertion across re-delegations, ask for the
+   *specific failing snippet* (a bounded read, not the whole file) and hand back a targeted
+   diagnosis for Qwen to apply.
+4. **Last resort — you edit, not Qwen, and you patch, not rewrite.** If Qwen cannot
+   diagnose even from the targeted hint, only then read the failing code yourself and fix
+   it with `Edit` — the smallest patch to the part that fails the gate. **Do not rewrite
+   from scratch** (you would be throwing away a working majority to re-derive it at your own
+   token cost) and **do not hand the pen back to Qwen** here — if it could have fixed this
+   it would have at rung 1–3. Then re-run the gate to confirm, and note in your report that
+   you had to touch the code. This rung is genuinely rare; reaching it often means the
+   *spec* was underspecified, so also ask whether the gate should have caught this earlier.
+
+**Rollback** if the work is wrong: `git checkout . && git clean -fd` (never `-fdx` — it
+destroys the venv), then re-delegate with a fixed spec in a **fresh** session (a poisoned
+session replays the bad trajectory).
+
+**Retry budget:** attempts default to the project's `.qwen-delegate.json` `max_iterations`
+(or the built-in default). You normally do not set `max_iterations` — leave the human's
+project default in force. Each attempt is a full build, so it also bounds wall time.
 
 ## Rules
 

@@ -141,9 +141,14 @@ TOOL = {
             "max_iterations": {
                 "type": "integer",
                 "description": (
-                    f"Attempts before giving up (default {DEFAULT_MAX_ITER}, max 10). On "
-                    "each failure the verify output is fed back and Qwen retries with "
-                    "warm context. Worker tokens are free -- raise this for fiddly tasks."
+                    f"Attempts before giving up (1 = one shot, no retry; max 10). On each "
+                    "failure the verify output is fed back and Qwen retries with warm "
+                    "context -- the manager is NOT involved in that loop. Usually omit "
+                    "this: the retry budget is a user-set knob, defaulting to the "
+                    "project's .qwen-delegate.json `max_iterations`, then the built-in "
+                    f"default ({DEFAULT_MAX_ITER}). Pass it only to deviate for one call. "
+                    "Worker tokens are free, but each attempt is a full build, so it also "
+                    "bounds wall time -- keep it modest."
                 ),
             },
             "on_compaction": {
@@ -538,18 +543,38 @@ def unconfigured_notice(cwd, state, path):
     )
 
 
-def spec_globs(cwd):
-    """Protected-spec patterns for this project. Per-project config wins."""
+def project_config(cwd):
+    """Parsed <cwd>/.qwen-delegate.json (the per-project override file), or {}.
+
+    Recognised keys: `spec_globs` (list) and `max_iterations` (int, the retry budget).
+    A missing or corrupt file is treated as no overrides, never an error."""
     try:
-        cfg = os.path.join(cwd, PROJECT_CONFIG)
-        if os.path.isfile(cfg):
-            with open(cfg) as f:
-                globs = (json.load(f) or {}).get("spec_globs")
-            if isinstance(globs, list) and globs:
-                return [str(g) for g in globs]
+        p = os.path.join(cwd, PROJECT_CONFIG)
+        if os.path.isfile(p):
+            with open(p) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
     except Exception as e:
         log(f"warning: could not read {PROJECT_CONFIG}: {e!r}; using defaults")
+    return {}
+
+
+def spec_globs(cwd):
+    """Protected-spec patterns for this project. Per-project config wins."""
+    globs = project_config(cwd).get("spec_globs")
+    if isinstance(globs, list) and globs:
+        return [str(g) for g in globs]
     return DEFAULT_SPEC_GLOBS
+
+
+def resolve_max_iter(cwd, arg):
+    """Retry budget: attempts = 1 initial + (N-1) retries. Precedence:
+    per-call arg > project `.qwen-delegate.json` max_iterations > built-in default.
+    Clamped to [1, 10]. Each attempt is a full worker build, so this also bounds wall
+    time -- keep it modest."""
+    cfg = project_config(cwd).get("max_iterations")
+    return max(1, min(10, int(arg or cfg or DEFAULT_MAX_ITER)))
 
 
 def spec_files(cwd):
@@ -1174,7 +1199,7 @@ def run_qwen(args):
     verify = args.get("verify")
     approval_mode = args.get("approval_mode", "yolo")
     timeout = max(30, min(MAX_TIMEOUT, int(args.get("timeout_sec") or DEFAULT_TIMEOUT)))
-    max_iter = max(1, min(10, int(args.get("max_iterations") or DEFAULT_MAX_ITER)))
+    max_iter = resolve_max_iter(cwd, args.get("max_iterations"))
     session_id = args.get("session_id")
     on_compaction = args.get("on_compaction") or "reinject"
     if on_compaction not in ("reinject", "discard"):
