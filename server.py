@@ -1287,6 +1287,7 @@ def run_qwen(args):
         "session_hint": session_id,
     }
 
+    prev_v_out = None  # previous attempt's verify output, to detect a repeated failure (#24)
     for attempt in range(1, max_iter + 1):
         log(f"attempt {attempt}/{max_iter} cwd={cwd} resume={session_id or '-'}")
 
@@ -1394,8 +1395,15 @@ def run_qwen(args):
                 last_verify=v_out,
             )
 
+        # Same failure as last attempt -> plain error-feedback is looping; tell Qwen to
+        # change approach rather than retry a variation (#24 Reflexion).
+        repeated = prev_v_out is not None and v_out.strip() == prev_v_out.strip()
+        prev_v_out = v_out
+
         if attempt < max_iter:
-            prompt, action = retry_prompt(session_id, task, verify, v_out, on_compaction)
+            prompt, action = retry_prompt(
+                session_id, task, verify, v_out, on_compaction, repeated=repeated
+            )
             if action != "none":
                 ctx[action + "s"] = ctx.get(action + "s", 0) + 1
                 send_suffix = True  # a restored/cold session needs the handoff format
@@ -1419,7 +1427,8 @@ def run_qwen(args):
     return render("verify_failed", session_id, trail, result_text, denials, max_iter, ctx)
 
 
-def retry_prompt(session_id, task, verify, v_out, on_compaction="reinject"):
+def retry_prompt(session_id, task, verify, v_out, on_compaction="reinject",
+                 repeated=False):
     """
     The prompt for attempt N+1. Returns (prompt, action) where action is one of
     "none" | "reinject" | "discard".
@@ -1444,10 +1453,26 @@ def retry_prompt(session_id, task, verify, v_out, on_compaction="reinject"):
     Either way `ack_compaction` fires once per compaction, so compacted-once-then-
     resumed-twice acts on the first resume only.
     """
+    # Reflexion (#24): don't just re-send the error -- make Qwen diagnose before it edits.
+    # Free tokens, zero Claude cost; the gate still decides, so a wrong self-diagnosis just
+    # fails again and we move on. `repeated` (the same failure recurred) means plain
+    # error-feedback is looping, so force a change of approach rather than another variation.
+    reflect = (
+        "Before editing, state in one or two sentences: (1) the ROOT CAUSE of this "
+        "specific failure and (2) the fix you will make. Then apply it so the command "
+        "passes."
+    )
+    if repeated:
+        reflect = (
+            "You have failed the SAME check again: your previous edit did not change this "
+            "result, so that approach is wrong. Do not retry a variation of it. State in "
+            "one or two sentences (1) why the previous approach cannot work and (2) a "
+            "DIFFERENT approach to try, then apply it so the command passes."
+        )
     failure = (
         f"The verification command failed. This is the real output:\n\n"
         f"```\n{truncate(v_out, VERIFY_CAP)}\n```\n\n"
-        f"Fix the code so this command passes."
+        f"{reflect}"
     )
     if not was_compacted_since_ack(session_id):
         return failure, "none"
