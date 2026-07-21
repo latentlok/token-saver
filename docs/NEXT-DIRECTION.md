@@ -1,5 +1,9 @@
 # Next direction: make Qwen a net token *saver*, not a subagent tax
 
+> **Superseded by [DIRECTION-v2.md](DIRECTION-v2.md)** (2026-07-21). Kept for the
+> economics measurements (break-even ~21k, subagent-tax analysis), which still hold and
+> motivated the v2 redesign.
+
 Handoff for a fresh session. **Start here — this is the question to ponder before any code.**
 
 ## The opening question
