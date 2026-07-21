@@ -110,6 +110,9 @@ subprocess argv equals the v1 hardcoded invocation (the crane and the new engine
 **Public surface:** `delegate(args: dict) -> ctx` where ctx satisfies contract C3.
 
 **Seam changes:**
+0. **Full-sha pre_sha:** capture the pre-run base as `git rev-parse HEAD` (full),
+   not v1's short `head_sha()` — qd.gittree's guards pin full-sha comparisons
+   (see gittree_spec's CONTRACT CHANGE note).
 1. **Prefilter (C8):** after each invoke — detect changed files matching `*_qwen.*`
    (from `gittree.status_map` diff vs pre-run); if a test command is known (bootstrap
    detection) run it on those files, capture ≤2,000 chars. Wire per C8: gate red →

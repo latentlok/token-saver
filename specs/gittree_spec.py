@@ -28,6 +28,11 @@ Public surface pinned here (all ported verbatim from server.py):
     spec_globs, DEFAULT_SPEC_GLOBS, spec_files, violated_specs, revert_specs,
     committed_during_run, new_public_symbols, blast_radius, reset_worktree
 
+CONTRACT CHANGE vs v1 (deliberate, surfaced by the port build): `pre_sha` args
+(committed_during_run, violated_specs base, revert_specs base) take the FULL
+40-char sha (`git rev-parse HEAD`). v1's engine captured SHORT shas
+(server.py:1299 head_sha) -- the M2 engine port MUST capture full shas.
+
 Run:  python3 specs/gittree_spec.py
 """
 
