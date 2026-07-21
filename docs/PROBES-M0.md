@@ -43,7 +43,17 @@ Recipe (the qwen-local graph profile):
   (`hook install` — post-commit/checkout; may replace part of our post-verdict wiring,
   evaluate at M5).
 
-## Probe 3 — retrieval quality: **PARTIAL PASS** (semantic-at-scale pending)
+## Probe 3 — retrieval quality: **PASS** (semantic-at-scale confirmed)
+
+At-scale semantic extract of this repo via local Qwen: 18 doc files enriched,
+58,699 in / 8,401 out tokens, $0. After enrichment, **concept queries work**:
+`explain "spec guard"` → a `concept` node ("Spec Guard Mechanism") referenced by
+Findings, Principles, and Worker Rules — the design-rationale layer the one-loop
+workflow needs. Code nodes fully survived the curated rebuild (`server_blast_radius`
+et al. present; 640→482 was dedup/curation, not loss). Residue to know: the model
+mis-attributed 5 nodes (deterministically dropped by graphify's guard) and omitted 4
+doc files (README + archives; a re-run retries them) — the semantic layer stays a
+lead, structurally guarded. Pre-enrichment detail below still holds:
 
 - `graphify explain "blast_radius"` on this repo: exact source line (L770 — verified
   correct), true callers/callees, linked rationale node — all `[EXTRACTED]` with real
