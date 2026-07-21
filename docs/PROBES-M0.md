@@ -76,21 +76,27 @@ endpoint's `parallel_max` after the run log's peak-context column clears 96k. KV
 facts (queue eviction, model-swap reloads) are handled structurally by the
 whole-subprocess endpoint semaphore.
 
-## Probe 5 — client-side MCP concurrency: **SERIALIZED** (measured)
+## Probe 5 — client-side MCP concurrency: **per-AGENT-loop serialization** (3 regimes)
 
-Stub stdio MCP server logging request arrival; headless `claude -p` told to make two
-parallel tool calls in one message.
+Stub stdio MCP server(s) logging request arrival; headless `claude -p`.
 
-    15s calls:  A arrived 13.4s, resp 28.4s; B arrived 28.40s  (13ms after A's resp)
-    130s calls: A arrived 6.0s, resp 136.0s; B arrived 136.0s; total 266s = sum
+| regime | result |
+|---|---|
+| one agent, 2 calls in one message, one server (15s & 130s runs) | **SERIALIZED** — B arrives ms after A's response; two 130s calls took 266s = sum, even past the 120s auto-background threshold |
+| one agent, 2 calls in one message, **two different servers** | **SERIALIZED** — B hit server 2 exactly 1ms after server 1 answered A; cross-server changes nothing |
+| **two subagents, one shared server** | **PARALLEL** — A arrived 255ms after B, overlapping; both done in ~25s = max, not sum |
 
-The client does not dispatch call B until response A returns, even past the 120s
-auto-background threshold (headless mode). **Design consequence: multi-call fan-out
-cannot be relied on; the guaranteed mechanism is a `batch` parameter** — one MCP call
-carrying N delegation items, fanned across worktrees *inside* our concurrent server
-(HLD C9 updated). Whether the interactive session or subagent-shared connections
-multiplex differently is untested; if they do, multi-call fan-out becomes a bonus, not
-a dependency. Re-validate during M4 wiring.
+Conclusion: **serialization is a property of the agent loop, not the connection or the
+server.** One agent dispatches MCP calls sequentially regardless of server count; N
+agents multiplex concurrently over one stdio connection. Consequences:
+
+- The v2 server's concurrent dispatch (S1) is genuinely required — concurrent requests
+  on one connection are real.
+- Fan-out has two working mechanisms: **`batch`** (C9; server-side fan-out in one call
+  — primary: no per-agent overhead, no client dependence) and **N thin manager
+  subagents** (proven client-side parallelism; works against the serial v1 server
+  today, where calls queue server-side).
+- Single-loop parallel tool_use blocks are decorative for MCP — never rely on them.
 
 ## Probe 6 — per-process endpoint/model override: **ANSWERED** (settings injection only)
 

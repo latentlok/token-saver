@@ -149,8 +149,11 @@ self-test must not doom-loop the run (measured failure mode), hence advisory.
 refusal naming DIRECTION-v2's parked dial), and `batch: [{task, verify, ...}]` — N
 independent delegation items fanned across worktrees *inside* the server (worktree
 implied "auto", per-item receipts, endpoint semaphore caps concurrency). Batch is the
-**primary fan-out mechanism**: probe 5 measured that the client serializes multi-call
-dispatch to one stdio server, so fan-out must not depend on it.
+**primary fan-out mechanism**. Probe 5 (3 regimes): MCP dispatch serializes per
+*agent loop* — one agent's parallel calls serialize even across different servers,
+but N subagents multiplex concurrently over one shared connection. So: batch for
+overhead-free fan-out, N thin manager subagents as the proven client-side alternative;
+never rely on single-loop parallel tool_use.
 
 ## 6. Concurrency model
 
