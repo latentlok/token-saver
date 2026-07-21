@@ -27,7 +27,11 @@ core, `runlog` core) freeze current `server.py` behavior; their existing specs m
 `default` → `QWEN_LOCAL`. Missing machine file is normal (builtin). `render_argv`
 substitutes `{task}`, `{mode}`, `{resume}` into `argv`; a profile whose argv lacks
 `{task}` is invalid. `cost_usd` = tokens × prices / 1e6, exact float math is fine
-(record-keeping, not billing).
+(record-keeping, not billing). Endpoint/model switching is ONLY via
+`settings_overlay` (C1) — probed: `-m` and `OPENAI_*` env are silently ignored, and an
+overlay with a bare `model.baseUrl` is validated away against the providers registry;
+the overlay must carry a complete `modelProviders` entry + `model` + auth selection.
+`QWEN_LOCAL.settings_overlay` is null (inherits the user's own config untouched).
 
 **Edge cases:** malformed `executors.json` → structured refusal string naming the file
 (never a traceback); unknown profile name → refusal listing known names; profile names
@@ -123,10 +127,17 @@ subprocess argv equals the v1 hardcoded invocation (the crane and the new engine
 4. **Trust stub (C9):** `args["trust"]` ≠ "verified" → structured refusal;
    `ctx["trust"]="verified"`.
 
+5. **Batch (C9, from probe 5):** `batch: [items]` fans N independent delegations
+   across worktrees on server-side threads (endpoint semaphore caps real concurrency;
+   on the 1-worker endpoint items serialize whole-run, preserving KV cache). Returns
+   per-item receipts, each with its own MERGE lines. `task` and `batch` are mutually
+   exclusive.
+
 **Edge cases:** prefilter test command itself crashes (rc≥2 vs test-failure rc=1) →
 treat as "prefilter unavailable", never as builder failure; builder deletes its own
 `*_qwen.*` tests mid-iteration → prefilter simply has nothing to run (allowed — they're
-the builder's files); worktree acquire fails → refusal, no partial run.
+the builder's files); worktree acquire fails → refusal, no partial run; a batch item's
+refusal (dirty spec, bad args) fails that item's receipt only, never the batch.
 
 **Spec asserts:** stage order (pre-run gate → invoke → prefilter → gate) observable via
 a scripted fake executor + fake gate; C8 truth table (4 combinations of gate×prefilter

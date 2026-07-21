@@ -83,8 +83,13 @@ Claude speaks at most three times; everything else is free-side.
 bootstrap):
 
     {"name": str, "argv": [str],            # template; MUST contain "{task}"
-     "env": {str: str},                     # merged over os.environ at launch — this is
-                                            # how a run is pointed at its one endpoint
+     "env": {str: str},                     # merged over os.environ at launch
+     "settings_overlay": dict | null,       # PROBED (6a-6d): -m flag and OPENAI_* env
+                                            # are silently ignored under settings v4;
+                                            # only QWEN_CODE_SYSTEM_SETTINGS_PATH with a
+                                            # COMPLETE modelProviders entry switches the
+                                            # endpoint/model. Rendered to a temp file at
+                                            # invoke; its path exported via env.
      "price_in_per_mtok": num, "price_out_per_mtok": num,
      "endpoint": str,                       # names a C7 endpoint — the shared scarce
                                             # resource (one GPU/proxy/provider account)
@@ -141,7 +146,11 @@ self-test must not doom-loop the run (measured failure mode), hence advisory.
 
 **C9 — tool input additions** (`qwen_delegate`): `worktree: "auto"|"off"` (default
 "off"), `executor: str`, `trust: str` (accepted value: `"verified"`; anything else →
-refusal naming DIRECTION-v2's parked dial).
+refusal naming DIRECTION-v2's parked dial), and `batch: [{task, verify, ...}]` — N
+independent delegation items fanned across worktrees *inside* the server (worktree
+implied "auto", per-item receipts, endpoint semaphore caps concurrency). Batch is the
+**primary fan-out mechanism**: probe 5 measured that the client serializes multi-call
+dispatch to one stdio server, so fan-out must not depend on it.
 
 ## 6. Concurrency model
 
@@ -183,6 +192,12 @@ Cutover gate: all `specs/*` green against the new entry **and** live end-to-end 
 (delegate, query, best-of-N, bootstrap-on-fresh-repo, scoped) through Claude Code.
 
 ## 8. Probes (M0 — no code until answered)
+
+> **Answered 2026-07-22 — results in [PROBES-M0.md](PROBES-M0.md).** Headlines: ollama
+> backend works (free index confirmed, `graphifyy[ollama]` extra required); structural
+> re-index 1.9s repo-wide; `built_at_commit` recorded natively; client serializes MCP
+> dispatch → `batch` param (C9) is the fan-out mechanism; endpoint/model override only
+> via full settings overlay (C1).
 
 1. graphify semantic backend accepts the local Qwen endpoint.
 2. graphify incremental API shape (file list? auto-diff? records a sha?) → `graphify_cmd`.
