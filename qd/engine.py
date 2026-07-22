@@ -6,6 +6,7 @@ Ports server.py's _delegate_once / run_qwen / retry_prompt into a clean
 two-function surface backed entirely by qd submodules.
 """
 
+import json
 import os
 import subprocess
 
@@ -31,6 +32,58 @@ from qd import graph
 
 _DEFAULT_MAX_ITER = 3
 _DEFAULT_TIMEOUT = 900
+
+_SELF_GATE_PATH = os.path.join(".qwen-delegate", "selfgate.sh")
+
+_SELF_GATE = """#!/bin/bash
+# Generated per-attempt by trust="self" (L5): the DELEGATE'S OWN suite is the
+# gate; this wrapper only guards the vacuous pass. Worker edits are overwritten.
+cd "$(dirname "$0")/.." || exit 1
+out=$({suite} 2>&1)
+status=$?
+echo "$out" | tail -25
+[ "$status" -ne 0 ] && exit 1
+ran=$(echo "$out" | grep -Eo 'Ran [0-9]+ tests?|[0-9]+ passed' | grep -Eo '[0-9]+' | head -1)
+if [ -n "$ran" ] && [ "$ran" -lt {min} ]; then
+  echo "SELF-GATE: only $ran tests ran -- write a real suite (>= {min} tests)"
+  exit 1
+fi
+if [ -z "$ran" ]; then
+  echo "SELF-GATE NOTE: could not parse a test count; vacuous-pass guard inactive"
+fi
+exit 0
+"""
+
+
+def _ensure_self_gate(work_cwd):
+    """(Re)write the trust="self" gate script; return the verify command.
+
+    Rewritten before every gate run so a worker edit to the script cannot
+    survive to the next gate (the same reason spec files auto-revert). Lives
+    in .qwen-delegate/ -- self-gitignored, so it never appears in CHANGED.
+    Suite: the project's detected test command, else stdlib unittest discovery.
+    Vacuous-pass guard: >= min_tests (project .qwen-delegate.json, default 5)
+    when a test count is parseable (unittest "Ran N" / pytest "N passed").
+    """
+    min_tests = 5
+    try:
+        with open(os.path.join(work_cwd, ".qwen-delegate.json")) as f:
+            min_tests = int(json.load(f).get("min_tests") or min_tests)
+    except Exception:
+        pass
+    suite = detect_test_cmd(work_cwd) or \
+        "python3 -m unittest discover -s tests -t . -v"
+    d = os.path.join(work_cwd, ".qwen-delegate")
+    os.makedirs(d, exist_ok=True)
+    gi = os.path.join(d, ".gitignore")
+    if not os.path.exists(gi):
+        with open(gi, "w") as f:
+            f.write("*\n")
+    path = os.path.join(work_cwd, _SELF_GATE_PATH)
+    with open(path, "w") as f:
+        f.write(_SELF_GATE.format(suite=suite, min=min_tests))
+    os.chmod(path, 0o755)
+    return f"bash {_SELF_GATE_PATH}"
 
 
 def _run_verify(cmd, cwd):
@@ -119,16 +172,18 @@ def delegate(args):
     worktree_mode = args.get("worktree")
     touch_scope = args.get("touch_scope")
 
-    # --- Precondition: trust ---
+    # --- Precondition: trust (R3: both ends of the slider) ---
     trust = args.get("trust", "verified")
-    if trust != "verified":
+    if trust not in ("verified", "self"):
         return {
             "status": "refused",
             "session_id": None,
             "trail": [],
             "result_text": (
-                f"Trust dial \"{trust}\" is not \"verified\" — run refused. "
-                "Delegation is only allowed when trust is set to \"verified\"."
+                f"Trust dial \"{trust}\" is unknown — run refused. Accepted: "
+                "\"verified\" (your verify command is the gate) or \"self\" "
+                "(L5 full trust — the delegate's own suite is the gate; "
+                "verify optional). Intermediate levels are a parked design."
             ),
             "denials": [],
             "max_iter": max_iter,
@@ -195,6 +250,11 @@ def delegate(args):
     if worktree_mode == "auto":
         wt = worktrees.acquire(cwd)
         work_cwd = wt["path"]
+
+    # --- trust="self" (R3): server-generated gate over the delegate's own suite ---
+    self_gate = trust == "self" and not verify
+    if self_gate:
+        verify = _ensure_self_gate(work_cwd)
 
     # --- Pre-run snapshot ---
     _, pre_sha_full = git(work_cwd, "rev-parse", "HEAD")
@@ -402,6 +462,8 @@ def delegate(args):
                     prefilter_failed = True
 
         # --- Run verify ---
+        if self_gate:
+            _ensure_self_gate(work_cwd)  # overwrite any worker edit to the gate
         passed, v_out = _run_verify(verify, work_cwd)
 
         if passed:

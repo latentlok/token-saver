@@ -91,7 +91,7 @@ TOOL = json.loads(r'''
       },
       "trust": {
         "type": "string",
-        "description": "Trust level. Only 'verified' is accepted today (gate decides); other levels are a parked design."
+        "description": "'verified' (default): your `verify` command is the gate. 'self': L5 full trust -- the delegate writes AND grades its own suite; `verify` optional (server generates a non-vacuous-suite gate). Intermediate levels: parked."
       },
       "touch_scope": {
         "type": "array",

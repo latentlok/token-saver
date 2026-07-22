@@ -63,6 +63,11 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         for t in trail:
             body.append(f"  - {t}")
 
+    # R3: what a green here MEANS depends on who authored the gate -- say so.
+    if ctx.get("trust") == "self":
+        body.append("TRUST: self (L5) -- gate = the delegate's own suite, "
+                    "non-vacuous guard only")
+
     # Prominent: the project was just self-configured. Relay it and act on the two open
     # questions (test command if undetected, CLAUDE.md policy block).
     if ctx.get("bootstrap_note"):
@@ -358,6 +363,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                 "cmd": digest(ctx.get("verify")),
                 "preflight_passed": ctx.get("preflight"),
             },
+            "trust": ctx.get("trust"),
             "changed_files": changed,
             "head_moved": moved,
             "commits_by_worker": n_commits,
