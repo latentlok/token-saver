@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""
+The delegation loop — behavior frozen by specs/engine_spec.py.
+
+Ports server.py's _delegate_once / run_qwen / retry_prompt into a clean
+two-function surface backed entirely by qd submodules.
+"""
+
+import os
+import subprocess
+
+from qd.profiles import resolve, cost_usd
+from qd.invoke import (
+    run_executor, accum_stats, cum_zero,
+    was_compacted_since_ack, ack_compaction,
+    truncate,
+)
+from qd.gittree import (
+    git, is_git_repo,
+    snapshot, violated_specs, revert_specs,
+)
+from qd.bootstrap import (
+    worker_rules_status, bootstrap_worker_rules,
+    bootstrap_notice, bootstrap_failed_refusal,
+    nongit_refusal, detect_test_cmd,
+)
+from qd.verdict import render, HANDOFF_SUFFIX, VERIFY_CAP
+from qd import refs
+
+_DEFAULT_MAX_ITER = 3
+_DEFAULT_TIMEOUT = 900
+
+
+def _run_verify(cmd, cwd):
+    """Run verify shell command; return (passed_bool, combined_output_str)."""
+    try:
+        v = subprocess.run(
+            cmd, cwd=cwd, shell=True,
+            capture_output=True, text=True, timeout=300,
+        )
+        out = ((v.stdout or "") + (v.stderr or "")).strip()
+        return v.returncode == 0, out
+    except subprocess.TimeoutExpired:
+        return False, "verify command timed out after 300s"
+
+
+def _retry_prompt(session_id, task, verify, v_out, on_compaction, repeated=False):
+    """Build the retry prompt for attempt N+1.
+
+    Returns (prompt_text, action) where action is "none" | "reinject" | "discard".
+    """
+    # Reflexion: force Qwen to diagnose before editing.
+    if repeated:
+        reflect = (
+            "You have failed the SAME check again: your previous edit did not change this "
+            "result, so that approach is wrong. Do not retry a variation of it. State in "
+            "one or two sentences (1) why the previous approach cannot work and (2) a "
+            "DIFFERENT approach to try, then apply it so the command passes."
+        )
+    else:
+        reflect = (
+            "Before editing, state in one or two sentences: (1) the ROOT CAUSE of this "
+            "specific failure and (2) the fix you will make. Then apply it so the command "
+            "passes."
+        )
+
+    failure = (
+        f"The verification command failed. This is the real output:\n\n"
+        f"```\n{truncate(v_out, VERIFY_CAP)}\n```\n\n"
+        f"{reflect}"
+    )
+
+    if not was_compacted_since_ack(session_id):
+        return failure, "none"
+
+    ack_compaction(session_id)
+
+    if on_compaction == "discard":
+        return (
+            f"A previous attempt at this task was made in a session that has been "
+            f"discarded, so you are starting fresh. Work already on disk may be partial "
+            f"or wrong -- read the current state rather than assuming.\n\n"
+            f"{failure}\n\nVerify command: {verify}\n\nTask:\n{task}"
+        ), "discard"
+
+    return (
+        f"{failure}\n\n"
+        f"Your conversation history was summarised (compacted), so you may have lost the "
+        f"original instructions, and any summary of your earlier work may be inaccurate. "
+        f"Do not reconstruct what you think you did -- re-read the files and work from "
+        f"what follows.\n\n"
+        f"Verify command: {verify}\n\nOriginal task:\n{task}"
+    ), "reinject"
+
+
+def delegate(args):
+    """Single-candidate delegation loop.
+
+    Returns dict with keys:
+        status, session_id, trail, result_text, denials,
+        max_iter, last_verify, ctx
+    """
+    task = args["task"]
+    cwd = args["cwd"]
+    verify = args.get("verify")
+    approval_mode = args.get("approval_mode", "auto-edit")
+    max_iter = args.get("max_iterations", _DEFAULT_MAX_ITER)
+    timeout = args.get("timeout_sec", _DEFAULT_TIMEOUT)
+    if timeout:
+        timeout = max(30, min(7200, int(timeout)))
+    else:
+        timeout = _DEFAULT_TIMEOUT
+    session_id = args.get("session_id")
+    on_compaction = args.get("on_compaction") or "reinject"
+    if on_compaction not in ("reinject", "discard"):
+        on_compaction = "reinject"
+
+    # --- Precondition: trust ---
+    trust = args.get("trust", "verified")
+    if trust != "verified":
+        return {
+            "status": "refused",
+            "session_id": None,
+            "trail": [],
+            "result_text": (
+                f"Trust dial \"{trust}\" is not \"verified\" — run refused. "
+                "Delegation is only allowed when trust is set to \"verified\"."
+            ),
+            "denials": [],
+            "max_iter": max_iter,
+            "last_verify": None,
+            "ctx": {},
+        }
+
+    # --- Precondition: git repo ---
+    guard_on = is_git_repo(cwd)
+    if not guard_on:
+        return {
+            "status": "refused",
+            "session_id": None,
+            "trail": [],
+            "result_text": nongit_refusal(cwd),
+            "denials": [],
+            "max_iter": max_iter,
+            "last_verify": None,
+            "ctx": {},
+        }
+
+    # --- Bootstrap rules file ---
+    bootstrap_note = None
+    rules_state, rules_path = worker_rules_status(cwd)
+    if rules_state != "ok":
+        cmd, path = bootstrap_worker_rules(cwd)
+        if not path:
+            return {
+                "status": "refused",
+                "session_id": None,
+                "trail": [],
+                "result_text": bootstrap_failed_refusal(cwd, "IO error"),
+                "denials": [],
+                "max_iter": max_iter,
+                "last_verify": None,
+                "ctx": {},
+            }
+        bootstrap_note = bootstrap_notice(cmd, path)
+
+    # --- Precondition: no dirty protected spec ---
+    pre_dirty = violated_specs(cwd)
+    if pre_dirty:
+        return {
+            "status": "refused",
+            "session_id": None,
+            "trail": [],
+            "result_text": (
+                f"STATUS: error\nUncommitted changes in protected spec file(s): "
+                f"{', '.join(pre_dirty)}\n\nCommit or stash the spec changes first, "
+                f"then delegate."
+            ),
+            "denials": [],
+            "max_iter": max_iter,
+            "last_verify": None,
+            "ctx": {},
+        }
+
+    # --- Resolve executor profile ---
+    profile = resolve(cwd, args.get("executor"))
+
+    # --- Pre-run snapshot ---
+    _, pre_sha_full = git(cwd, "rev-parse", "HEAD")
+    pre_status = snapshot(cwd)
+    pre_clean = not pre_status
+
+    # --- Pre-flight verify ---
+    preflight = None
+    preflight_out = ""
+    if verify:
+        preflight, preflight_out = _run_verify(verify, cwd)
+
+    # --- Refs snapshot (pre-run) ---
+    refs_before = refs.snapshot(cwd)
+
+    # --- Shell feedback prefix ---
+    feedback = (args.get("shell_feedback") or "").strip()
+    prompt = task
+    if feedback:
+        prompt = (
+            "APPROVAL RESULT for shell commands you requested earlier "
+            "(from the manager reviewing them):\n"
+            f"{feedback}\n"
+            "Respect these: do NOT retry a denied command; use the allowed ones or an "
+            "alternative. Now continue the task below.\n\n---\n\n"
+            + task
+        )
+
+    # --- Initial session tracking ---
+    sessions = [session_id] if session_id else []
+    send_suffix = False
+
+    # --- ctx (C3 shape) ---
+    ctx = {
+        "cwd": cwd,
+        "guard_on": guard_on,
+        "preflight": preflight,
+        "preflight_out": preflight_out,
+        "pre_status": pre_status,
+        "pre_sha": pre_sha_full,
+        "pre_clean": pre_clean,
+        "peak": 0,
+        "meta": {},
+        "timeout": timeout,
+        "approval_mode": approval_mode,
+        "task": task,
+        "verify": verify,
+        "cum": cum_zero(),
+        "sessions": sessions,
+        "reinjects": 0,
+        "discards": 0,
+        "on_compaction": on_compaction,
+        "session_hint": session_id,
+        "bootstrap_note": bootstrap_note,
+        "notes": "",
+        "worktree": None,
+        "merge": None,
+        "graph_line": None,
+        "refs_added": [],
+        "cost_usd": 0.0,
+        "executor": args.get("executor"),
+        "trust": trust,
+    }
+
+    trail = []
+    result_text = ""
+    denials = []
+    last_verify = None
+    prev_v_out = None
+
+    for attempt in range(1, max_iter + 1):
+        suffix = HANDOFF_SUFFIX if (attempt == 1 or send_suffix) else ""
+        send_suffix = False
+
+        # --- Invoke executor ---
+        text, denials, sid, err, meta = run_executor(
+            profile, prompt, cwd, approval_mode,
+            timeout=timeout, session_id=session_id,
+            verify=verify,
+            shell_allow=args.get("shell_allow"),
+            suffix=suffix,
+        )
+
+        ctx["meta"] = meta or {}
+        ctx["peak"] = max(ctx.get("peak", 0), (meta or {}).get("peak", 0))
+        accum_stats(ctx["cum"], (meta or {}).get("stats"))
+
+        if sid:
+            session_id = sid
+            if sid not in ctx["sessions"]:
+                ctx["sessions"].append(sid)
+
+        # --- Executor error ---
+        if err:
+            trail.append(f"attempt {attempt}: {err}")
+            break
+
+        result_text = text or ""
+
+        # --- Spec guard ---
+        cheated = violated_specs(cwd, base=pre_sha_full)
+        if cheated:
+            revert_specs(cwd, cheated, base=pre_sha_full)
+            names = ", ".join(cheated)
+            trail.append(
+                f"attempt {attempt}: SPEC VIOLATION -- edited {names} (auto-reverted)"
+            )
+            if attempt < max_iter:
+                prompt = (
+                    f"You edited a protected specification file ({names}). That file "
+                    f"defines what correct means and has been reverted. Never modify a "
+                    f"protected spec file. Fix the implementation code so it satisfies the "
+                    f"spec as written. If you believe the spec is wrong, stop and say so "
+                    f"instead of editing it."
+                )
+                if was_compacted_since_ack(session_id):
+                    ack_compaction(session_id)
+                    send_suffix = True
+                    if on_compaction == "discard":
+                        ctx["discards"] += 1
+                        session_id = None
+                    else:
+                        ctx["reinjects"] += 1
+                    prompt += (
+                        f"\n\nYour conversation history was summarised (compacted), so "
+                        f"you may have lost the original instructions and any summary of "
+                        f"your earlier work may be inaccurate. Re-read the files; do not "
+                        f"reconstruct it.\n\nOriginal task:\n{task}"
+                    )
+                continue
+            break
+
+        # --- No verify: unverified success ---
+        if not verify:
+            trail.append(f"attempt {attempt}: no verify supplied")
+            break
+
+        # --- C8 prefilter (advisory) — after executor, before gate ---
+        post_snap = snapshot(cwd)
+        changed = [
+            p for p in set(list(post_snap.keys()) + list(pre_status.keys()))
+            if post_snap.get(p) != pre_status.get(p)
+        ]
+        qwen_files = [p for p in changed if "_qwen." in p]
+        prefilter_out = None
+        prefilter_failed = False
+        if qwen_files:
+            test_cmd = detect_test_cmd(cwd)
+            if test_cmd:
+                tc = f"./{test_cmd}" if not test_cmd.startswith(".") else test_cmd
+                try:
+                    pv = subprocess.run(
+                        f"{tc} {' '.join(qwen_files)}",
+                        cwd=cwd, shell=True,
+                        capture_output=True, text=True, timeout=60,
+                        env=os.environ,
+                    )
+                    prefilter_out = (
+                        ((pv.stdout or "") + (pv.stderr or "")).strip()
+                    )[:2000]
+                    prefilter_failed = pv.returncode != 0
+                except Exception:
+                    prefilter_out = "prefilter timed out or errored"
+                    prefilter_failed = True
+
+        # --- Run verify ---
+        passed, v_out = _run_verify(verify, cwd)
+
+        if passed:
+            trail.append(f"attempt {attempt}: VERIFY PASS")
+            if prefilter_failed:
+                ctx["notes"] = "self-tests failing"
+            break
+
+        trail.append(f"attempt {attempt}: verify failed")
+        last_verify = v_out
+
+        if prefilter_failed and qwen_files:
+            cmd_line = f"{tc} {' '.join(qwen_files)}"
+            out_display = prefilter_out or "(no output)"
+            last_verify = (
+                f"{v_out}\n\n"
+                f"Also: your own self-tests failed ({cmd_line}):\n"
+                f"{out_display}"
+            )
+
+        # --- Gate suspect: identical to preflight output ---
+        if preflight is False and v_out.strip() == (preflight_out or "").strip():
+            trail[-1] = (
+                f"attempt {attempt}: verify failed -- output IDENTICAL to preflight"
+            )
+            break
+
+        # --- Build retry prompt ---
+        repeated = (
+            prev_v_out is not None
+            and v_out.strip() == prev_v_out.strip()
+        )
+        prev_v_out = v_out
+
+        if attempt < max_iter:
+            prompt, action = _retry_prompt(
+                session_id, task, verify,
+                last_verify, on_compaction,
+                repeated=repeated,
+            )
+            if action != "none":
+                ctx[action + "s"] += 1
+                send_suffix = True
+                if action == "discard":
+                    session_id = None
+            continue
+
+    # --- Determine status ---
+    if not trail:
+        status = "error"
+    elif trail[-1].endswith(": VERIFY PASS"):
+        status = "success"
+    elif "SPEC VIOLATION" in trail[-1].upper():
+        status = "spec_violation"
+    elif "IDENTICAL to preflight" in trail[-1]:
+        status = "gate_suspect"
+    elif "no verify supplied" in trail[-1]:
+        status = "unverified"
+    else:
+        status = "verify_failed"
+
+    # --- Compute cost_usd ---
+    try:
+        t_main = ctx["cum"].get("tokens_main", {})
+        tokens_in = t_main.get("prompt", 0) if isinstance(t_main, dict) else 0
+        tokens_out = t_main.get("completion", 0) if isinstance(t_main, dict) else 0
+        ctx["cost_usd"] = float(cost_usd(profile, tokens_in, tokens_out))
+    except Exception:
+        ctx["cost_usd"] = 0.0
+
+    # --- Refs added ---
+    ctx["refs_added"] = refs.added(refs_before, cwd)
+
+    return {
+        "status": status,
+        "session_id": session_id,
+        "trail": trail,
+        "result_text": result_text,
+        "denials": denials,
+        "max_iter": max_iter,
+        "last_verify": last_verify,
+        "ctx": ctx,
+    }
+
+
+def run(args):
+    """Delegate then render the verdict receipt.
+
+    Returns the rendered verdict string.
+    """
+    d = delegate(args)
+    return render(
+        d["status"], d["session_id"], d["trail"],
+        d["result_text"], d["denials"],
+        d["max_iter"], d["ctx"],
+        last_verify=d["last_verify"],
+    )
