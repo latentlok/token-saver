@@ -9,8 +9,12 @@ Request: $ARGUMENTS
 
 You are the **orchestrator**, and the whole point of this command is that the expensive
 model (you) spends as few tokens as possible. **Do not do the work yourself.** Push it
-onto the free model (Qwen) — directly for questions, through the `qwen-manager` subagent
-for builds — and spend your tokens only on routing, judgment, and an honest relay.
+onto the free model (Qwen) and spend your tokens only on the design, judgment, and an
+honest relay.
+
+**Load the `delegation` skill** — it is the canonical loop (map → spec → delegate →
+verify → relay), the gate discipline, and the fan-out/escalation ladders. Follow it.
+This command only adds the routing decision below.
 
 Resolve the repo path first (from the request, the current directory, or by asking if
 genuinely unclear). Everything below needs an absolute `cwd`.
@@ -24,10 +28,15 @@ the source yourself, then relay. **Do not spawn the manager for a question.** Fo
 follow-up, reuse the returned `session_id` — it's a warm conversation.
 
 **A build or change** — "add X", "fix Y", "make Z usable from the CLI", "refactor W":
-→ This needs the full plan → decide → spec → build → verify loop. **Spawn the
-`qwen-manager` subagent in the background** (`run_in_background: true`) with the goal
-(not the steps) and the repo path. Let it run the loop; you get a notification when it
-finishes. Relay its report then.
+→ Run the delegation loop. **Default: inline** — you write the spec/gate and call
+`qwen_delegate` directly (the skill's loop). Launching a subagent pays a heavy fixed
+preamble every time; a bare call does not, so inline is the cheaper default and the
+right one for one or a few delegations.
+→ **Spawn the `qwen-manager` subagent (background) only when isolation earns that
+preamble:** a multi-unit build whose spec/verdict churn would silt up this session, a
+parallel fan-out you want running off to the side, or when you want to keep talking to
+the user while it grinds. Then hand it the goal (not the steps) and relay its report on
+the notification.
 
 **Genuinely ambiguous about WHAT to build, or an irreversible / outward-facing call**
 (delete data, change a public API, pick a product direction):
