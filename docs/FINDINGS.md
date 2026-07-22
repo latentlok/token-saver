@@ -559,6 +559,83 @@ server died mid-run, and the record is only written at the end of `render()`. Ru
 are exactly the expensive ones, so logged totals are a **floor, not a figure**, and the
 measured leverage is a slight under-count.
 
+## L5 self-grading: 34/34 green on its own suite, 23/25 on the architect's audit — and the misses share one blindspot
+
+First v3 probe (rung 1, `~/scratch/l5-probe-1`, 2026-07-22): kvlite — a persistent KV
+store (store/log/cli) built from a ~400-token architecture handoff with contracts pinned
+and every internal decision left to Qwen, which also wrote and ran its own 34-test suite
+(L5: no architect-authored gate; verify only ran *its* tests, guarding vacuous pass).
+Result: **attempt 1, all green, 410s, context peak 28%**, sensible design choices
+(escaped tab-delimited log, `-1` no-TTL sentinel, lazy expiry, dead>live compaction).
+
+A post-hoc architect audit (25 tests derived only from the contracts — `audit_spec.py`)
+found **two real violations**:
+
+1. **Multiline values corrupt the store, with total data loss.** `_escape()` handles `\`
+   and `\t` but not `\n`, so one such value splits its record across two lines; on reopen
+   the malformed line is *mid-file*, so replay re-raises and the whole store is
+   permanently unreadable. The smoking gun: its own `test_value_with_special_chars` uses
+   `'hello\tworld\\and"more'` — tab, backslash, quote, **no newline**. The mental model
+   "special chars = tab and backslash" is encoded identically in the escape function and
+   the test that grades it: they agree perfectly and are both wrong. Its completion
+   summary even claimed "multiline values survive" — confident, false, ungated. This is
+   the predicted L5 failure mode observed in the wild, not hypothesized.
+2. **Any undecodable byte kills replay entirely** — text-mode `readlines()` raises
+   `UnicodeDecodeError` before torn-record handling can run, violating the
+   corrupt-final-record contract.
+
+Everything else held: full CLI exit-code contract, TTL incl. the 0.0 boundary, torn
+*text* records, compaction, delete semantics, unicode/tab/backslash round-trips.
+
+**Trust-slider datum:** at this grain L5 delivered ~92% contract compliance (23/25), the
+misses sharing one root blindspot that self-grading *structurally* cannot catch — the
+test author and code author share the misunderstanding. The L0-style audit cost ~150
+lines of architect tests and caught both. That is the measured price gap between the
+slider's two ends, at rung-1 scale.
+
+## Coarse tasks invite plan-then-stall
+
+Same probe, first attempt: given the coarse "read the handoff and build it" task, Qwen
+read the doc, emitted a todo list, and **ended its turn without writing a single file**.
+The server correctly refused to iterate (verify output identical to preflight →
+`gate_suspect`). On well-specified narrow tasks this never occurred; coarseness doesn't
+just risk scope invention — it risks non-starts. Fixes that worked: "do NOT stop after
+planning — a plan or todo list is not a deliverable" in the task text, and making the
+gate fail *legibly* pre-work (an importable `tests/` so preflight says "0 tests ran"
+instead of an unrelated ImportError). Related gate-craft: `unittest discover` exits 0 on
+an empty suite, so an L5 gate must guard the vacuous pass explicitly.
+
+## Contract drift is invisible at L5: `cli.py` became a `cli/` package
+
+The handoff pinned `cli.py`; Qwen delivered a `cli/` package (`__init__.py` +
+`__main__.py`) plus a vestigial 9-line `cli.py` shim that can never even be imported —
+the package shadows it. Functionally green (`python -m cli` works, all exit codes
+correct), structurally off-contract, plus dead code. Nothing in the verdict surfaces
+this; only tree inspection did. Structural conformance needs either a cheap deterministic
+check (the receipt's public-surface scan caught `Log`/`Store` but not the module/package
+swap) or an explicit gate assertion — self-grading will not report it.
+
+## Outline-grain L5: Qwen can carry design authority, not just implementation
+
+Second v3 probe (rung 2, `~/scratch/l5-probe-2`, 2026-07-22): minissg — a static site
+generator specified only as a ~200-token product OUTLINE (features + entry point, zero
+contracts). Qwen designed the architecture itself: 6-module decomposition
+(config/frontmatter/markdown/template/builder/slug), documented interfaces in a README,
+sensible decisions (SHA-256 manifest for incremental builds, slug collision suffixes,
+skip-don't-crash error handling). **Attempt 1, 71/71 own tests green, 395s, context peak
+32%** — 425 source lines + 580 test lines from one outline.
+
+Design smells only review catches (self-grade structurally silent on all three):
+"titles must not contain `:`" documented as a *restriction* instead of fixing its
+front-matter parser; no default templates shipped, so the product has only ever run
+through its tests' synthetic fixtures, never end-to-end as a product; `_debug.py` debris
+left in-tree because scoped mode (correctly) denied its `rm` cleanup.
+
+**Calibration for the capability slider (qwen-local):** contract-grain (rung 1) and
+outline-grain at ~6 modules / ~400 LOC (rung 2) both clear on attempt 1 with ample
+context headroom. The workable altitude for coarse delegation is at least outline-grain;
+the ceiling is above both probes.
+
 ## Numbers
 
 - **Python source ≈ 5.54 bytes/token**, not 4.0 (measured: 379,571 bytes → 68,564 tokens).
