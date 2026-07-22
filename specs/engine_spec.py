@@ -89,9 +89,12 @@ class Fixture(unittest.TestCase):
             f.write("PROTECTED = 1\n")
         with open(os.path.join(self.cwd, "QWEN.md"), "w") as f:
             f.write("# rules\n")
+        with open(os.path.join(self.cwd, "other.py"), "w") as f:
+            f.write("ORIGINAL = 1\n")
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "base"],
                        check=True)
+        os.environ["QWEN_DELEGATE_WORKTREES"] = tempfile.mkdtemp()
         self.stub = os.path.join(td, "stub.py")
         with open(self.stub, "w") as f:
             f.write(STUB)
@@ -237,6 +240,68 @@ class Prefilter(Fixture):
         r = self.delegate()
         self.assertEqual(r["status"], "success")
         self.assertEqual(r["ctx"]["notes"], "")
+
+
+class Worktree(Fixture):
+    """M4 seam: worktree='auto' runs the whole loop in an isolated container.
+    On success the ENGINE commits the container's work (the worker never
+    commits -- the mechanism does; merge needs a committed branch) and
+    classifies mergeability read-only. On non-success the container is
+    released -- nothing worth merging, nothing leaked."""
+
+    def git_main(self, *a):
+        return subprocess.run(["git", "-C", self.cwd] + list(a),
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_auto_success_isolated_committed_classified(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(worktree="auto")
+        self.assertEqual(r["status"], "success")
+        wt = r["ctx"]["worktree"]
+        self.assertTrue(wt["branch"].startswith("qwen/"))
+        self.assertTrue(os.path.isfile(os.path.join(wt["path"], "out.py")))
+        self.assertFalse(os.path.exists(os.path.join(self.cwd, "out.py")))
+        self.assertEqual(self.git_main("status", "--porcelain"), "")
+        # The engine committed the work: branch is ahead of base.
+        ahead = self.git_main("rev-list", "--count",
+                              f"HEAD..{wt['branch']}")
+        self.assertEqual(ahead, "1")
+        self.assertEqual(r["ctx"]["merge"], "clean")
+
+    def test_auto_failure_releases_container(self):
+        self.steps([{"write": {"out.py": "wrong\n"}}])
+        r = self.delegate(worktree="auto", max_iterations=1)
+        self.assertEqual(r["status"], "verify_failed")
+        self.assertIsNone(r["ctx"]["worktree"])
+        wl = self.git_main("worktree", "list")
+        self.assertNotIn("qwen/", wl.replace(self.cwd, ""))
+
+
+class TouchScope(Fixture):
+    """M4 seam: per-task allowlist -- modify only named pre-existing files;
+    creating NEW files stays free. The spec-guard machinery generalized from
+    'never these' to 'only these'."""
+
+    def test_out_of_scope_edit_reverted_attempt_fails_then_converges(self):
+        self.steps([{"write": {"other.py": "TAMPERED = 1\n",
+                               "out.py": "MARKER\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(len(r["trail"]), 2)
+        self.assertIn("TOUCH SCOPE", r["trail"][0])
+        with open(os.path.join(self.cwd, "other.py")) as f:
+            self.assertEqual(f.read(), "ORIGINAL = 1\n")     # reverted
+        self.assertIn("other.py", self.task_seen(2))          # named in feedback
+
+    def test_new_files_always_allowed(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "brand_new_helper.py": "h = 1\n"}}])
+        r = self.delegate(touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(len(r["trail"]), 1)
+        self.assertTrue(os.path.exists(
+            os.path.join(self.cwd, "brand_new_helper.py")))
 
 
 class Refusals(Fixture):

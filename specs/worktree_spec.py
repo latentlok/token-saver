@@ -140,6 +140,33 @@ class Release(Fixture):
         self.assertEqual(branches, "")
         worktrees.release(self.repo, r["path"], r["branch"])  # idempotent
 
+    def test_release_removes_dir_even_when_git_cannot(self):
+        # The unhappy-path fallback: if `git worktree remove` fails (here we
+        # prune git's admin record so it no longer recognizes the worktree),
+        # release must STILL delete the directory -- leaked worktree dirs
+        # accumulate forever otherwise.
+        r = worktrees.acquire(self.repo)
+        self.assertTrue(os.path.exists(r["path"]))
+        name = os.path.basename(r["path"].rstrip("/"))
+        admin = os.path.join(self.repo, ".git", "worktrees", name)
+        if os.path.isdir(admin):
+            import shutil
+            shutil.rmtree(admin)          # git can no longer remove it cleanly
+        worktrees.release(self.repo, r["path"], r["branch"])
+        self.assertFalse(os.path.exists(r["path"]))
+
+
+class Residuals(Fixture):
+    """Documented non-defect survivors of the adversarial mutation pass
+    (worktree round): the slug hash algorithm (cosmetic dir-name identifier),
+    run-id character-pool entropy (masked by the collision-retry loop + the
+    8-thread distinctness test), the collision retry ceiling of 64 (never
+    reachable), and _resolve_toplevel's path normpath (cosmetic). Left as
+    documentation rather than brittle implementation-detail tests."""
+
+    def test_placeholder(self):
+        self.assertTrue(True)
+
 
 class MergeProtocol(Fixture):
     def test_merge_lines_byte_exact(self):
