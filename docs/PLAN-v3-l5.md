@@ -1,52 +1,66 @@
-# Plan — the L5 architect system (v3 execution plan)
+# Plan — building toward the takeaway (v3, second pass)
 
-Decided with the user 2026-07-22. Executes the premise of
-[DIRECTION-v3-architect-model.md](DIRECTION-v3-architect-model.md) at **L5 trust,
-deliberately**: that is where the maximum token saving lies, and the saving is the
-product. The residual risk of self-grading (measured: a data-loss bug behind a
-34/34-green suite, FINDINGS "L5 self-grading") is accepted at L5, not mitigated by
-lowering trust; audits exist on demand, outside the loop.
+Re-planned with the user 2026-07-22 (supersedes the first-pass phase table below the
+line). **The constant everything builds around:**
 
-**The premise, in the user's words:** Claude is a software architect. It translates
-product requirements to software requirements, then propagates each module down — low
-enough that Qwen can do it, high enough to not burn tokens. Goal: a system anyone can
-use to leverage open-source models to reduce token costs.
+> A regular Claude session — greenfield, existing codebase, or bug — can hand work to
+> Qwen for free, and end up spending FEWER total Claude tokens than if Claude had built
+> or read the code itself.
 
-## v2 support evaluation (2026-07-22)
+Binding decisions:
+- **Target is the regular working session.** Built-in tools stay loaded; v3 §3's
+  biggest bloat row (~35–50k resident toolset) is out of scope by definition. The
+  achievable lean-down is everything else in that table: MCP schema residency, receipt
+  size, and discipline (no re-verify, terse relay — already in the skills).
+- **The trust slider needs both ends as a real mechanism, now** — L0 (architect-authored
+  gate, today's `verify`) and L5 (delegate self-grades, server-provided gate). A copied
+  gate template is a convention, not a slider: nothing selects it per call, nothing
+  records it. Intermediate L1–L4: later.
+- **L5 residual risk stays accepted** (FINDINGS "L5 self-grading"); audits are
+  on-demand, never in the loop.
 
-The v2 engine carries this almost as-is:
-- **L5 gate works today** with zero server changes: `verify` = the delegate's own suite
-  behind a vacuous-pass guard (proven in both scratch probes, `~/scratch/l5-probe-{1,2}`).
-- **Capability-slider seam exists:** C1 profile `altitude: "lld"|"hld"` — relayed to the
-  skill, never interpreted by the server. Unconsumed until now; the architect skill maps
-  it to handoff grain.
-- **Any open-source model plugs in** via C7 executors (profiles/endpoints/pricing).
-- **Module fan-out exists:** `batch` + worktrees + per-endpoint semaphores.
-- **The architect's one cheap check at L5 exists:** read-only `qwen_query` pre-flight.
-- **Savings are measurable per run:** run-log v2 tokens/cost (F8/C5).
+## Build phases (no end-to-end product runs; each lands as repo code/docs)
 
-Gaps → phases below: no architect layer above the engine; `trust` parked at
-`"verified"`; the lean-architect teardown (v3 §3) unbuilt; packaging absent.
+| # | what | v3 anchor | status |
+|---|---|---|---|
+| **R1** | **Tool list, not tool essays.** `qwen_delegate`/`qwen_query` present as one-line descriptors + minimal param schema; every measured-guidance essay moves into the skills (loaded only when delegating). Target: tools/list payload ~2.5k tokens → ~200. | §3 row "MCP schema" | approved — next |
+| **R2** | **Compact receipt grammar.** Green path = `STATUS + CHANGED + NEW PUBLIC SURFACE + COST` + at most one NOTES line (~100–150 tokens). CONTINUE/HANDOFF/TIME/TOOLS/CONTEXT and gate-output tails become red-path/flag-only. Amends the C2 "v1 frozen" clause — v3 §3 named this kill explicitly. | §3 row "verdict receipt" | approved |
+| **R3** | **Trust slider, both ends.** Unpark C9 `trust`: `"verified"` (L0 end — architect `verify` required, unchanged) and `"self"` (L5 end — `verify` optional; server runs the delegate's own suite with vacuous-pass guard + MIN_TESTS, generalizing `templates/gate_selfsuite.sh` into the engine). Receipt + run log stamp the level. | §4 | approved |
+| **R4** | **Skills catch up.** Architect skill: `trust:"self"` replaces the template instructions; delegation skill: absorbs the essays R1 evicts (approval modes, timing model, session rules). | §3 discipline rows | after R1–R3 |
 
-## Phases
+Order: R1 → R2 → R3 → R4. R2/R3 are spec'd server work per N5 (delegable builds);
+R1/R4 are description/skill authoring (architect-side prose).
 
-| phase | what | status |
-|---|---|---|
-| **P1** | **Architect skill** — `skills/architect/` (PRD→SRS→module tree→handoff→verdict loop, altitude rule), `agents/architect.md` shell, `templates/gate_selfsuite.sh`. Claude-side only. | **built (this commit)** |
-| **P2** | **Server `trust: "self"`** — unpark the C9 trust field: server auto-generates the own-suite gate (generalized gate_selfsuite), compact receipt, `TRUST:` receipt line. Spec'd per N5, delegable to Qwen. | approved; **paused — user gives the go** |
-| **P3** | **Lean architect + slope measurement** — stripped toolset session, deferred schemas, per-module token slope on a real multi-dozen-module L5 build (v3 §8.5). | **needs discussion before any design** |
-| P4 | **Packaging for anyone** — executor presets (ollama/llama.cpp/API), install story, quickstart, published benchmark. | later, after the loop is proven |
-| — | Overnight runner (queue-drain builds while the user sleeps) | parked by user; do not build |
+## Parked (explicitly, with what unblocks each)
 
-## Calibration (feeds the skill's altitude rule; grows with every run)
+- **Routing rule + delegation floor** (when NOT to delegate — the +28% small-change
+  loss): needs data → unblocked by measurement.
+- **A/B measurement** (token-saver-eval matched pairs, per-feature slope, v3 §8.5):
+  user will call the go.
+- **Intermediate trust L1–L4** (§4) and the **capability slider** outward (§5).
+- **Bug-resolution primitive** (§6): the flow already works as L0 usage (repro gate =
+  architect-authored failing test); first-class design later.
+- **P2-as-was** is absorbed into R3. **P3 discussion**: the regular-session rows landed
+  in R1/R2; the dedicated-agent toolset strip remains open for discussion.
+- Packaging (P4) · overnight runner · FINDINGS follow-ups items 2–3 (deterministic
+  conformance line, same-model cross-examiner).
+
+## Calibration so far (grows with every run)
 
 | delegate | grain | scale proven | result |
 |---|---|---|---|
 | qwen-local | contract (lld) | 3 modules / ~180 LOC | attempt 1 green; 23/25 on post-hoc contract audit |
 | qwen-local | outline (hld) | 6 modules / ~400 LOC | attempt 1 green; real design authority (README'd interfaces) |
 
-Known L5 behaviors to design around (FINDINGS, 2026-07-22): plan-then-stall on coarse
-tasks (anti-stall line in every task text); self-grade shares the code's blindspot
-(accepted residual); contract drift invisible in verdicts (public-surface scan is the
-only structural check); vacuous-pass guard required (`unittest discover` exits 0 on an
-empty suite).
+Known L5 behaviors to design around (FINDINGS 2026-07-22): plan-then-stall on coarse
+tasks (anti-stall line in task text); self-grade shares the code's blindspot (accepted);
+contract drift invisible in verdicts; vacuous-pass guard required.
+
+---
+
+## First-pass record (2026-07-22, superseded above)
+
+P1 (architect skill + agent shell + gate template + this doc) — **built**, commit
+`32caed6`. The skill's gate-template section will be rewritten by R4 once R3 lands.
+P2 (trust unparking) → absorbed into R3. P3 (lean architect) → split: regular-session
+rows into R1/R2, rest parked for discussion. P4, overnight: parked.
