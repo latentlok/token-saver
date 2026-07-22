@@ -98,8 +98,10 @@ bootstrap):
      "defaults": {"workers": int, "max_iterations": int, "timeout": int}}
 
 **C2 — Receipt grammar additions** (produced by `qd.verdict`, relayed verbatim by the
-skill). v1 receipt text is frozen; these lines append, in this order, each only when
-applicable:
+skill). *Amended by R2 (PLAN-v3-l5): the v1-frozen clause is retired — a clean green
+receipt is compact (per-attempt trail, CONTEXT, TIME, TOOLS, CONTINUE, NEXT render only
+on non-success or flags); red/flagged receipts keep full diagnostics.* The C2 additions
+append, in this order, each only when applicable:
 
     NOTES: <text ≤200 chars>
     WORKTREE: <abs path>

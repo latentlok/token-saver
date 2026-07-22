@@ -53,10 +53,15 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if ctx["preflight"] and status == "success":
         status = "success_but_preflight_passed"
 
+    # R2 (PLAN-v3-l5): a clean green run gets a COMPACT receipt -- diagnostics render
+    # only when something needs the manager's judgment. Red/flagged paths stay verbose.
+    clean = status == "success"
+
     body = [f"STATUS: {status}", f"SESSION: {session_id or 'unknown'}"]
     body.append(f"ATTEMPTS: {len(trail)}/{max_iter}")
-    for t in trail:
-        body.append(f"  - {t}")
+    if not clean:
+        for t in trail:
+            body.append(f"  - {t}")
 
     # Prominent: the project was just self-configured. Relay it and act on the two open
     # questions (test command if undetected, CLAUDE.md policy block).
@@ -74,13 +79,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             flat = ", ".join(
                 f"{n} ({f.split('/')[-1]})" for f, ns in pubs.items() for n in ns
             )
-            body.append(
-                "NEW PUBLIC SURFACE (deterministic scan -- review the list, not the "
-                f"diff): {flat}\n"
-                "These are new names others can depend on. Keep any you intended; if "
-                "one is unrequested scope, re-delegate a spec that forbids it. (Internal "
-                "names and test symbols are not listed.)"
-            )
+            body.append(f"NEW PUBLIC SURFACE: {flat}")
 
     # Context used, so Claude can size the next delegation.
     peak = ctx.get("peak", 0)
@@ -88,17 +87,18 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if peak and win:
         warn_at, auto_at = compaction_thresholds(win)
         pct = 100.0 * peak / win
-        line = f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%)"
         if peak >= warn_at:
-            line += (
-                f" -- APPROACHING COMPACTION at {auto_at:,.0f}. Compaction is lossy and "
-                f"can summarize QWEN.md's rules away mid-task. Split the work or start a "
-                f"fresh session."
+            body.append(
+                f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%) -- APPROACHING COMPACTION "
+                f"at {auto_at:,.0f}. Compaction is lossy and can summarize QWEN.md's "
+                f"rules away mid-task. Split the work or start a fresh session."
             )
-        else:
-            line += f", compaction at {auto_at:,.0f} ({100.0*auto_at/win:.0f}%) -- ample headroom"
-        body.append(line)
-    elif peak:
+        elif not clean:
+            body.append(
+                f"CONTEXT: peak {peak:,}/{win:,} ({pct:.0f}%), compaction at "
+                f"{auto_at:,.0f} ({100.0*auto_at/win:.0f}%) -- ample headroom"
+            )
+    elif peak and not clean:
         body.append(f"CONTEXT: peak {peak:,} tokens (window unknown)")
 
     # Scoped-shell elicitation: commands the hook blocked. Surfacing them is the
@@ -106,16 +106,10 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     blocked = ctx.get("meta", {}).get("blocked") or []
     if blocked:
         body.append(
-            "SHELL APPROVAL NEEDED: Qwen requested these; the scoped guard auto-blocked "
-            "them (reason in parens). YOU are the judge -- decide each on the command "
-            "alone (is it safe in this repo?), not on the task:\n"
+            "SHELL APPROVAL NEEDED (judge each on the command alone; approve via "
+            "shell_allow + same session_id, deny with the reason in shell_feedback):\n"
             + "\n".join(f"  - {b}" for b in blocked[:12])
             + ("\n  ..." if len(blocked) > 12 else "")
-            + "\nAPPROVE a command: add its pattern to `shell_allow` and re-delegate with "
-            "the same session_id.\nDENY a command: put the reason in `shell_feedback` so "
-            "Qwen learns the constraint instead of retrying.\n"
-            "(If Qwen still reached success without them, no action needed -- it found "
-            "another way.)"
         )
 
     st = ctx.get("meta", {}).get("stats") or {}
@@ -124,11 +118,13 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         budget = ctx.get("timeout", 0)
         if budget:
             used = 100.0 * secs / budget
-            note = f"TIME: {secs:.0f}s of {budget}s budget ({used:.0f}%)"
             if used > 70:
-                note += " -- close to timeout; raise timeout_sec for tasks like this"
-            body.append(note)
-    if st.get("tools"):
+                body.append(
+                    f"TIME: {secs:.0f}s of {budget}s budget ({used:.0f}%) -- close to "
+                    f"timeout; raise timeout_sec for tasks like this")
+            elif not clean:
+                body.append(f"TIME: {secs:.0f}s of {budget}s budget ({used:.0f}%)")
+    if st.get("tools") and not clean:
         tl = f"TOOLS: {st['tools']} call(s)"
         if st.get("tool_names"):
             tl += f" ({', '.join(st['tool_names'][:6])})"
@@ -140,12 +136,13 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         # measured: auto-edit runs show 3/9 "failures" that are just blocked shell
         # attempts, while the gate passes. Only flag as suspect where tools were free.
         if ctx.get("approval_mode") in ("plan", "auto-edit", "default", "auto"):
-            body.append(
-                f"TOOL FAILURES: {st['tool_fail']} of {st['tools']} tool call(s) were "
-                f"blocked -- expected under approval_mode="
-                f"'{ctx.get('approval_mode')}' (Qwen tried tools this mode denies). Not "
-                f"a defect on its own; the gate is what decides."
-            )
+            if not clean:
+                body.append(
+                    f"TOOL FAILURES: {st['tool_fail']} of {st['tools']} tool call(s) were "
+                    f"blocked -- expected under approval_mode="
+                    f"'{ctx.get('approval_mode')}' (Qwen tried tools this mode denies). Not "
+                    f"a defect on its own; the gate is what decides."
+                )
         else:
             body.append(
                 f"TOOL FAILURES: {st['tool_fail']} of {st['tools']} tool call(s) FAILED. "
@@ -236,7 +233,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if handoff:
         if handoff.get("HANDOFF"):
             body.append(f"HANDOFF: {handoff['HANDOFF']}")
-        if handoff.get("NEXT"):
+        if handoff.get("NEXT") and not clean:
             body.append(f"NEXT: {handoff['NEXT']}")
 
         # Qwen's own account of what it touched vs what the filesystem says. This is the
@@ -257,16 +254,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                     f"on disk. It may have described intended work it never did."
                 )
 
-    if guard_on and status not in ("error",):
-        body.append(
-            f"CONTINUE: to follow up on THIS task with warm context, pass "
-            f"session_id=\"{session_id}\" and the same cwd (sessions are cwd-scoped). "
-            f"It keeps what Qwen already read, so it need not re-derive it -- but it does "
-            f"NOT reduce prompt tokens: resuming replays the history on top of the same "
-            f"preamble, so context grows. Do NOT reuse it for an unrelated task -- a "
-            f"fresh session re-reads QWEN.md, which is what makes the rules bind, and "
-            f"keeps one task's reasoning from contaminating the next."
-        )
+    # (R2: the old CONTINUE paragraph is gone -- the SESSION line plus the delegation
+    # skill's session rules carry the same information at ~1/20th the tokens.)
 
     if denials:
         names = ", ".join(sorted({d.get("tool_name", "?") for d in denials}))

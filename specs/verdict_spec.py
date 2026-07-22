@@ -4,9 +4,9 @@ Spec for qd/verdict.py -- receipt rendering (LLD "qd/verdict.py", HLD C2/C3).
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-The strongest port gate available: CRANE EQUALITY. For v1-shaped inputs,
-qd.verdict.render must produce byte-identical output to the running server's
-render() -- the crane itself is the golden file. On top of that, the v2 seams:
+R2 (PLAN-v3-l5) retired crane equality for receipt TEXT: clean green runs render
+compact (trail/CONTEXT/TIME/TOOLS/CONTINUE/NEXT only on non-success or flags).
+parse_handoff/strip_handoff remain crane-equal. The v2 seams, unchanged:
 
   1. C2 receipt lines (NOTES/WORKTREE/MERGE/GRAPH/REFS/COST) insert immediately
      BEFORE the "--- qwen result ---" block, in C2 order, each only when
@@ -107,44 +107,83 @@ class Fixture(unittest.TestCase):
                 v2.replace(self.full_sha, "SHA").replace(self.short_sha, "SHA"))
 
 
-class CraneEquality(Fixture):
-    def test_success_receipt_identical(self):
-        v1, v2 = self.both()
-        self.assertEqual(v1, v2)
+class CompactGreen(Fixture):
+    """R2 (PLAN-v3-l5): a clean success renders COMPACT -- diagnostics appear
+    only when something needs the manager's judgment. Amends the C2 'v1 frozen'
+    clause; crane equality for receipt text is retired (helpers below remain
+    crane-equal)."""
 
-    def test_verify_failed_with_output_identical(self):
-        v1, v2 = self.both(status="verify_failed",
-                           trail=["attempt 1: verify failed",
-                                  "attempt 2: verify failed"],
-                           last_verify="AssertionError: expected 3 got 2")
-        self.assertEqual(v1, v2)
+    def test_green_keeps_the_essentials(self):
+        _, v2 = self.both()
+        for tag in ("STATUS: success", "SESSION:", "ATTEMPTS: 1/3",
+                    "CHANGED", "HANDOFF:", "ROLLBACK:"):
+            self.assertIn(tag, v2)
 
-    def test_gate_suspect_identical(self):
-        v1, v2 = self.both(status="gate_suspect")
-        self.assertEqual(v1, v2)
+    def test_green_drops_the_boilerplate(self):
+        _, v2 = self.both(v2_over={"meta": {"stats": {
+            "ms": 60000, "tools": 9, "tool_names": ["edit"], "tool_fail": 2},
+            "blocked": []}})
+        for tag in ("  - attempt", "CONTEXT:", "TIME:", "TOOLS:",
+                    "CONTINUE:", "NEXT:", "TOOL FAILURES"):
+            self.assertNotIn(tag, v2)
 
-    def test_preflight_pass_identical(self):
-        v1, v2 = self.both(v1_over={"preflight": True},
-                           v2_over={"preflight": True})
-        self.assertEqual(v1, v2)
+    def test_green_public_surface_is_one_line(self):
+        _, v2 = self.both()
+        line = [l for l in v2.splitlines()
+                if l.startswith("NEW PUBLIC SURFACE")][0]
+        self.assertEqual(line, "NEW PUBLIC SURFACE: made (built.py)")
+        self.assertNotIn("names others can depend on", v2)
 
-    def test_dirty_tree_rollback_identical(self):
-        v1, v2 = self.both(v1_over={"pre_clean": False},
-                           v2_over={"pre_clean": False})
-        self.assertEqual(v1, v2)
-        self.assertIn("unsafe to blanket-revert", v2)
+    def test_green_receipt_is_small(self):
+        _, v2 = self.both()
+        self.assertLess(len(v2), 900)
 
-    def test_denials_and_blocked_shell_identical(self):
-        over = {"meta": {"stats": {}, "blocked": ["rm -rf x (destructive)"]}}
-        v1, v2 = self.both(denials=[{"tool_name": "run_shell_command"}],
-                           v1_over=over, v2_over=over)
-        self.assertEqual(v1, v2)
-
-    def test_misreport_detection_identical(self):
-        v1, v2 = self.both(result="done\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing\n")
-        self.assertEqual(v1, v2)
+    def test_misreport_still_fires_on_green(self):
+        _, v2 = self.both(result="done\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing\n")
         self.assertIn("MISREPORT", v2)
 
+    def test_near_compaction_context_shown_even_on_green(self):
+        _, v2 = self.both(v2_over={"peak": 150000})
+        self.assertIn("APPROACHING COMPACTION", v2)
+
+
+class VerboseRed(Fixture):
+    """Non-success keeps the full diagnostics."""
+
+    def test_red_keeps_trail_context_and_verify_output(self):
+        _, v2 = self.both(status="verify_failed",
+                          trail=["attempt 1: verify failed",
+                                 "attempt 2: verify failed"],
+                          last_verify="AssertionError: expected 3 got 2")
+        for tag in ("  - attempt 1: verify failed", "CONTEXT:",
+                    "--- final verify output ---", "AssertionError"):
+            self.assertIn(tag, v2)
+
+    def test_gate_suspect_explains(self):
+        _, v2 = self.both(status="gate_suspect")
+        self.assertIn("GATE SUSPECT", v2)
+        self.assertIn("Fix the gate before retrying", v2)
+
+    def test_preflight_pass_is_not_clean(self):
+        _, v2 = self.both(v2_over={"preflight": True})
+        self.assertIn("PREFLIGHT: the verify command ALREADY PASSED", v2)
+        self.assertIn("  - attempt", v2)
+
+    def test_dirty_tree_rollback_warns(self):
+        _, v2 = self.both(v2_over={"pre_clean": False})
+        self.assertIn("unsafe to blanket-revert", v2)
+
+    def test_blocked_shell_compact_but_present_on_green(self):
+        over = {"meta": {"stats": {}, "blocked": ["rm -rf x (destructive)"]}}
+        _, v2 = self.both(denials=[{"tool_name": "run_shell_command"}],
+                          v2_over=over)
+        self.assertIn("SHELL APPROVAL NEEDED", v2)
+        self.assertIn("rm -rf x (destructive)", v2)
+        self.assertIn("DENIALS: 1 blocked", v2)
+        self.assertNotIn("APPROVE a command", v2)
+
+
+class Helpers(Fixture):
     def test_handoff_helpers_crane_equal(self):
         for text in (RESULT_TEXT, "no handoff here", "",
                      "x\nHANDOFF: a\nFILES: f.py\nNEXT: b\n"):
