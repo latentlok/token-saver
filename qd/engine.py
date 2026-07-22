@@ -24,6 +24,7 @@ from qd.bootstrap import (
     bootstrap_notice, bootstrap_failed_refusal,
     nongit_refusal, detect_test_cmd,
 )
+from qd import worktrees
 from qd.verdict import render, HANDOFF_SUFFIX, VERIFY_CAP
 from qd import refs
 
@@ -114,6 +115,8 @@ def delegate(args):
     on_compaction = args.get("on_compaction") or "reinject"
     if on_compaction not in ("reinject", "discard"):
         on_compaction = "reinject"
+    worktree_mode = args.get("worktree")
+    touch_scope = args.get("touch_scope")
 
     # --- Precondition: trust ---
     trust = args.get("trust", "verified")
@@ -185,16 +188,23 @@ def delegate(args):
     # --- Resolve executor profile ---
     profile = resolve(cwd, args.get("executor"))
 
+    # --- Worktree acquisition (M4 seam 1) ---
+    work_cwd = cwd
+    wt = None
+    if worktree_mode == "auto":
+        wt = worktrees.acquire(cwd)
+        work_cwd = wt["path"]
+
     # --- Pre-run snapshot ---
-    _, pre_sha_full = git(cwd, "rev-parse", "HEAD")
-    pre_status = snapshot(cwd)
+    _, pre_sha_full = git(work_cwd, "rev-parse", "HEAD")
+    pre_status = snapshot(work_cwd)
     pre_clean = not pre_status
 
     # --- Pre-flight verify ---
     preflight = None
     preflight_out = ""
     if verify:
-        preflight, preflight_out = _run_verify(verify, cwd)
+        preflight, preflight_out = _run_verify(verify, work_cwd)
 
     # --- Refs snapshot (pre-run) ---
     refs_before = refs.snapshot(cwd)
@@ -260,7 +270,7 @@ def delegate(args):
 
         # --- Invoke executor ---
         text, denials, sid, err, meta = run_executor(
-            profile, prompt, cwd, approval_mode,
+            profile, prompt, work_cwd, approval_mode,
             timeout=timeout, session_id=session_id,
             verify=verify,
             shell_allow=args.get("shell_allow"),
@@ -284,9 +294,9 @@ def delegate(args):
         result_text = text or ""
 
         # --- Spec guard ---
-        cheated = violated_specs(cwd, base=pre_sha_full)
+        cheated = violated_specs(work_cwd, base=pre_sha_full)
         if cheated:
-            revert_specs(cwd, cheated, base=pre_sha_full)
+            revert_specs(work_cwd, cheated, base=pre_sha_full)
             names = ", ".join(cheated)
             trail.append(
                 f"attempt {attempt}: SPEC VIOLATION -- edited {names} (auto-reverted)"
@@ -322,11 +332,52 @@ def delegate(args):
             break
 
         # --- C8 prefilter (advisory) — after executor, before gate ---
-        post_snap = snapshot(cwd)
+        post_snap = snapshot(work_cwd)
         changed = [
             p for p in set(list(post_snap.keys()) + list(pre_status.keys()))
             if post_snap.get(p) != pre_status.get(p)
         ]
+
+        # --- Touch scope check (M4 seam 2) ---
+        if touch_scope is not None and changed:
+            violated_paths = []
+            for p in changed:
+                if p in touch_scope:
+                    continue
+                rc, _ = git(work_cwd, "ls-files", "--error-unmatch", p)
+                if rc != 0:
+                    continue
+                violated_paths.append(p)
+            if violated_paths:
+                revert_specs(work_cwd, violated_paths, base=pre_sha_full)
+                names = ", ".join(violated_paths)
+                trail.append(
+                    f"attempt {attempt}: TOUCH SCOPE VIOLATION -- edited {names} outside scope (auto-reverted)"
+                )
+                if attempt < max_iter:
+                    prompt = (
+                        f"You modified files outside the allowed set: {names}. "
+                        f"Those files are off-limits and have been reverted. "
+                        f"Only modify: {', '.join(touch_scope)}. "
+                        f"You may create new files freely."
+                    )
+                    if was_compacted_since_ack(session_id):
+                        ack_compaction(session_id)
+                        send_suffix = True
+                        if on_compaction == "discard":
+                            ctx["discards"] += 1
+                            session_id = None
+                        else:
+                            ctx["reinjects"] += 1
+                        prompt += (
+                            f"\n\nYour conversation history was summarised (compacted), so "
+                            f"you may have lost the original instructions and any summary of "
+                            f"your earlier work may be inaccurate. Re-read the files; do not "
+                            f"reconstruct it.\n\nOriginal task:\n{task}"
+                        )
+                    continue
+                break
+
         qwen_files = [p for p in changed if "_qwen." in p]
         prefilter_out = None
         prefilter_failed = False
@@ -337,7 +388,7 @@ def delegate(args):
                 try:
                     pv = subprocess.run(
                         f"{tc} {' '.join(qwen_files)}",
-                        cwd=cwd, shell=True,
+                        cwd=work_cwd, shell=True,
                         capture_output=True, text=True, timeout=60,
                         env=os.environ,
                     )
@@ -350,7 +401,7 @@ def delegate(args):
                     prefilter_failed = True
 
         # --- Run verify ---
-        passed, v_out = _run_verify(verify, cwd)
+        passed, v_out = _run_verify(verify, work_cwd)
 
         if passed:
             trail.append(f"attempt {attempt}: VERIFY PASS")
@@ -411,6 +462,16 @@ def delegate(args):
     else:
         status = "verify_failed"
 
+    # --- Worktree commit or release (M4 seam 1) ---
+    if wt is not None:
+        if status == "success":
+            git(work_cwd, "add", "-A")
+            git(work_cwd, "commit", "-m", f"qwen delegation {wt['branch']}")
+            ctx["worktree"] = {"path": wt["path"], "branch": wt["branch"]}
+            ctx["merge"] = worktrees.classify_merge(cwd, wt["branch"])
+        else:
+            worktrees.release(cwd, wt["path"], wt["branch"])
+
     # --- Compute cost_usd ---
     try:
         t_main = ctx["cum"].get("tokens_main", {})
@@ -421,7 +482,7 @@ def delegate(args):
         ctx["cost_usd"] = 0.0
 
     # --- Refs added ---
-    ctx["refs_added"] = refs.added(refs_before, cwd)
+    ctx["refs_added"] = refs.added(refs_before, work_cwd)
 
     return {
         "status": status,
