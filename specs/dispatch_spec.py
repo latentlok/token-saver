@@ -27,6 +27,12 @@ handler (including git bookkeeping), not just the executor subprocess --
 bookkeeping is milliseconds against minutes of inference, and simpler
 hand-written concurrency code wins for the one file gates under-prove.
 
+Documented residuals (adversarial pilot survivors judged non-defects):
+RLock-for-Lock substitution (behavioral superset), guard release order
+(outcome-invisible), drain-list bounded at 64 (unreachable in-flight count),
+and the GIL-shadowed write lock (single-write atomicity masks it; the lock
+guards against drift to multi-part writes).
+
 Run:  python3 specs/dispatch_spec.py
 """
 
@@ -64,10 +70,11 @@ SCHEMAS = [
     {"name": "slow", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "qwen_delegate", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "qwen_query", "description": "stub", "inputSchema": {"type": "object"}},
+    {"name": "qwen_investigate", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "boom", "description": "stub", "inputSchema": {"type": "object"}},
 ]
-server.main(tools={"slow": slow, "qwen_delegate": slow,
-                   "qwen_query": slow, "boom": boom}, schemas=SCHEMAS)
+server.main(tools={"slow": slow, "qwen_delegate": slow, "qwen_query": slow,
+                   "qwen_investigate": slow, "boom": boom}, schemas=SCHEMAS)
 """
 
 
@@ -141,12 +148,14 @@ class Fixture(unittest.TestCase):
         with open(machine, "w") as f:
             json.dump({
                 "endpoints": {"e1": {"parallel_max": 1},
-                              "e2": {"parallel_max": 2}},
+                              "e2": {"parallel_max": 2},
+                              "e3": {"parallel_max": 2}},
                 "profiles": {
                     "p1a": {"argv": ["x", "-p", "{task}"], "endpoint": "e1"},
                     "p1b": {"argv": ["x", "-p", "{task}"], "endpoint": "e1"},
                     "p2a": {"argv": ["x", "-p", "{task}"], "endpoint": "e2"},
                     "p2b": {"argv": ["x", "-p", "{task}"], "endpoint": "e2"},
+                    "p3":  {"argv": ["x", "-p", "{task}"], "endpoint": "e3"},
                 }}, f)
         os.environ["QWEN_DELEGATE_EXECUTORS"] = machine
         self.srv = Server(self.sdir,
@@ -166,15 +175,23 @@ class Fixture(unittest.TestCase):
         with open(os.path.join(self.sdir, f"{kind}_{tag}")) as f:
             return float(f.read())
 
-    def assert_overlap(self, tag_a, tag_b):
-        self.assertLess(self.stamp("start", tag_b),
-                        self.stamp("end", tag_a) + 0.001,
-                        f"{tag_b} did not overlap {tag_a}")
+    # ORDER-AGNOSTIC by construction: worker threads race for locks with no
+    # fairness guarantee, so whichever call runs first is scheduling luck.
+    # Serialized == the two intervals do not intersect; overlap == they do.
+    # (An order-assuming version of these flaked 1-in-3 -- a noisy gate is a
+    # defect in itself.)
+    def _iv(self, tag):
+        return self.stamp("start", tag), self.stamp("end", tag)
 
-    def assert_serialized(self, first, second):
-        self.assertGreaterEqual(self.stamp("start", second),
-                                self.stamp("end", first) - 0.05,
-                                f"{second} overlapped {first}")
+    def assert_overlap(self, tag_a, tag_b):
+        (sa, ea), (sb, eb) = self._iv(tag_a), self._iv(tag_b)
+        self.assertLess(max(sa, sb), min(ea, eb) + 0.001,
+                        f"{tag_a}/{tag_b} did not overlap")
+
+    def assert_serialized(self, tag_a, tag_b):
+        (sa, ea), (sb, eb) = self._iv(tag_a), self._iv(tag_b)
+        self.assertGreaterEqual(max(sa, sb), min(ea, eb) - 0.15,
+                                f"{tag_a}/{tag_b} overlapped")
 
 
 class Protocol(Fixture):
@@ -182,10 +199,11 @@ class Protocol(Fixture):
         r = self.srv.responses[0]["result"]
         self.assertEqual(r["protocolVersion"], "2024-11-05")
         self.assertEqual(r["serverInfo"]["name"], "qwen-delegate")
+        self.assertEqual(r["capabilities"], {"tools": {}})    # survivor 6 closed
         self.srv.send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = self.srv.wait(1)["result"]["tools"]
         self.assertEqual([t["name"] for t in tools],
-                         ["slow", "qwen_delegate", "qwen_query", "boom"])
+                         ["slow", "qwen_delegate", "qwen_query", "qwen_investigate", "boom"])
 
     def test_call_result_wrapping(self):
         self.srv.call(2, "slow", {"tag": "w", "sleep": 0.05})
@@ -208,12 +226,12 @@ class Concurrency(Fixture):
     def test_parallel_calls_correct_ids_no_torn_lines(self):
         t0 = time.time()
         for i, tag in enumerate(("a", "b", "c", "d")):
-            self.srv.call(10 + i, "slow", {"tag": tag, "sleep": 1.2})
+            self.srv.call(10 + i, "slow", {"tag": tag, "sleep": 1.5})
         for i, tag in enumerate(("a", "b", "c", "d")):
             r = self.srv.wait(10 + i)
             self.assertEqual(r["result"]["content"][0]["text"], f"done {tag}")
         wall = time.time() - t0
-        self.assertLess(wall, 3.5, f"4x1.2s calls took {wall:.1f}s -- serialized?")
+        self.assertLess(wall, 4.0, f"4x1.5s calls took {wall:.1f}s -- serialized?")
         with self.srv.lock:
             self.assertNotIn("_torn", self.srv.responses)
             for line in self.srv.raw:
@@ -228,7 +246,7 @@ class Concurrency(Fixture):
                        "executor": "p2b"})
         self.srv.call(22, "qwen_delegate",
                       {"tag": "rx", "sleep": 1.0, "cwd": self.repo_b,
-                       "executor": "p2a"})
+                       "executor": "p3"})
         for rid in (20, 21, 22):
             self.srv.wait(rid)
         self.assert_serialized("r1", "r2")     # same repo: one actor per tree
@@ -265,6 +283,18 @@ class Concurrency(Fixture):
         self.srv.wait(40)
         self.srv.wait(41)
         self.assert_serialized("q1", "q2")
+
+
+    def test_investigate_gates_on_endpoint_too(self):     # survivor 1 closed
+        self.srv.call(45, "qwen_investigate",
+                      {"tag": "i1", "sleep": 0.8, "cwd": self.repo_a,
+                       "executor": "p1a"})
+        self.srv.call(46, "qwen_investigate",
+                      {"tag": "i2", "sleep": 0.8, "cwd": self.repo_b,
+                       "executor": "p1b"})
+        self.srv.wait(45)
+        self.srv.wait(46)
+        self.assert_serialized("i1", "i2")
 
 
 class Failure(Fixture):

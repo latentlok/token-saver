@@ -494,6 +494,15 @@ apply, run spec, exit code decides — zero model tokens, zero new server code.
   document every survivor. Breadth beats the single hand-pick: my one
   hand-mutation per module missed all seven of these.
 
+Round 2 (dispatch, M3) sharpened the pattern: the adversary's rationales are
+themselves leads, not truth (one was provably wrong; two proposals were
+malformed JSON) — the deterministic judge sorts it out. And judging exposed
+two SPEC defects beyond coverage gaps: order-ASSUMING serialization asserts
+that flaked 1-in-3 under thread-scheduling luck (a noisy gate is a defect —
+rewritten interval-based), and a fixture coupling where a shared endpoint's
+semaphore masked a dropped repo lock. The mutation loop debugs the gate's
+fixtures, not just its coverage.
+
 ## The spec rule is what produces honesty — not the model
 
 The "0/3 raised a blocker" result above does not reproduce **when `QWEN.md` is present**.
