@@ -1,7 +1,10 @@
 #!/bin/bash
+# SUPERSEDED (R3): pass trust="self" instead — the server now generates and
+# guards this gate itself. Kept only for standalone use outside the server.
+#
 # L5 gate: runs the DELEGATE'S OWN test suite. The only architect-side guard is
 # mechanical — the suite must actually run and be non-vacuous. The grading itself
-# is the delegate's (L5 trust). Interim until server `trust: "self"` (PLAN-v3-l5 P2).
+# is the delegate's (L5 trust).
 #
 # Usage: copy into the project root as <name>_spec.sh (the spec glob auto-protects
 # it from delegate edits), chmod +x, pass as `verify`. Tune the two vars.

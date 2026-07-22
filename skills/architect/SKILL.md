@@ -58,13 +58,15 @@ on-demand primitive — never part of this loop.
 
 ## The gate at L5
 
-The delegate's own suite IS the gate — wrapped in a mechanical guard only: the suite
-must actually run and have ≥N real tests (`unittest discover` exits 0 on an empty
-suite; a vacuous pass is a broken gate, not trust). Until the server's `trust: "self"`
-lands (P2), copy `templates/gate_selfsuite.sh` into the project as `<name>_spec.sh` —
-the spec glob makes it untouchable — and pass it as `verify`. **Never author behavioral
+Pass `trust: "self"` and omit `verify` — the server generates the gate: it runs the
+delegate's own suite (the project's detected test command, else stdlib unittest
+discovery) behind a non-vacuous guard (≥ `min_tests` from `.qwen-delegate.json`,
+default 5) and rewrites that gate before every run, so the worker cannot edit it. The
+receipt's `TRUST: self` line records what the green means. **Never author behavioral
 tests.** If you are writing assertions about the module's behavior, you have left L5
-and are burning the tokens this system exists to save.
+and are burning the tokens this system exists to save. (On a project with an
+already-green suite, raise `min_tests` above the current count so the gate binds on
+the delta.)
 
 ## Token discipline (what "lean" means in practice)
 

@@ -23,10 +23,10 @@ Binding decisions:
 
 | # | what | v3 anchor | status |
 |---|---|---|---|
-| **R1** | **Tool list, not tool essays.** `qwen_delegate`/`qwen_query` present as one-line descriptors + minimal param schema; every measured-guidance essay moves into the skills (loaded only when delegating). Target: tools/list payload ~2.5k tokens → ~200. | §3 row "MCP schema" | approved — next |
-| **R2** | **Compact receipt grammar.** Green path = `STATUS + CHANGED + NEW PUBLIC SURFACE + COST` + at most one NOTES line (~100–150 tokens). CONTINUE/HANDOFF/TIME/TOOLS/CONTEXT and gate-output tails become red-path/flag-only. Amends the C2 "v1 frozen" clause — v3 §3 named this kill explicitly. | §3 row "verdict receipt" | approved |
-| **R3** | **Trust slider, both ends.** Unpark C9 `trust`: `"verified"` (L0 end — architect `verify` required, unchanged) and `"self"` (L5 end — `verify` optional; server runs the delegate's own suite with vacuous-pass guard + MIN_TESTS, generalizing `templates/gate_selfsuite.sh` into the engine). Receipt + run log stamp the level. | §4 | approved |
-| **R4** | **Skills catch up.** Architect skill: `trust:"self"` replaces the template instructions; delegation skill: absorbs the essays R1 evicts (approval modes, timing model, session rules). | §3 discipline rows | after R1–R3 |
+| **R1** | **Tool list, not tool essays.** `qwen_delegate`/`qwen_query` present as one-line descriptors + minimal param schema; every measured-guidance essay moves into the skills (loaded only when delegating). Payload measured: ~9.5k → 4.8k chars (~2.4k → 1.2k tokens resident). | §3 row "MCP schema" | **built** `6309225` |
+| **R2** | **Compact receipt grammar.** Clean green = STATUS/SESSION/ATTEMPTS/TRUST/CHANGED/NEW-SURFACE/HANDOFF/ROLLBACK + C2 lines; trail/CONTEXT/TIME/TOOLS/CONTINUE/NEXT render only on non-success or flags. Amends the C2 "v1 frozen" clause; spec pins the new grammar. | §3 row "verdict receipt" | **built** (R2 commit) |
+| **R3** | **Trust slider, both ends.** C9 `trust` unparked: `"verified"` (L0 end — architect `verify`, unchanged) and `"self"` (L5 end — `verify` optional; server generates a non-vacuous own-suite gate, rewritten every attempt so the worker can't edit it; `min_tests` via project config). `TRUST:` receipt line + run-log field. `specs/trust_spec.py`. | §4 | **built** (R3 commit) |
+| **R4** | **Skills catch up.** Architect skill delegates gating to `trust:"self"`; delegation skill carries the trust facts + evicted schema essays; gate template marked superseded. | §3 discipline rows | **built** (this commit) |
 
 Order: R1 → R2 → R3 → R4. R2/R3 are spec'd server work per N5 (delegable builds);
 R1/R4 are description/skill authoring (architect-side prose).
