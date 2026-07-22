@@ -46,7 +46,7 @@ from qd import engine  # noqa: E402
 # the files that step names, records the task text it received, and prints a
 # qwen-shaped result JSON.
 STUB = r"""#!/usr/bin/env python3
-import json, os, sys
+import json, os, subprocess, sys
 sdir = os.environ["STUB_DIR"]
 steps = json.load(open(os.path.join(sdir, "steps.json")))
 n_path = os.path.join(sdir, "attempt")
@@ -59,6 +59,14 @@ for rel, content in (step.get("write") or {}).items():
     p = os.path.join(os.getcwd(), rel)
     os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(rel) else None
     open(p, "w").write(content)
+# Simulate a concurrent fan-out sibling: move the MAIN tree's HEAD with a
+# change that will conflict with this worktree's edit, so classify_merge has
+# something real to detect (within one delegate the main HEAD is otherwise
+# static and every branch is trivially clean).
+if step.get("main_diverge"):
+    mr = os.environ["MAIN_REPO"]
+    open(os.path.join(mr, "other.py"), "w").write("MAIN_SIDE = 1\n")
+    subprocess.run(["git", "-C", mr, "commit", "-qam", "main diverged"])
 result = {"type": "result", "result": step.get("result", "did the work\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing"),
           "session_id": step.get("sid", "e-sess-%d" % (n + 1)), "permission_denials": [],
           "stats": {"tools": {"totalCalls": 1, "totalFail": 0, "byName": {}},
@@ -105,7 +113,7 @@ class Fixture(unittest.TestCase):
                 "argv": [sys.executable, self.stub, "-p", "{task}",
                          "--approval-mode", "{mode}", "-o", "json",
                          "-r", "{resume}"],
-                "env": {"STUB_DIR": self.sdir},
+                "env": {"STUB_DIR": self.sdir, "MAIN_REPO": self.cwd},
             }}}, f)
         os.environ["QWEN_DELEGATE_EXECUTORS"] = machine
         os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(td, "reg.jsonl")
@@ -267,6 +275,18 @@ class Worktree(Fixture):
                               f"HEAD..{wt['branch']}")
         self.assertEqual(ahead, "1")
         self.assertEqual(r["ctx"]["merge"], "clean")
+
+    def test_auto_merge_conflict_classified_not_hardcoded(self):
+        # The worker edits other.py in its worktree; a concurrent fan-out
+        # sibling (main_diverge) commits a conflicting other.py to the main
+        # tree. classify_merge must REPORT the conflict -- a hardcoded "clean"
+        # would ship a false all-good on a real fan-out collision.
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "other.py": "WT_SIDE = 1\n"},
+                     "main_diverge": True}])
+        r = self.delegate(worktree="auto")
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["merge"], "conflict")
 
     def test_auto_failure_releases_container(self):
         self.steps([{"write": {"out.py": "wrong\n"}}])

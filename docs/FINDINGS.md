@@ -503,6 +503,26 @@ rewritten interval-based), and a fixture coupling where a shared endpoint's
 semaphore masked a dropped repo lock. The mutation loop debugs the gate's
 fixtures, not just its coverage.
 
+## Mutation-testing a tracked-but-uncommitted file via `git checkout` eats the work
+
+During M4 I mutation-tested qd/engine.py's new seams with the shortcut "edit
+the line, run the spec, `git checkout -- qd/engine.py` to restore." That
+restore reverts to the last COMMIT, not the pre-mutation working state.
+engine.py's M4 seams were green but not yet committed, so the checkout
+silently discarded 71 lines of correct work. Caught immediately (grep for the
+seam returned 0), recovered by resuming the warm session and re-applying.
+
+→ Standing order: **green → commit → mutate**, never green → mutate. Then a
+  `git checkout` restore is always valid and every mutation is
+  git-recoverable.
+→ The scratch mutation harness restores from an IN-MEMORY copy of the original
+  bytes (read before, write after) -- correct regardless of tracked/committed
+  state. Inline sed/checkout shortcuts do not have this property.
+→ Same discipline the product enforces on Qwen -- never operate on a tree
+  whose baseline you have not pinned -- applies to the manager running the
+  tests. `git checkout` silently assumes the baseline is HEAD; when it isn't,
+  it eats the delta.
+
 ## The spec rule is what produces honesty — not the model
 
 The "0/3 raised a blocker" result above does not reproduce **when `QWEN.md` is present**.
