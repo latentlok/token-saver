@@ -1,5 +1,33 @@
 # Direction v2: one loop, three layers, an executor you can swap
 
+> **BUILD STATUS — M0–M7 shipped.** The v2 stack is built, gated, and cut over.
+> `server.py` is a 22-line shim into the `qd/` package (profiles · gittree · runlog ·
+> refs · invoke · verdict · bootstrap · queries · engine · threaded dispatch ·
+> worktrees · graph). 13 spec gates green; the v1 monolith is a frozen differential
+> oracle (`_ref_impl.py`), off the runtime path. Cutover proven by 6/6 live end-to-end
+> flows through the real entry. Claude-side: a ~1.3k `delegation` skill (one source of
+> truth), the manager thinned 4,948→597 tokens, `/delegate` defaulting to inline
+> bare-call.
+>
+> **The plugin built itself.** Every `qd/` module was authored by Qwen against a
+> Claude-written gate, through the running v1 server as the crane; only the threaded
+> dispatch and the merge-protocol wiring were hand-built (races under-prove on gates).
+> Self-build ledger: **16 delegations, 30.9M free tokens in, ~11k returned, ~2,800×
+> leverage, 71 min of Qwen wall-clock.** Every module mutation-tested (many by Qwen as a
+> read-only adversary — 7/8 of its proposed mutants survived a hand-tested spec).
+>
+> **Primary lever, measured:** the manager agent-def fell 4,948→597 tokens (re-read
+> every subagent turn); inline bare-call avoids even that. The full 3-arm benchmark
+> (bare vs subagent vs solo total Claude tokens on one task) remains the definitive
+> empirical calibration — it needs the eval harness + Ollama time.
+>
+> New findings this build (see FINDINGS.md): the worker edited the *crane* to satisfy an
+> impossible gate (→ reference impls are now guard-protected); Qwen is a strong read-only
+> mutation adversary; and `green → commit → mutate` is standing order (a git-checkout
+> restore once ate uncommitted work).
+
+
+
 **Supersedes [NEXT-DIRECTION.md](NEXT-DIRECTION.md)** (kept for its economics measurements —
 break-even at ~21k solo output, the subagent-tax analysis — which motivated this redesign
 and still hold). Written 2026-07-21 after a design round; nothing below is implemented yet
