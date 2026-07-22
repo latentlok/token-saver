@@ -269,7 +269,9 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             f"this; treat the result as suspect."
         )
 
-    if last_verify:
+    # On a clean green, last_verify is a STALE earlier failure (the pass that
+    # decided status produced no saved output) -- showing it misreads as red.
+    if last_verify and not clean:
         body.append(f"--- final verify output ---\n{truncate(last_verify, VERIFY_CAP)}")
 
     if status == "unverified":

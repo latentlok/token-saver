@@ -146,6 +146,17 @@ class CompactGreen(Fixture):
         _, v2 = self.both(v2_over={"peak": 150000})
         self.assertIn("APPROACHING COMPACTION", v2)
 
+    def test_stale_verify_output_dropped_on_green(self):
+        # Success-after-retry: last_verify holds attempt 1's FAILURE output.
+        # Found live (trust=self slugify run): a green receipt carried 1.3k
+        # chars of stale red output and read as a failure.
+        _, v2 = self.both(trail=["attempt 1: verify failed",
+                                 "attempt 2: VERIFY PASS"],
+                          last_verify="AssertionError: stale attempt-1 noise")
+        self.assertEqual(v2.splitlines()[0], "STATUS: success")
+        self.assertNotIn("final verify output", v2)
+        self.assertNotIn("stale attempt-1 noise", v2)
+
 
 class VerboseRed(Fixture):
     """Non-success keeps the full diagnostics."""
