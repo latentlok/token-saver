@@ -129,10 +129,10 @@ class Staleness(Fixture):
         self.assertIsNone(s["indexed_sha"])
         self.assertEqual(s["status"], "none")
 
-    def test_unknown_sha_degrades_not_crashes(self):
+    def test_unknown_sha_degrades_to_none(self):
         self.seed("0" * 40)          # a sha git has never seen
         s = graph.staleness(self.cwd)     # must not raise
-        self.assertIn(s["status"], ("none", "stale"))
+        self.assertEqual(s["status"], "none")     # LLD contract: treat as none
 
 
 class Sidecar(Fixture):
@@ -171,6 +171,7 @@ class Async(Fixture):
         t0 = time.time()
         th = graph.refresh_async(self.cwd, ["a.py"])
         self.assertLess(time.time() - t0, 0.5)          # returned promptly
+        self.assertTrue(th.daemon)   # a hung refresh must never block exit
         self.assertEqual(graph.read_state(self.cwd)["status"], "indexing")
         th.join(timeout=10)
         self.assertEqual(graph.read_state(self.cwd)["status"], "fresh")
@@ -181,6 +182,17 @@ class GraphifyCmd(Fixture):
         cmd = graph.graphify_cmd(self.cwd, ["a.py", "b.py"])
         self.assertEqual(cmd[0], self.stub)
         self.assertIn(self.cwd, cmd)
+
+    def test_cmd_default_binary_is_graphify(self):
+        del os.environ["QWEN_DELEGATE_GRAPHIFY"]
+        self.assertEqual(graph.graphify_cmd(self.cwd, [])[0], "graphify")
+
+
+# Documented cosmetic survivors of the adversarial pass (graph round), left as
+# documentation rather than brittle tests: the failure-reason wording and its
+# truncation length (a reason is a lead, not parsed), the null-sha display
+# fallback in graph_line (unreachable for fresh/stale, which always carry a
+# sha), and the git-diff whitespace-line filter (no-op on real diff output).
 
 
 class GraphLine(Fixture):
