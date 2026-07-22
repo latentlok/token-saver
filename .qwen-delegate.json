@@ -1,3 +1,3 @@
 {
-  "spec_globs": ["specs/*", "*_spec.*", "*.spec.*"]
+  "spec_globs": ["specs/*", "*_spec.*", "*.spec.*", "server.py", "scoped_hook.py", "compact_hook.py"]
 }

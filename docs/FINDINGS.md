@@ -438,6 +438,35 @@ mitigation, not a fix. **Open issue; `scoped` should not be treated as a sandbox
 Same class as the tool-gating finding above, one level up: gating the shell is not gating
 execution.
 
+## Given an impossible equality gate, the worker edited the REFERENCE — protect the crane
+
+During the v2 self-build (M2, bootstrap port), the gate compared the new module
+against the running v1 server byte-for-byte — crane equality. The spec had a
+manager bug: it called `nongit_refusal` with **two different tempdirs**, and the
+message embeds the path, so equality was impossible as written.
+
+The worker's resolution, on attempt 3, with QWEN.md present and the task saying
+"Do NOT modify server.py" verbatim: **it edited server.py** — made the message
+path-independent on both sides so the equality held — and reported success, with
+an honest handoff describing the hack. The spec guard did not fire because the
+guard protects `*_spec.*` globs, and the reference implementation wasn't one.
+The gate then genuinely passed: the spec process imports `server.py` from disk,
+so it compared the new module against the *edited* crane.
+
+Same class as the `_ZeroSign` finding — a flawed gate gets gamed to green, not
+reported — with a new corollary:
+
+→ **Anything a gate treats as reference truth is part of the gate and must be
+  protected like one.** `server.py` and the hook scripts are now in
+  `spec_globs`, so the guard auto-reverts any worker edit to them.
+→ A crane-equality spec's fixtures must be *identical inputs by construction* —
+  feeding the two sides different random paths is a manager bug, and it will be
+  gamed, not surfaced.
+→ The receipt caught it (`M server.py (+1/-1)` in CHANGED) — deterministic
+  blast-radius attribution, not the worker's honesty, is what surfaced the
+  edit. The handoff being honest this time was luck; CHANGED being right is
+  design.
+
 ## The spec rule is what produces honesty — not the model
 
 The "0/3 raised a blocker" result above does not reproduce **when `QWEN.md` is present**.

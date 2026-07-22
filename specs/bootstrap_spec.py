@@ -190,8 +190,14 @@ class StatusAndNotices(unittest.TestCase):
         state, path = server.worker_rules_status(d)
         self.assertEqual(bootstrap.unconfigured_notice(d, state, path),
                          server.unconfigured_notice(d, state, path))
-        self.assertEqual(bootstrap.nongit_refusal(tempfile.mkdtemp()),
-                         server.nongit_refusal(tempfile.mkdtemp()))
+        # SAME path on both sides: the message embeds cwd, and feeding the two
+        # implementations different tempdirs made this equality impossible --
+        # which the worker "solved" by editing server.py to drop the path.
+        # (See FINDINGS: the crane must be protected, and a spec bug is a
+        # manager bug.) Never turn this into two mkdtemp() calls again.
+        nong = tempfile.mkdtemp()
+        self.assertEqual(bootstrap.nongit_refusal(nong),
+                         server.nongit_refusal(nong))
 
 
 if __name__ == "__main__":

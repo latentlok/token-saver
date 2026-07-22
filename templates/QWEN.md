@@ -127,3 +127,16 @@ Your final message must be actual output text, not internal reasoning. End with:
 
 FILES is checked against the filesystem. Claiming "none" while files changed, or
 naming files you did not touch, is a false report.
+
+## Web references
+
+Any web page or documentation fetched during a task must be saved to
+`.qwen-delegate/refs/<short-slug>.md` with the source URL on line 1. This keeps the
+build reproducible and lets the manager spot-check sources. Never cite a web source you
+did not save.
+
+## Self-tests
+
+You may write your own scratch tests as `<name>_qwen.<ext>` files — encouraged, they are
+yours and unlimited. They are NEVER the gate: files matching `*_spec.*` / `*.spec.*` are
+the manager's protected specs, and only the manager's verify command decides success.
