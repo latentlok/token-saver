@@ -36,7 +36,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import server  # noqa: E402  (the crane -- the golden reference)
+import _ref_impl as server  # noqa: E402  (frozen v1 oracle, test-only)
 from qd import verdict  # noqa: E402
 
 

@@ -171,10 +171,8 @@ def _default_tools():
 
 
 def _default_schemas():
-    # TODO(M6): at cutover the schemas move here; until then the crane owns
-    # the canonical tool text and we re-serve it unchanged.
-    import server as _v1
-    return [_v1.TOOL, _v1.QUERY_TOOL]
+    from qd import schemas
+    return [schemas.TOOL, schemas.QUERY_TOOL]
 
 
 def main(tools=None, schemas=None):
