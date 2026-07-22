@@ -72,6 +72,52 @@ Cap is per-endpoint (your hardware); more workers = raise it in the executor pro
 `touch_scope=["a.py","b.py"]` restricts edits to named pre-existing files (out-of-scope
 edits auto-revert); new files stay free. Use it to bound a change to its intended surface.
 
+## Parameter facts (the schema lists them; the measured details live here)
+
+**Approval modes (probed):**
+
+    plan       write NO   shell NO         any vague task — can't invent scope it can't write
+    auto-edit  write YES  shell NO         ← default for code; the SERVER runs verify and
+                                             feeds failures back, so Qwen converges shell-less
+    scoped     write cwd  shell ALLOWLIST  when Qwen should run its own tests; NOT a sandbox
+    yolo       write YES  shell YES        only when shell IS the work (build, migration, git)
+    default / auto — deny everything headless; never use
+
+`scoped` allows the exact `verify` command, a read-only/test allowlist, and your
+`shell_allow` regexes. Blocked commands surface as SHELL APPROVAL NEEDED — judge each
+**on the command alone**; approve by adding its pattern to `shell_allow` and re-delegating
+with the same `session_id`, or deny with the reason in `shell_feedback` (a reasonless
+denial just makes it guess). Compound/redirect/network commands are rejected regardless.
+
+**Vague work, two-phase:** `approval_mode="plan"` (no verify needed) → options + SESSION →
+user/you pick one → re-delegate that item warm (`session_id`) with `auto-edit` + a real
+gate. The chosen plan item becomes the spec.
+
+**timeout_sec:** the 900 default kills large tasks mid-write. Fitted model (198 calls):
+`seconds ≈ turns×avg_context/10,882 + output_tokens/70`, avg_context ≈ (22k + peak)/2.
+Estimate, then set ~3× — p90 ran 3× median, and over-setting costs nothing.
+
+**Sessions:** stateless (omit `session_id`) is the default and usually right — a fresh
+session re-reads QWEN.md, which is what makes the rules bind. Resume only for a tight
+follow-up on the SAME task, same cwd.
+
+**on_compaction:** compaction is the documented fabrication trigger. `reinject` (default)
+keeps the warm session cheaply; `discard` restarts cold and is the only option that
+removes the corrupted summary — choose it when a false "already did that" is expensive.
+For any run that might compact, put critical rules in the TASK TEXT — QWEN.md does not
+survive a compaction.
+
+**workers (best-of-N):** N independent candidates, first gate-pass wins. Free tokens but
+N× wall time; needs `verify` and a committed base.
+
+**qwen_query:** keep questions bounded to a few files — a forced whole-repo read pushes
+Qwen past compaction, after which it fabricates having read things. Structure and
+semantics are reliable; precise citations are not (measured: a perfect library map with
+every line number fabricated). The VERIFY list says what to confirm.
+
+**Hygiene:** re-read any file Qwen touched before editing it yourself (your cached copy
+is stale); parallel delegations need separate worktrees — `batch` handles that for you.
+
 ## Inline vs the manager subagent
 
 Run the loop **inline** for interactive work and small counts. Hand it to the
