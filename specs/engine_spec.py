@@ -60,7 +60,7 @@ for rel, content in (step.get("write") or {}).items():
     os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(rel) else None
     open(p, "w").write(content)
 result = {"type": "result", "result": step.get("result", "did the work\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing"),
-          "session_id": "e-sess-%d" % (n + 1), "permission_denials": [],
+          "session_id": step.get("sid", "e-sess-%d" % (n + 1)), "permission_denials": [],
           "stats": {"tools": {"totalCalls": 1, "totalFail": 0, "byName": {}},
                     "models": {}}}
 sys.stdout.write(json.dumps([
@@ -69,6 +69,7 @@ sys.stdout.write(json.dumps([
 
 PYTEST_STUB = """#!/bin/sh
 echo "$@" >> "$STUB_PYTEST_LOG"
+cat .pytest_out 2>/dev/null
 exit $(cat .pytest_rc 2>/dev/null || echo 0)
 """
 
@@ -266,6 +267,47 @@ class Accounting(Fixture):
                           "approval_mode": "auto-edit", "executor": "stub"})
         self.assertIn("STATUS: success", out)
         self.assertIn("--- qwen result ---", out)
+
+
+class MutationHardening(Fixture):
+    """Closures for survivors of the Qwen adversarial mutation pilot (7/8 of
+    its proposed mutants survived the original suite -- see FINDINGS "Qwen as
+    mutation adversary"). Two survivors are documented residuals instead of
+    tests: the prefilter subprocess-crash fallback and the reflexion
+    repeated-failure comparison mode need fixture machinery that would cost
+    more than the risk they guard."""
+
+    def test_timeout_floor_clamped_to_30(self):            # survivor 1
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(timeout_sec=1)
+        self.assertEqual(r["ctx"]["timeout"], 30)
+
+    def test_attempt_1_receives_handoff_suffix(self):      # survivor 6
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate()
+        self.assertIn("HANDOFF:", self.task_seen(1))
+        self.assertIn("FILES:", self.task_seen(1))
+
+    def test_sessions_deduped_on_resume(self):             # survivor 5
+        self.steps([{"write": {"out.py": "wrong\n"}, "sid": "same-sid"},
+                    {"write": {"out.py": "MARKER\n"}, "sid": "same-sid"}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["sessions"].count("same-sid"), 1)
+
+    def test_on_compaction_default_is_reinject(self):      # survivor 8
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["on_compaction"], "reinject")
+
+    def test_prefilter_output_capped_at_2000(self):        # survivor 2
+        self.enable_prefilter()
+        self.steps([{"write": {"out.py": "wrong\n", "calc_qwen.py": "x\n",
+                               ".pytest_rc": "1", ".pytest_out": "z" * 5000}},
+                    {"write": {"out.py": "MARKER\n", ".pytest_rc": "0"}}])
+        self.delegate()
+        fed = self.task_seen(2)
+        self.assertIn("z" * 100, fed)              # output did reach feedback
+        self.assertNotIn("z" * 2501, fed)          # but capped at ~2000
 
 
 if __name__ == "__main__":

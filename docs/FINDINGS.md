@@ -467,6 +467,33 @@ reported — with a new corollary:
   edit. The handoff being honest this time was luck; CHANGED being right is
   design.
 
+## Qwen as mutation adversary: 7/8 proposed mutants survived a hand-tested spec
+
+Pilot during the v2 self-build (M2, engine spec — a gate that had already
+passed one hand-picked mutation). One read-only `qwen_query`: *"propose 8
+semantic mutations to qd/engine.py you believe specs/engine_spec.py would NOT
+catch"*, answered as exact find/replace pairs; a 40-line throwaway harness
+applied each, ran the spec, tallied, restored.
+
+**7 of 8 survived** — seven real blind spots (timeout clamp floor, prefilter
+truncation, exception-path fallback, session dedup via a str-vs-list type
+confusion, attempt-1 handoff suffix inverted, compaction default flipped,
+reflexion comparison mode) — and its survive/caught self-predictions were
+right on 7 of 8. Five survivors were closed with one-assert spec tests
+(re-run: 5/8 caught); three are documented residuals (two where fixture
+machinery would cost more than the risk, one double-capped downstream).
+
+Why this works when build-time honesty fails: **proposing mutations is
+read-only adversarial review** — there is no gate to game, and "find what the
+spec misses" aligns with the model's drive instead of fighting it. Same
+mechanism as the plan-mode pre-flight finding. And the judge is a shell loop:
+apply, run spec, exit code decides — zero model tokens, zero new server code.
+
+→ Adopted as a workflow pattern (skill-level), NOT engine code: one query per
+  module after its gate first goes green, harness in scratch, close or
+  document every survivor. Breadth beats the single hand-pick: my one
+  hand-mutation per module missed all seven of these.
+
 ## The spec rule is what produces honesty — not the model
 
 The "0/3 raised a blocker" result above does not reproduce **when `QWEN.md` is present**.
