@@ -27,6 +27,7 @@ from qd.bootstrap import (
 from qd import worktrees
 from qd.verdict import render, HANDOFF_SUFFIX, VERIFY_CAP
 from qd import refs
+from qd import graph
 
 _DEFAULT_MAX_ITER = 3
 _DEFAULT_TIMEOUT = 900
@@ -502,9 +503,26 @@ def run(args):
     Returns the rendered verdict string.
     """
     d = delegate(args)
-    return render(
+    cwd = args["cwd"]
+    in_tree = (args.get("worktree") or "off") != "auto"
+    try:
+        d["ctx"]["graph_line"] = graph.graph_line(cwd)
+    except Exception:
+        pass
+    receipt = render(
         d["status"], d["session_id"], d["trail"],
         d["result_text"], d["denials"],
         d["max_iter"], d["ctx"],
         last_verify=d["last_verify"],
     )
+    if d["status"] == "success" and in_tree:
+        try:
+            post = snapshot(cwd)
+            changed = [
+                p for p in set(list(post.keys()) + list(d["ctx"]["pre_status"].keys()))
+                if post.get(p) != d["ctx"]["pre_status"].get(p)
+            ]
+            graph.refresh_async(cwd, changed)
+        except Exception:
+            pass
+    return receipt
