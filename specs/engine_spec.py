@@ -395,5 +395,71 @@ class MutationHardening(Fixture):
         self.assertNotIn("z" * 2501, fed)          # but capped at ~2000
 
 
+class GraphWiring(Fixture):
+    """M5 seam: engine.run populates ctx['graph_line'] and fires a post-verdict
+    graph refresh for IN-TREE successes. Worktree successes leave the main-tree
+    graph alone (main HEAD only moves when Claude runs the MERGE line)."""
+
+    def _stub_graphify(self):
+        import stat as _stat
+        d = tempfile.mkdtemp()
+        g = os.path.join(d, "graphify")
+        with open(g, "w") as f:
+            f.write("#!/usr/bin/env python3\nimport sys; sys.exit(0)\n")
+        os.chmod(g, os.stat(g).st_mode | _stat.S_IEXEC)
+        os.environ["QWEN_DELEGATE_GRAPHIFY"] = g
+
+    def _wait_sidecar(self, cwd, timeout=8):
+        from qd import graph
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            st = graph.read_state(cwd)
+            if st and st["status"] in ("fresh", "failed"):
+                return st
+            time.sleep(0.05)
+        return graph.read_state(cwd)
+
+    def test_run_receipt_carries_graph_line(self):
+        self._stub_graphify()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("GRAPH:", out)
+
+    def test_intree_success_fires_refresh(self):
+        from qd import graph
+        self._stub_graphify()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        engine.run({"task": "t", "cwd": self.cwd,
+                    "verify": "grep -q MARKER out.py",
+                    "approval_mode": "auto-edit", "executor": "stub"})
+        st = self._wait_sidecar(self.cwd)
+        self.assertIsNotNone(st)
+        self.assertEqual(st["status"], "fresh")
+
+    def test_worktree_success_does_not_refresh_main(self):
+        from qd import graph
+        self._stub_graphify()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        engine.run({"task": "t", "cwd": self.cwd,
+                    "verify": "grep -q MARKER out.py",
+                    "approval_mode": "auto-edit", "executor": "stub",
+                    "worktree": "auto"})
+        time.sleep(0.5)
+        self.assertIsNone(graph.read_state(self.cwd))    # main graph untouched
+
+    def test_failure_does_not_refresh(self):
+        from qd import graph
+        self._stub_graphify()
+        self.steps([{"write": {"out.py": "wrong\n"}}])
+        engine.run({"task": "t", "cwd": self.cwd,
+                    "verify": "grep -q MARKER out.py",
+                    "approval_mode": "auto-edit", "executor": "stub",
+                    "max_iterations": 1})
+        time.sleep(0.5)
+        self.assertIsNone(graph.read_state(self.cwd))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
