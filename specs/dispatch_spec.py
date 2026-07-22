@@ -66,6 +66,9 @@ def slow(args):
 def boom(args):
     raise RuntimeError("handler exploded")
 
+def batchrun(args):
+    return server.run_batch(args.get("batch") or [], slow)
+
 SCHEMAS = [
     {"name": "slow", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "qwen_delegate", "description": "stub", "inputSchema": {"type": "object"}},
@@ -74,7 +77,8 @@ SCHEMAS = [
     {"name": "boom", "description": "stub", "inputSchema": {"type": "object"}},
 ]
 server.main(tools={"slow": slow, "qwen_delegate": slow, "qwen_query": slow,
-                   "qwen_investigate": slow, "boom": boom}, schemas=SCHEMAS)
+                   "qwen_investigate": slow, "boom": boom,
+                   "batchrun": batchrun}, schemas=SCHEMAS)
 """
 
 
@@ -239,13 +243,13 @@ class Concurrency(Fixture):
 
     def test_same_repo_delegates_serialize_cross_repo_overlap(self):
         self.srv.call(20, "qwen_delegate",
-                      {"tag": "r1", "sleep": 1.0, "cwd": self.repo_a,
+                      {"tag": "r1", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p2a"})
         self.srv.call(21, "qwen_delegate",
-                      {"tag": "r2", "sleep": 1.0, "cwd": self.repo_a,
+                      {"tag": "r2", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p2b"})
         self.srv.call(22, "qwen_delegate",
-                      {"tag": "rx", "sleep": 1.0, "cwd": self.repo_b,
+                      {"tag": "rx", "sleep": 1.5, "cwd": self.repo_b,
                        "executor": "p3"})
         for rid in (20, 21, 22):
             self.srv.wait(rid)
@@ -256,16 +260,16 @@ class Concurrency(Fixture):
         # e1 (cap 1): its two profiles serialize even across repos.
         # e2 (cap 2): its two profiles overlap. e1's queue never blocks e2.
         self.srv.call(30, "qwen_delegate",
-                      {"tag": "e1a", "sleep": 1.0, "cwd": self.repo_a,
+                      {"tag": "e1a", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p1a"})
         self.srv.call(31, "qwen_delegate",
-                      {"tag": "e1b", "sleep": 1.0, "cwd": self.repo_b,
+                      {"tag": "e1b", "sleep": 1.5, "cwd": self.repo_b,
                        "executor": "p1b"})
         self.srv.call(32, "qwen_delegate",
-                      {"tag": "e2a", "sleep": 1.0,
+                      {"tag": "e2a", "sleep": 1.5,
                        "cwd": tempfile.mkdtemp(), "executor": "p2a"})
         self.srv.call(33, "qwen_delegate",
-                      {"tag": "e2b", "sleep": 1.0,
+                      {"tag": "e2b", "sleep": 1.5,
                        "cwd": tempfile.mkdtemp(), "executor": "p2b"})
         for rid in (30, 31, 32, 33):
             self.srv.wait(rid)
@@ -315,6 +319,35 @@ class Failure(Fixture):
         self.assertIn("no-such-profile", r["content"][0]["text"])
         self.srv.send({"jsonrpc": "2.0", "id": 61, "method": "ping"})
         self.assertEqual(self.srv.wait(61)["result"], {})
+
+
+class Batch(Fixture):
+    """M4/probe-5 seam: one MCP call carrying N delegation items, fanned
+    server-side across worktrees. Probe 5 measured the client serializes
+    multi-call dispatch, so batch is the primary fan-out mechanism -- it must
+    parallelize WITHIN one call. A batch handler is registered as the stub
+    'batchrun' that fans args['batch'] items through the same guard/worker
+    machinery and returns per-item receipts."""
+
+    def test_batch_items_run_and_return_per_item_receipts(self):
+        items = [{"tag": f"b{i}", "sleep": 0.3, "cwd": tempfile.mkdtemp(),
+                  "executor": "p2a"} for i in range(3)]
+        self.srv.call(80, "batchrun", {"batch": items})
+        r = self.srv.wait(80, timeout=20)["result"]
+        text = r["content"][0]["text"]
+        for i in range(3):
+            self.assertIn(f"done b{i}", text)
+
+    def test_batch_parallelizes_within_one_call(self):
+        # Four 1s items on a cap-2 endpoint: ~2s if parallel, ~4s if serial.
+        items = [{"tag": f"bp{i}", "sleep": 1.0, "cwd": tempfile.mkdtemp(),
+                  "executor": "p2a"} for i in range(4)]
+        t0 = time.time()
+        self.srv.call(81, "batchrun", {"batch": items})
+        self.srv.wait(81, timeout=20)
+        wall = time.time() - t0
+        self.assertLess(wall, 3.5, f"batch of 4x1s took {wall:.1f}s -- serial?")
+        self.assert_overlap("bp0", "bp1")
 
 
 class Drain(Fixture):

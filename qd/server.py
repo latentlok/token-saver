@@ -119,9 +119,53 @@ def _run_call(rid, name, args, handler):
             g.release()
 
 
+def run_batch(items, handler):
+    """Fan N delegation items across worker threads IN ONE CALL (probe 5:
+    the client serializes multi-call dispatch, so this is the primary fan-out
+    path). Each item holds its own endpoint slot + (for in-tree) repo lock via
+    the same _guards_for machinery, so real concurrency is capped by the
+    endpoint, not by the batch size. Returns the per-item receipts joined,
+    order preserved. A worktree='auto' item isolates itself; an item that
+    raises becomes an error receipt in its slot, never sinking the batch."""
+    results = [None] * len(items)
+
+    def one(idx, args):
+        acquired = []
+        try:
+            for g in _guards_for("qwen_delegate", args):
+                g.acquire()
+                acquired.append(g)
+            try:
+                results[idx] = handler(args)
+            except Exception as e:
+                results[idx] = f"STATUS: error\n{e!r}"
+        except profiles.ProfileError as e:
+            results[idx] = f"STATUS: error\n{e}"
+        finally:
+            for g in reversed(acquired):
+                g.release()
+
+    threads = [threading.Thread(target=one, args=(i, a), daemon=True)
+               for i, a in enumerate(items)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return "\n\n=== batch item ===\n".join(
+        r if r is not None else "STATUS: error\n(no result)" for r in results)
+
+
+def run_delegate_batch(args):
+    """The qwen_delegate entry, batch-aware: args['batch'] fans out, else one."""
+    from qd import engine
+    if args.get("batch"):
+        return run_batch(args["batch"], engine.run)
+    return engine.run(args)
+
+
 def _default_tools():
-    from qd import engine, queries
-    return {"qwen_delegate": engine.run,
+    from qd import queries
+    return {"qwen_delegate": run_delegate_batch,
             "qwen_query": queries.run_query,
             "qwen_investigate": queries.run_investigate}
 
