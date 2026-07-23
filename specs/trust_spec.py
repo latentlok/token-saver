@@ -86,6 +86,15 @@ class SelfGateScript(unittest.TestCase):
         with open(os.path.join(self.cwd, ".qwen-delegate", ".gitignore")) as f:
             self.assertEqual(f.read().strip(), "*")
 
+    def test_min_override_ratchets_above_config(self):
+        # The incremental ratchet: 6 green tests, bar raised to 7 -> gate red.
+        write_suite(self.cwd, 6)
+        cmd = engine._ensure_self_gate(self.cwd, min_override=7)
+        p = subprocess.run(cmd, shell=True, cwd=self.cwd,
+                           capture_output=True, text=True)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(">= 7", (p.stdout or "") + (p.stderr or ""))
+
 
 class TrustPrecondition(unittest.TestCase):
     def test_unknown_trust_refused_naming_both_ends(self):

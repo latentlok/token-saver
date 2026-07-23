@@ -8,6 +8,7 @@ two-function surface backed entirely by qd submodules.
 
 import json
 import os
+import re
 import subprocess
 
 from qd.profiles import resolve, cost_usd
@@ -55,7 +56,7 @@ exit 0
 """
 
 
-def _ensure_self_gate(work_cwd):
+def _ensure_self_gate(work_cwd, min_override=None):
     """(Re)write the trust="self" gate script; return the verify command.
 
     Rewritten before every gate run so a worker edit to the script cannot
@@ -64,6 +65,8 @@ def _ensure_self_gate(work_cwd):
     Suite: the project's detected test command, else stdlib unittest discovery.
     Vacuous-pass guard: >= min_tests (project .qwen-delegate.json, default 5)
     when a test count is parseable (unittest "Ran N" / pytest "N passed").
+    min_override: the incremental ratchet (see delegate()) -- an existing green
+    suite of N tests raises the bar to N+1 so the gate binds on the delta.
     """
     min_tests = 5
     try:
@@ -71,6 +74,8 @@ def _ensure_self_gate(work_cwd):
             min_tests = int(json.load(f).get("min_tests") or min_tests)
     except Exception:
         pass
+    if min_override is not None:
+        min_tests = max(min_tests, min_override)
     suite = detect_test_cmd(work_cwd) or \
         "python3 -m unittest discover -s tests -t . -v"
     d = os.path.join(work_cwd, ".qwen-delegate")
@@ -264,8 +269,19 @@ def delegate(args):
     # --- Pre-flight verify ---
     preflight = None
     preflight_out = ""
+    self_min = None
     if verify:
         preflight, preflight_out = _run_verify(verify, work_cwd)
+        if self_gate and preflight:
+            # Incremental ratchet: an existing suite is already green, so this
+            # gate proves nothing -- and every later feature would read as
+            # success_but_preflight_passed. Require MORE tests than preflight
+            # found; the gate now binds on the delta, and preflight re-runs red.
+            m = re.search(r"Ran (\d+) tests?|(\d+) passed", preflight_out or "")
+            n = int(m.group(1) or m.group(2)) if m else 0
+            self_min = n + 1
+            verify = _ensure_self_gate(work_cwd, min_override=self_min)
+            preflight, preflight_out = _run_verify(verify, work_cwd)
 
     # --- Refs snapshot (pre-run) ---
     refs_before = refs.snapshot(cwd)
@@ -463,7 +479,8 @@ def delegate(args):
 
         # --- Run verify ---
         if self_gate:
-            _ensure_self_gate(work_cwd)  # overwrite any worker edit to the gate
+            # overwrite any worker edit to the gate, keeping the ratcheted bar
+            _ensure_self_gate(work_cwd, min_override=self_min)
         passed, v_out = _run_verify(verify, work_cwd)
 
         if passed:
