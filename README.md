@@ -21,7 +21,7 @@ flowchart TD
     U([you]) -->|vague goal| M
 
     subgraph claude["Claude Code (expensive tokens, big context)"]
-        M["qwen-manager<br/>(a Claude subagent)<br/>decides · writes the spec · verifies"]
+        M["your session, INLINE (the default)<br/>decides · pins behavior or authors a gate · reads the receipt<br/>(qwen-manager subagent = optional isolation)"]
     end
 
     M -->|"qwen_delegate(task, cwd, verify, mode)"| S
@@ -56,12 +56,19 @@ flowchart TD
 
 The same flow in one screen of text:
 
-    you ──▶ qwen-manager (Claude subagent)          ← owns the whole loop
-              ├── qwen, plan mode      → options, writes nothing
-              ├── decides, writes the spec tests    ← the design decision
-              ├── qwen, auto-edit + gate → iterates on real failures
-              └── verifies independently, rolls back if wrong
+    you ──▶ your Claude session, INLINE (the measured default)
+              ├── vague idea?  qwen, plan mode → options, writes nothing
+              ├── decides; pins BEHAVIOR (trust="self") or authors a gate (trust="verified")
+              ├── qwen_delegate → the SERVER runs the gate and iterates on free tokens
+              └── reads a ~6-line receipt — never the code, never the diff
         ◀── "here's what landed, here's the proof"
+
+Inline is the default because it measured cheaper — a subagent costs a preamble that
+medium-sized work doesn't earn back. **qwen-manager** (the bundled subagent) is the
+*optional isolation container* for the same loop: long multi-unit grinds whose
+iteration would silt up your session, parallel fan-out, or work you want running in
+the background while you keep talking. Same discipline either way — one source of
+truth in the `delegation` skill.
 
 **Three systems, each doing the one thing it is good at.** Claude holds judgment and a
 big context. `server.py` is a dependency-free broker that runs Qwen and enforces the
@@ -79,8 +86,11 @@ failures behind them, with numbers, are in [docs/FINDINGS.md](docs/FINDINGS.md):
 - **Qwen fabricates.** Day one it wrote correct `fib()` code and reported "all three
   tests pass ✅" with pytest not installed. Its self-report is never evidence, so a
   shell command decides instead.
-- **Never let it grade itself.** Given a vague task it rewrote the spec tests and
-  reported 38/38 green. Specs are `*_spec.*`, Claude-authored, auto-reverted if touched.
+- **Never let it grade itself — unless you choose to, eyes open.** Given a vague task it
+  rewrote the spec tests and reported 38/38 green. Specs are `*_spec.*`, Claude-authored,
+  auto-reverted if touched. The trust dial's `self` end deliberately inverts this for
+  the savings: the worker's own suite is the gate (non-vacuous-guarded, ratcheted, and
+  the receipt stamps `TRUST: self` so a green is never misread as independent).
 - **A gate you haven't tested is a hope.** 909 real tests passed a mutation that changed
   *every error message* the library emits. Mutation-test the gate before trusting it.
 - **Vagueness is the root cause of everything.** Well-specified, Qwen is genuinely good
@@ -116,8 +126,8 @@ takes effect on the next session (or `/reload-plugins`) — nothing to reinstall
 Verify the components loaded without starting a session:
 
     claude --plugin-dir ~/projects/qwen-delegate plugin details token-saver
-    # -> MCP servers (1) qwen-delegate · Agents (1) qwen-manager
-    #    Skills (2) delegate, lld-principles
+    # -> MCP servers (1) qwen-delegate · Agents (2) qwen-manager, architect
+    #    Skills (3) delegation, architect, lld-principles
 
 The `.mcp.json` sets a per-server `"timeout": 7200000` (2h). On Claude Code **2.1.203+**
 that one field caps the wall clock *and* floors the stdio idle timeout to 2h, so no

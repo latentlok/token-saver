@@ -59,6 +59,29 @@ local worker is slow; your tokens are the scarce thing, its time is not.
 Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation is
 `verified`.
 
+### Configuring it
+
+- **Per call (the only switch):** `trust="self"` or `trust="verified"` on
+  `qwen_delegate`. Omitted = `"verified"`. Anything else is refused by name
+  (L1–L4 are a parked design).
+- **Careful with the one bad combination:** `trust` omitted AND no `verify` →
+  the receipt is an *unverified claim* (`STATUS: unverified`). If you meant full
+  trust, say `trust="self"`; if you meant a gate, pass one.
+- **Tuning the `self` gate** — project `.qwen-delegate.json`:
+  - `"min_tests": N` — floor for the non-vacuous guard (default 5). On a repo
+    with an existing green suite you don't need to touch it: the server
+    *ratchets* automatically (suite green with N tests at preflight → the gate
+    demands N+1, so it always binds on the delta).
+  - The suite command is auto-detected (npm/cargo/go/pytest/venv), else stdlib
+    `unittest discover -s tests`.
+- **Tuning `verified`:** your gate is whatever shell command you pass as
+  `verify`; files matching `*_spec.*` are auto-protected from worker edits
+  (extend via `"spec_globs"` in `.qwen-delegate.json`). Put fiddly gates in a
+  script on disk, not inline — quoting through JSON→shell has broken three times.
+- **What the receipt tells you:** at `self`, a `TRUST: self (L5)` line is stamped
+  so a green can never be misread as independently verified; the run log records
+  the trust level per run.
+
 ## Recipes
 
 **Mechanical task (rename, codemod, boilerplate, tests-for-existing, lint sweep):**

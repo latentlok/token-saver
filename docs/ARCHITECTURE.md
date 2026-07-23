@@ -1,5 +1,14 @@
 # Architecture
 
+> **⚠ Partially outdated (v1-era).** This file describes the original monolithic
+> `server.py` (~750 lines, one tool, hand-registered in `~/.claude.json`). Since the
+> v2 cutover the accurate structural reference is **[HLD.md](HLD.md)**: the engine is
+> the `qd/` package behind a thin `server.py`, there are TWO tools
+> (`qwen_delegate`, `qwen_query`), registration is plugin auto-discovery via
+> `.mcp.json`, and the trust dial / worktrees / graph / run-log exist. What remains
+> accurate here: the MCP-over-stdio mechanics (§1) and the gate philosophy
+> throughout. Full rewrite is a pending item (PENDING.md).
+
 How this actually works, component by component. Pair it with
 [FINDINGS.md](FINDINGS.md), which records *why* each protection exists — this file is
 the *how*.
