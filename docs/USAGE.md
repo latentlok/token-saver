@@ -34,8 +34,15 @@ local worker is slow; your tokens are the scarce thing, its time is not.
 - **Mandatory: nothing.** The server bootstraps the worker's rules file (QWEN.md)
   on the first delegation, and refuses cleanly if the directory isn't a git repo —
   `git init` first; git is the rollback.
-- Recommended: paste `templates/CLAUDE-snippet.md` into the project's CLAUDE.md so
+- Recommended: put the delegation policy block in the project's CLAUDE.md so
   delegation is the default for mechanical work, not something Claude must remember.
+  Easiest: in a session inside the project, say *"add the delegation policy block
+  from the plugin's CLAUDE-snippet template to this project's CLAUDE.md"* — Claude
+  appends it (creating CLAUDE.md if needed) and skips if it's already there. Verify
+  with `grep qwen-delegate:begin CLAUDE.md`, then commit. Manual alternative: copy
+  `templates/CLAUDE-snippet.md` from `begin` to `end` marker inclusive and paste at
+  the end of CLAUDE.md. You'll also be OFFERED this after the first delegation into
+  a fresh project (the `SETUP:` receipt line) — just say yes.
 - Existing repos you'll work in repeatedly: `graphify update . --no-cluster` (~2s,
   deterministic, no LLM) — the worker locates code via the graph instead of reading;
   the server keeps the index fresh after every delegation. For a large UNFAMILIAR
