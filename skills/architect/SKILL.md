@@ -26,12 +26,12 @@ on-demand primitive — never part of this loop.
 3. **Module tree.** Modules with one-line responsibilities and dependency edges,
    ordered leaf-first. Pin **only inter-module contracts** — interfaces two or more
    modules share (pin once, per `lld-principles`); everything intra-module belongs to
-   the delegate. `docs/DESIGN.md` §2. Existing codebase? Structure comes from the
-   graph, never from reading source — **graph first, worker second**: locate with
-   `graphify explain "<symbol>"` / `graphify path "A" "B"` (deterministic, instant,
-   doesn't queue behind builds on a serialized endpoint; index once with
-   `graphify update .`). Spend a `qwen_query` only on semantic questions a structure
-   map cannot answer ("why might X fail", "how does Y flow").
+   the delegate. `docs/DESIGN.md` §2. Existing codebase? Never read source — locate
+   through the worker: **`qwen_query` first** (measured: an LLD written from the
+   builder's own reading converges better than one written from deterministic
+   structure — graph-first cost +64%, FINDINGS "coherence beats determinism").
+   `graphify explain/path` is the fallback when the endpoint is busy (it never
+   queues) and the tool for orientation once a semantic index exists.
 4. **Handoff at the right altitude** (the capability slider, C1 `altitude`):
    - **Outline grain (`hld`) — the default.** WHAT the module does, its boundary, a
      quality bar. The delegate designs its own interfaces/formats and documents them in

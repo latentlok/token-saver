@@ -692,6 +692,35 @@ hidden acceptance + full-suite regression.
 - Wall time: L5 arms 2-7x slower (Qwen decode) — the accepted trade; wall is free
   overnight, tokens are not.
 
+## Graph-first locating COST MORE than delegated locating — coherence beats determinism
+
+B variant (2026-07-23, `results_existing_large/L5G.*`): same 4 jinja tasks, same L5 arm,
+one change — locate via `graphify explain/path` in the architect's shell instead of
+`qwen_query`. Result: **$3.864 vs $2.354 (+64%)**, slower overall (1012s vs 839s of
+Claude-side wall), quality identical (4/4 + regression green).
+
+Where the money went: 7 delegations for 4 tasks (three multi-attempt: 3,2,3) vs L5's
+clean run, and the architect's context ballooned (T1: 240k vs 81k) — every `graphify`
+shell call is a turn whose output lands and stays in context, where the L5 arm's
+locate was ONE compact qwen_query receipt. Two candidate mechanisms, not separable at
+n=1:
+
+1. **Coherence:** a qwen_query answer comes from the same model that will build — the
+   LLD written from it matches the builder's own reading of the code. An LLD written
+   from deterministic structure (file/symbol/degree, no behavioral context) pinned
+   things the builder then contradicted, burning retries and verbose red receipts.
+2. **Turn mechanics:** shell-based graph exploration multiplies architect turns and
+   resident context; a delegated locate is one receipt.
+
+Variance caveat: the multi-attempt runs could partly be worker stochasticity. But the
+context-bloat mechanism is structural, and the direction is clear enough to set the
+default: **architect locates through the worker (`qwen_query`), not through its own
+shell.** The graph's likely wins remain untested where they'd actually bite:
+orientation/decomposition on an unfamiliar codebase (semantic layer, not built here)
+and giving the graph to the WORKER (in QWEN.md) rather than the architect. The
+skill's "graph-first" rule is REVERTED to qwen_query-first with graphify as the
+no-queue fallback.
+
 ## Numbers
 
 - **Python source ≈ 5.54 bytes/token**, not 4.0 (measured: 379,571 bytes → 68,564 tokens).
