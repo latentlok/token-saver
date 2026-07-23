@@ -26,8 +26,12 @@ on-demand primitive — never part of this loop.
 3. **Module tree.** Modules with one-line responsibilities and dependency edges,
    ordered leaf-first. Pin **only inter-module contracts** — interfaces two or more
    modules share (pin once, per `lld-principles`); everything intra-module belongs to
-   the delegate. `docs/DESIGN.md` §2. Existing codebase? Structure comes from graphify
-   queries — never from reading source.
+   the delegate. `docs/DESIGN.md` §2. Existing codebase? Structure comes from the
+   graph, never from reading source — **graph first, worker second**: locate with
+   `graphify explain "<symbol>"` / `graphify path "A" "B"` (deterministic, instant,
+   doesn't queue behind builds on a serialized endpoint; index once with
+   `graphify update .`). Spend a `qwen_query` only on semantic questions a structure
+   map cannot answer ("why might X fail", "how does Y flow").
 4. **Handoff at the right altitude** (the capability slider, C1 `altitude`):
    - **Outline grain (`hld`) — the default.** WHAT the module does, its boundary, a
      quality bar. The delegate designs its own interfaces/formats and documents them in
@@ -74,7 +78,7 @@ the delta.)
   Existing structure = graphify; module facts = the receipt; anything else = qwen_query.
 - **Never re-verify a green gate.** It ran server-side; a Bash re-run is distrust the
   design already removed.
-- Bash exists for `git` only.
+- Bash exists for `git` and `graphify` queries only.
 - One status line per module to the user, not an essay. The current architecture lives
   in `docs/DESIGN.md`, not re-stated in chat. Spend thinking on design, not orchestration.
 
