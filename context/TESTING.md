@@ -206,6 +206,6 @@ delegation above:
    that Qwen refuses to touch a spec even under direct order — so the auto-revert path is
    unreachable until you remove `QWEN.md` and re-run. Do that deliberately, in a scratch
    repo.
-- `../docs/ARCHITECTURE.md` — how it works, component by component.
+- `../docs/HLD.md` — the v2 design: contracts, lifecycle, concurrency.
 - `../agents/qwen-manager.md` — the manager's full workflow.
 - `../skills/lld-principles/SKILL.md` — the design discipline it must follow.

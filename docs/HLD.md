@@ -1,6 +1,6 @@
 # HLD — qwen-delegate v2
 
-High-level design for [DIRECTION-v2.md](DIRECTION-v2.md). Owns: system context,
+High-level design for [archive/DIRECTION-v2.md](archive/DIRECTION-v2.md) (superseded; build stands). Owns: system context,
 component boundaries, the delegation lifecycle, and **every cross-module contract**
 (pinned once here; module LLDs reference them, never redefine them). Per-module design:
 [LLD.md](LLD.md).
@@ -33,7 +33,7 @@ Functional:
 Non-functional:
 - N1  Receipt ≤ 3,000 chars; everything returned to Claude is capped and trimmable.
 - N2  Zero dependencies; single `python3 server.py` entry; no packaging metadata.
-- N3  Zero-trust invariants (DIRECTION-v2 §Invariants) hold at every stage.
+- N3  Zero-trust invariants (archive/DIRECTION-v2.md §Invariants) hold at every stage.
 - N4  The crane rule: the current server builds v2 and is deleted only at cutover.
 - N5  Every module ships with a spec in `specs/` and survives a mutation pass.
 
@@ -201,7 +201,7 @@ Cutover gate: all `specs/*` green against the new entry **and** live end-to-end 
 
 ## 8. Probes (M0 — no code until answered)
 
-> **Answered 2026-07-22 — results in [PROBES-M0.md](PROBES-M0.md).** Headlines: ollama
+> **Answered 2026-07-22 — results in [archive/PROBES-M0.md](archive/PROBES-M0.md).** Headlines: ollama
 > backend works (free index confirmed, `graphifyy[ollama]` extra required); structural
 > re-index 1.9s repo-wide; `built_at_commit` recorded natively; client serializes MCP
 > dispatch → `batch` param (C9) is the fan-out mechanism; endpoint/model override only

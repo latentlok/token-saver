@@ -161,4 +161,4 @@ what keeps the trade solvent.
 ---
 
 *Evidence for every claim here: [FINDINGS.md](FINDINGS.md). How it is assembled:
-[ARCHITECTURE.md](ARCHITECTURE.md).*
+[HLD.md](HLD.md) (narrative v1 walk-through: [archive/ARCHITECTURE.md](archive/ARCHITECTURE.md)).*

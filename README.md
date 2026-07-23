@@ -74,7 +74,7 @@ truth in the `delegation` skill.
 big context. `server.py` is a dependency-free broker that runs Qwen and enforces the
 gate with git. Qwen types code for free on local hardware. The gate — your own shell
 command — is the only thing trusted to say "it worked." Full detail in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+[docs/HLD.md](docs/HLD.md).
 
 ## Why it's built this way
 
