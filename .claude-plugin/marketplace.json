@@ -1,0 +1,11 @@
+{
+  "name": "token-saver",
+  "owner": { "name": "latentlok" },
+  "plugins": [
+    {
+      "name": "token-saver",
+      "source": "./",
+      "description": "Claude architects, a free local model builds — measured 18-69% fewer Claude tokens at equal quality. Supervised delegation with an objective gate and a trust dial."
+    }
+  ]
+}

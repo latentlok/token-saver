@@ -14,19 +14,33 @@ arms). The saving grows with how much *reading* the task would force on Claude �
 delegation pays most exactly where sessions hurt most. The trade: wall-clock. The
 local worker is slow; your tokens are the scarce thing, its time is not.
 
-## One-time setup
+## Install (once per machine)
 
-1. MCP server registered user-scope (`qwen-delegate`, two tools:
-   `qwen_delegate`, `qwen_query`). Already done on this machine.
-2. Paste `templates/CLAUDE-snippet.md` into a project's CLAUDE.md to make
-   delegation the default for mechanical work in that project.
-3. Per repo you'll work in repeatedly: `graphify update . --no-cluster` (~2s,
-   deterministic, no LLM). The worker uses the graph to locate code instead of
-   reading it; the server keeps the index fresh after every delegation. For a large
-   UNFAMILIAR codebase, additionally delegate a one-time semantic index
-   (`graphify update .` with the local backend) as an offline job.
-4. Different/bigger worker model? Add a profile in `~/.qwen-delegate/executors.json`
-   (C7) and pass `executor=` per call — nothing else changes.
+1. **Prerequisites:** the `qwen` CLI (Qwen Code) configured against your free/local
+   endpoint (e.g. Ollama) — that's the worker; `python3` (the server is stdlib-only,
+   nothing to pip-install); `git`. Optional: `graphify` for the code graph.
+2. **Install the plugin** in Claude Code:
+   `/plugin marketplace add latentlok/token-saver` then install `token-saver` from
+   it. That registers everything at user scope via the plugin manifest: the two MCP
+   tools (`qwen_delegate`, `qwen_query`), the skills (delegation, architect,
+   lld-principles), and the qwen-manager/architect agents. No manual MCP config —
+   `.mcp.json` wires the server through `${CLAUDE_PLUGIN_ROOT}`.
+3. **Different/bigger worker model?** Add a profile in
+   `~/.qwen-delegate/executors.json` (C7) and pass `executor=` per call — nothing
+   else changes.
+
+## Per project (new or existing) — near zero
+
+- **Mandatory: nothing.** The server bootstraps the worker's rules file (QWEN.md)
+  on the first delegation, and refuses cleanly if the directory isn't a git repo —
+  `git init` first; git is the rollback.
+- Recommended: paste `templates/CLAUDE-snippet.md` into the project's CLAUDE.md so
+  delegation is the default for mechanical work, not something Claude must remember.
+- Existing repos you'll work in repeatedly: `graphify update . --no-cluster` (~2s,
+  deterministic, no LLM) — the worker locates code via the graph instead of reading;
+  the server keeps the index fresh after every delegation. For a large UNFAMILIAR
+  codebase, additionally delegate a one-time semantic index (`graphify update .`
+  with the local backend) as an offline job.
 
 ## The trust dial — the one decision per task
 
