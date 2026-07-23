@@ -1,10 +1,18 @@
 # qwen-delegate
 
-Delegate coding work to a local Qwen model from Claude Code, and **know whether it
-actually did it** — without reading its output or trusting its word.
+**Claude architects, a free local model builds — measured: the same work for 18–69%
+fewer Claude tokens, at equal quality.** On a 14k-line codebase, four real changes
+cost $6.85 solo vs **$2.15 delegated** (hidden acceptance tests passed both arms,
+909-test regression green). Greenfield −18%, bug-fixing −43%, existing-code changes
+−69% — the saving grows with how much *reading* the task would have forced, because
+the architect never reads code and its context stays flat while the codebase grows.
 
 Claude decides and specifies. Qwen executes on free local compute. An objective gate
-rules on the result. Nothing reaches Claude's context except a verdict.
+rules on the result. Nothing reaches Claude's context except a compact receipt. A
+**trust dial** picks who authors the gate per task: `verified` (you write the check)
+to `self` (the worker writes and grades its own tests — max savings, measured
+residual risk). Day-to-day workflow: [docs/USAGE.md](docs/USAGE.md); evidence for
+every number and guard: [docs/FINDINGS.md](docs/FINDINGS.md).
 
 ## Architecture
 
