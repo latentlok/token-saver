@@ -148,32 +148,24 @@ is never in this repo. Configure it once per machine:
 
 ### Per-project setup — none required
 
-**The first delegation into a git repo configures it for you.** With no `QWEN.md`, the
-server writes one itself — detecting the test command (`npm test`, `cargo test`, `go test
-./...`, `bundle exec rspec`, `venv/bin/pytest`, …), or, when it can't, recording that the
-project has none rather than guessing. It **never writes a placeholder**. The result
-carries a `SETUP:` line; if the test command wasn't detected, tell Claude what it is.
+**Work in a git repo.** That's the only hard rule (`git init` first). Git history is
+the undo button — there is no sandbox — so the server refuses to run where nothing
+could be rolled back.
 
-That file is what makes the worker's rules bind — Qwen re-reads it every session, which is
-why delegations are stateless. Without it the worker has no rule against editing a
-protected spec file, expanding scope, or reporting work it did not do, and measured, it
-does all three — so the server creates it before running rather than proceed degraded. Any
-`QWEN.md` at the repo root satisfies the check; hand-write your own if you want different
-rules.
+**The first delegation sets the project up by itself.** It writes `QWEN.md` — the
+worker's standing rules — and detects your test command (`npm test`, `cargo test`,
+`pytest`, …). If it can't detect one, the receipt says so instead of guessing; just
+tell Claude what the command is. Why the file matters: Qwen re-reads it every
+session, and it's what makes rules like "never touch a spec file" actually bind —
+measured, without it the worker breaks them. Want different rules? Any hand-written
+`QWEN.md` at the repo root wins.
 
-A **non-git** project is refused (`git init` first): there is no rollback without git, so
-it can't self-configure safely. `qwen_query` never writes as a side effect of a read — it
-warns and proceeds.
-
-Two things stay in your hands, both optional. If the test command wasn't detected, set the
-`- Run tests with:` line in the generated `QWEN.md`. And to make Claude reach for
-delegation automatically, add the delegation policy block to the project's **`CLAUDE.md`**
-— paste `templates/CLAUDE-snippet.md` (it's marker-guarded, so re-adding it never
-duplicates), or just ask Claude to add it. Neither is required to delegate.
-
-The project **must be a git repo**. There is no sandbox: git history is the rollback,
-the spec guard needs git to detect and revert edits, and the server refuses to run if a
-spec file is uncommitted.
+**Optional, but recommended:** add the delegation policy to the project's
+`CLAUDE.md` — copy the block from `templates/CLAUDE-snippet.md`, or just ask Claude
+to add it. Without it, Claude only delegates when it happens to remember this plugin
+exists; with it, every session starts knowing the rule (mechanical work goes to
+Qwen). Safe to paste twice — the block is wrapped in begin/end markers, so it never
+duplicates.
 
 **Language-agnostic.** The spec guard protects any tracked file matching `*_spec.*` or
 `*.spec.*` — `roman_spec.py`, `calc.spec.ts`, `foo_spec.rb`, `bar_spec.go`. Verified on
@@ -184,14 +176,14 @@ a TypeScript project with no config. If your project uses a different convention
 
 ## Use
 
-The front door is **`/delegate <task or question>`** — it routes the work to the free
-model and spends your context only on judgment and relay:
+In normal conversation Claude delegates **inline** — the default and the cheapest
+path. `/delegate <task or question>` is the explicit fire-and-forget door:
 
     /delegate how does auth flow from the request handler to the token check?
     /delegate make the CLI in ./tools usable without PYTHONPATH
 
-Questions are answered read-only and cheap; builds go to the `qwen-manager` subagent,
-which runs the full plan → decide → spec → build → verify loop.
+Questions are answered read-only and cheap; a `/delegate`d build is handed to the
+`qwen-manager` subagent so it runs off to the side while you keep working.
 
 Or hand a task straight to the subagent the way you'd hand it to an engineer — the goal,
 not the steps:
@@ -213,19 +205,18 @@ Or call the tool directly for something already specified:
 
 ## Layout
 
-    server.py              the MCP server. stdio JSON-RPC, zero deps.
-    runlog_spec.py         gate for the run log + token accounting
-    setup_spec.py          gate for the first-use preconditions (self-configure / refuse)
-    bootstrap_spec.py      gate for self-configuration (detection, placeholder-free render)
-    agents/qwen-manager.md the subagent: judgment, spec authoring, escalation policy
-    templates/QWEN.md      per-project rules for the Qwen worker
-    templates/CLAUDE-snippet.md  the delegation policy block for a project's CLAUDE.md
-    docs/PRINCIPLES.md     the structural rules, abstracted from the measurements
-    docs/FINDINGS.md       the measurements every design decision rests on
+    server.py              thin MCP entry (stdio JSON-RPC, zero deps) over qd/
+    qd/                    the engine: gate loop, trust dial, worktrees, graph, run log
+    specs/                 the engine's own gate suite (13 spec files)
+    scoped_hook.py         allowlist hook for scoped mode
+    agents/                qwen-manager (isolation container) · architect (L5 loop)
+    skills/                delegation (the loop) · architect (L5) · lld-principles
     commands/delegate.md   the front door — /delegate <task or question>
+    templates/             QWEN.md worker rules · CLAUDE-snippet.md policy block
+    docs/                  USAGE (day-to-day) · HLD/LLD (design) · FINDINGS (evidence)
+                           · PENDING (the v4 queue) · archive/ (history)
     context/               agent-facing reference: SYSTEM.md, TESTING.md
-    .claude-plugin/plugin.json   plugin manifest (token-saver: identity + auto-discovery)
-    .mcp.json              bundled MCP config: registers qwen-delegate, 2h timeout
+    .claude-plugin/        plugin + marketplace manifests; .mcp.json registers the server
 
 ## Two tools
 
@@ -255,8 +246,9 @@ Or call the tool directly for something already specified:
 
 Every call appends one record to `<project>/.qwen-delegate/runs.jsonl` — tokens burned on
 free hardware against tokens returned into Claude's context, plus attempts, timing, tools,
-and truncated+hashed task/gate text. **Measured leverage so far: 208.6×** (216,969 free
-tokens in, 1,040 returned, across 3 runs).
+and truncated+hashed task/gate text. **Measured leverage so far: 324.1×** (4.16M free
+tokens in, ~12.8k returned, across 25 logged runs — a floor, since crashed runs leave
+no record).
 
 The directory self-ignores (a `.gitignore` containing `*`), so the log never shows up in
 `git status` — which matters, because the server diffs the working tree to attribute
