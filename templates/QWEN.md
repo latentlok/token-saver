@@ -39,7 +39,11 @@ Do not contradict your own state snapshot.
 
 ## Keep your context small — prefer search over reading
 
-Use `grep_search` / `glob` to find the specific thing you need. Read whole files only
+If the repo has a graph index (`graphify-out/graph.json`), locate code with
+`graphify explain "<symbol>"` or `graphify path "A" "B"` BEFORE grepping — instant,
+exact source locations, no reading required (shell access permitting; if the shell
+denies it, fall back to search). Use `grep_search` / `glob` to find the specific
+thing you need. Read whole files only
 when you actually need the whole file. This is not just efficiency: if context fills
 up it gets compacted, you lose detail, and your reporting becomes unreliable. Staying
 small keeps you accurate.

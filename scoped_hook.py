@@ -40,6 +40,8 @@ DEFAULT_ALLOW = [
     r"^git (status|diff|log|show|branch)\b",
     r"^ls\b", r"^cat\b", r"^head\b", r"^tail\b", r"^wc\b",
     r"^grep\b", r"^rg\b", r"^find\b\.?", r"^echo\b", r"^pwd\b",
+    # graph READ queries only -- update/watch/add/install are state-changing
+    r"^graphify (explain|path|diagnose)\b",
 ]
 # never allow these even if a pattern would match (state / network / escalation)
 HARD_DENY = [r"\brm\b", r"\bmv\b", r"\bcurl\b", r"\bwget\b", r"\bsudo\b",
