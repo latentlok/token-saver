@@ -182,8 +182,10 @@ path. `/delegate <task or question>` is the explicit fire-and-forget door:
     /delegate how does auth flow from the request handler to the token check?
     /delegate make the CLI in ./tools usable without PYTHONPATH
 
-Questions are answered read-only and cheap; a `/delegate`d build is handed to the
-`qwen-manager` subagent so it runs off to the side while you keep working.
+Questions are answered read-only and cheap. Builds run the same **inline** loop —
+no subagent, no extra cost; long delegations are auto-backgrounded by the client, so
+you keep working either way. The `qwen-manager` subagent exists only for the rare
+case that earns its preamble: a many-module grind or a parallel fan-out.
 
 Or hand a task straight to the subagent the way you'd hand it to an engineer — the goal,
 not the steps:

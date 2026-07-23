@@ -1,5 +1,5 @@
 ---
-description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase (how does X work, where is Y handled, is there already a Z) — those are answered read-only and cheaply. Routes builds to the qwen-manager subagent in the background; answers questions directly.
+description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase (how does X work, where is Y handled, is there already a Z) — those are answered read-only and cheaply. Answers questions directly; builds run the delegation loop INLINE by default (a subagent costs a preamble it rarely earns back — spawn qwen-manager only for a long multi-unit grind, a parallel fan-out, or explicit background work).
 argument-hint: <a task or question about code; name the repo if it isn't obvious>
 ---
 
@@ -46,21 +46,18 @@ the notification.
 
 - **Question:** one `qwen_query`, verify the load-bearing bits, relay. That's it.
   Questions run **synchronously** — they take ~20s and the user is waiting on the answer.
-- **Build:** hand the goal to `qwen-manager` **in the background** and let it own the
-  spec and the gate. It returns `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`.
-  Do not read the whole codebase or write the code yourself when a delegated call can
-  do it — that is the token you are here to save.
-
-  Builds take minutes, not seconds: a gate-verified delegation runs plan → spec →
-  build → iterate → verify. Blocking on that wastes the user's time for no benefit,
-  since you are not going to read the work anyway — you are going to read a verdict.
-  Fire it, tell the user it is running and roughly what it will do, and carry on with
-  whatever else they need. Relay the report when the notification arrives.
-
-  **Never invent or predict what a running manager will report.** If the user asks
-  before it lands, say it is still running.
-- If the task is large or spans multiple modules, still hand it to one `qwen-manager`;
-  it decomposes and drives the sub-steps. You are not the builder.
+- **Build (default: INLINE, per §1):** pin the behavior or author the gate, call
+  `qwen_delegate` directly, read the receipt, relay. No subagent — a bare tool call
+  costs nothing extra, and the server runs the iterate loop on free tokens either
+  way. An MCP call that outlives ~2 minutes is auto-backgrounded by the client, so a
+  long build already frees you to keep talking without spawning anything. Do not
+  read the codebase or write the code yourself — that is the token you are here to
+  save.
+- **Build (isolation cases only):** a multi-unit grind whose per-module churn would
+  silt this session, or a parallel fan-out — hand the goal to `qwen-manager` in the
+  background and relay its report on the notification. **Never invent or predict
+  what a running manager will report.** If the user asks before it lands, say it is
+  still running.
 
 ## 3. Relay honestly
 
