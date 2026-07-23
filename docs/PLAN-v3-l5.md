@@ -33,6 +33,8 @@ R1/R4 are description/skill authoring (architect-side prose).
 
 ## Parked (explicitly, with what unblocks each)
 
+> Superseded 2026-07-23: the live consolidated list is [PENDING.md](PENDING.md).
+
 - **Routing rule + delegation floor** (when NOT to delegate — the +28% small-change
   loss): needs data → unblocked by measurement.
 - **A/B measurement** (token-saver-eval matched pairs, per-feature slope, v3 §8.5):
