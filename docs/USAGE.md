@@ -78,6 +78,50 @@ one-line verdict. Measured: real planted bugs fixed at −43% vs solo.
 **Parallel/independent pieces:** `batch=[...]` in one call — fans out across
 worktrees server-side, per-item receipts, `MERGE:` command included on success.
 
+## Worked example (one full round-trip)
+
+User says: *"add rate limiting to the API client — 5 requests/sec max, burst up to 10."*
+
+Claude's moves, in order:
+
+    git commit -am "checkpoint before delegation"        <- Claude's move, automatic
+
+    qwen_delegate(
+      cwd  = "/home/dev-vishal/projects/myapp",
+      trust = "self",                     # Qwen writes code AND the tests that grade it
+      approval_mode = "scoped",           # it may run the suite + query the graph
+      task = "Add rate limiting to the API client.
+              Behavior: at most 5 requests started per second, bursts up to 10
+              allowed (token-bucket semantics); a call past the limit BLOCKS until
+              a slot frees, never raises; limits configurable at client
+              construction, defaults 5/10. Edge cases: burst drains then refills
+              at 5/s; zero-wait when under the limit.
+              Locate the relevant code via graphify before grepping. Write pytest
+              tests for this under tests/. Never break the existing suite.
+              Do NOT stop after planning — a plan is not a deliverable."
+    )
+
+Note what is NOT in the task: no file names, no function names, no test authored by
+Claude — behavior only. The receipt that comes back:
+
+    STATUS: success
+    SESSION: 7f3a…
+    ATTEMPTS: 1/3
+    TRUST: self (L5) -- gate = the delegate's own suite, non-vacuous guard only
+    CHANGED: src/client.py, src/ratelimit.py, tests/test_ratelimit.py
+    NEW PUBLIC SURFACE: RateLimiter (ratelimit.py)
+    HANDOFF: token-bucket limiter wired into ApiClient, 11 tests green
+
+Claude relays: "Rate limiting is in — new `RateLimiter`, 11 of its own tests green,
+suite intact. Want `RateLimiter` public, or internal?" — the one genuine design call
+the receipt surfaced.
+
+> The last four instruction lines in the task (graphify-before-grep, tests under
+> tests/, don't break the suite, don't stop after planning) are STANDING WORKER
+> DISCIPLINE, not task content — they belong in Qwen's workflow (server-injected,
+> compaction-safe), not in every architect task text. Moving them there is a pending
+> item ([PENDING.md](PENDING.md)); until it lands, include them manually.
+
 ## Reading a receipt (the whole job at L5)
 
 Green receipt ≈ 6 lines. What to actually look at:

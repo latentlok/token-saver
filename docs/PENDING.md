@@ -9,6 +9,7 @@ away so far).
 
 | item | what / why | unblocked by |
 |---|---|---|
+| Standing worker discipline → server, not task text | The constant instruction block every architect task now carries (graphify-before-grep, own tests under tests/, never break the suite, do NOT stop after planning) is worker workflow, not task content. Move it to a server-injected suffix on `trust="self"` runs — injection into the task keeps it compaction-safe (QWEN.md alone is not; compaction eats it), and the architect stops paying/authoring it per task. See the note in USAGE.md's worked example. | user go — next up |
 | Routing floor | When NOT to delegate: a round-trip costs ~500-token floor, so tiny inline edits shouldn't route. Needs the threshold put into CLAUDE-snippet + skill. | more small-task data points (the +28% loss is the only one) |
 | Skeleton-flesh conformance | Deterministic check of code vs DESIGN.md (interface match both ways, placement, boundary edges) as a receipt line — the drift test the benchmarks only partially covered. `grade/stage1.py` is the prototype; generalize its manifest to read DESIGN.md. | user go |
 | Same-model cross-examiner | Does a FRESH Qwen session catch the builder's blindspots, or share its priors? One free query per green module. Cheap experiment, answers whether L5 gets a free second opinion. | user go |
