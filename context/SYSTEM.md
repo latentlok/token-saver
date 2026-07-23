@@ -47,7 +47,7 @@ reusable underneath it.
 |---|---|---|
 | engine | `server.py` → `qd/` | thin MCP entry over the v2 engine package: delegate/query, gate, trust dial, worktrees, graph, run log. Zero deps. |
 | safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode (incl. graphify reads) |
-| spec suite | `specs/*.py` | the authoritative v2 gates, one per qd module (13 files, incl. `trust_spec.py`); root-level `*_spec.py` files are v1-era remnants |
+| spec suite | `specs/*.py` | the authoritative gates, one per qd module (13 files, incl. `trust_spec.py`) |
 | manager | `agents/qwen-manager.md` | isolation container for the delegation loop (inline is the default) |
 | architect | `agents/architect.md` + `skills/architect/` | the L5 loop: PRD→SRS→module tree→behavior-only handoffs→receipts |
 | discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into manager units |
