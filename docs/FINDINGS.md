@@ -664,6 +664,34 @@ delegating arm now runs the R1–R4 pipe (descriptor schemas, compact receipts,
   on, peaks 24–34k (free). **Hidden acceptance suite: PASS** — cheap did not mean
   drifted (functional drift; structural conformance still untested — parked).
 
+## The takeaway holds on all three work shapes — and the saving scales with reading
+
+Experiments B and C (2026-07-23, jinja 3.1.6 fixture, 14k lines / 909 tests;
+`token-saver-eval/results_existing_large/`, `results_bugs/`). Same protocol as the grow
+rerun: inline accumulating sessions, no subagents, L5 arm = lean pipe + `trust="self"`,
+hidden acceptance + full-suite regression.
+
+| shape | SOLO | L5 | delta | quality |
+|---|---|---|---|---|
+| A greenfield, 5 features | $1.652 | $1.357 | **−18%** | acceptance PASS both |
+| B existing large repo, 4 changes | $6.851 | $2.354 | **−66%** | 4/4 + regression green, both |
+| C customer bugs, 2 planted | $1.356 | $0.777 | **−43%** | both bugs fixed + green, both arms |
+
+- **The saving scales with how much *reading* the task demands** — greenfield −18%,
+  bugs −43%, existing-repo features −66%. On B's hardest task (new template tag
+  spanning lexer→parser→compiler) solo read 1.39M context tokens and spent $2.94; the
+  architect (qwen_query to locate + short LLD + trust=self) spent $0.51 and read 96k.
+  −83% on exactly the task class the compression thesis predicts.
+- **C validates the self-authored repro gate:** the delegate wrote its own failing
+  regression test from the customer symptom (e.g. `tests/test_translated_syntax_error.py`),
+  fixed the cause, self-graded; the hidden acceptance confirmed the true bug fixed in
+  all L5 runs. n=2 shallow single-line bugs — depth untested.
+- Plant validation rejected 2 of 4 candidate bugs (one the 909 suite actually catches,
+  one whose acceptance didn't bind) — validate the experiment before running it, or it
+  measures noise.
+- Wall time: L5 arms 2-7x slower (Qwen decode) — the accepted trade; wall is free
+  overnight, tokens are not.
+
 ## Numbers
 
 - **Python source ≈ 5.54 bytes/token**, not 4.0 (measured: 379,571 bytes → 68,564 tokens).
