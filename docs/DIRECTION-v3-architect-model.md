@@ -1,4 +1,10 @@
-# Direction v3 — the architect model (resume here)
+# Direction v3 — the architect model
+
+> **Status: EXECUTED (2026-07-23).** The premise below was validated and built —
+> execution record in [PLAN-v3-l5.md](PLAN-v3-l5.md), measured results in
+> [FINDINGS.md](FINDINGS.md) (−18% greenfield / −43% bugs / −69% existing-repo, equal
+> quality), day-to-day workflow in [USAGE.md](USAGE.md). This file remains as the
+> reasoning the build rests on; its §8 "resume order" is done.
 
 **Start the next session from this premise:** Qwen (or any delegate) is given
 **higher-level tasks at L5 trust** — it writes the code *and* grades itself; Claude never

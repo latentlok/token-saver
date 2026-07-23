@@ -42,7 +42,8 @@ refused** (git is the only rollback; there is no sandbox).
 
 **`qwen_delegate`** — the build tool. Params: `task`, `cwd`, `verify` (the gate — a shell
 command exiting 0 only on real success), `approval_mode`, `max_iterations`, `session_id`,
-`shell_allow`, `shell_feedback`, `timeout_sec`.
+`shell_allow`, `shell_feedback`, `timeout_sec`, `trust` (`verified`|`self`), `workers`,
+`worktree`, `executor`, `touch_scope`, `batch`, `on_compaction`.
 
 **Approval modes** (measured, not documented upstream):
 

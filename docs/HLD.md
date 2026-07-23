@@ -115,7 +115,8 @@ append, in this order, each only when applicable:
 **C3 — Engine→verdict seam:** engine hands verdict a ctx dict with exactly these v2
 keys added to the v1 ctx: `notes: str`, `worktree: {path,branch}|None`,
 `merge: "clean"|"conflict"|None`, `graph_line: str|None`, `refs_added: [str]`,
-`cost_usd: float`, `trust: "verified"`. Internals of ctx beyond the seam are engine's.
+`cost_usd: float`, `trust: "verified"|"self"`. Internals of ctx beyond the seam are
+engine's.
 
 **C4 — graph sidecar** `.qwen-delegate/graph.json`:
 `{"indexed_sha": str, "ts": iso8601, "status": "fresh"|"indexing"|"failed",
@@ -147,8 +148,10 @@ self-tests encode the same misunderstanding — only the gate is evidence. A bro
 self-test must not doom-loop the run (measured failure mode), hence advisory.
 
 **C9 — tool input additions** (`qwen_delegate`): `worktree: "auto"|"off"` (default
-"off"), `executor: str`, `trust: str` (accepted value: `"verified"`; anything else →
-refusal naming DIRECTION-v2's parked dial), and `batch: [{task, verify, ...}]` — N
+"off"), `executor: str`, `trust: str` (accepted: `"verified"` — caller's `verify` is the gate —
+or `"self"` — R3: verify optional, server generates a non-vacuous own-suite gate with
+the incremental ratchet, rewritten each attempt; anything else → refusal naming both;
+L1–L4 remain parked), and `batch: [{task, verify, ...}]` — N
 independent delegation items fanned across worktrees *inside* the server (worktree
 implied "auto", per-item receipts, endpoint semaphore caps concurrency). Batch is the
 **primary fan-out mechanism**. Probe 5 (3 regimes): MCP dispatch serializes per

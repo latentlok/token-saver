@@ -45,17 +45,15 @@ reusable underneath it.
 
 | component | path | role |
 |---|---|---|
-| engine | `server.py` | MCP server: delegate/query, gate, git guards, run log. Zero deps. |
-| safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode |
-| log gate | `runlog_spec.py` | spec for the run log + token accounting |
-| setup gate | `setup_spec.py` | spec for the first-use entry path (self-configure / refuse) |
-| bootstrap gate | `bootstrap_spec.py` | spec for self-configuration (detection, rendering, atomic write) |
-| compaction gate | `compaction_spec.py` | spec for compaction detection + the resume branch |
-| head guard | `headguard_spec.py` | spec for detecting a worker commit hiding work from the guards |
-| manager | `agents/qwen-manager.md` | the code unit: decides, specs, delegates, verifies |
-| discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into the manager |
+| engine | `server.py` → `qd/` | thin MCP entry over the v2 engine package: delegate/query, gate, trust dial, worktrees, graph, run log. Zero deps. |
+| safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode (incl. graphify reads) |
+| spec suite | `specs/*.py` | the authoritative v2 gates, one per qd module (13 files, incl. `trust_spec.py`); root-level `*_spec.py` files are v1-era remnants |
+| manager | `agents/qwen-manager.md` | isolation container for the delegation loop (inline is the default) |
+| architect | `agents/architect.md` + `skills/architect/` | the L5 loop: PRD→SRS→module tree→behavior-only handoffs→receipts |
+| discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into manager units |
+| loop | `skills/delegation/SKILL.md` | the canonical delegation loop + parameter facts |
 | front door | `commands/delegate.md` | `/delegate <task or question>` |
-| worker rules | `templates/QWEN.md` | per-project standing rules Qwen auto-loads |
+| worker rules | `templates/QWEN.md` | per-project standing rules Qwen auto-loads (graph-before-grep) |
 | manifest | `.claude-plugin/plugin.json` | plugin identity; agent/skill/command auto-discovery |
 | mcp config | `.mcp.json` | registers the `qwen-delegate` MCP server + 2h timeout |
 
@@ -122,7 +120,11 @@ aggregator can find every project's log. Relocate with `QWEN_DELEGATE_REGISTRY`.
 
 **`qwen_delegate`** — the build tool. `task`, `cwd`, `verify` (**the gate**: exits 0 only
 on real success), `approval_mode`, `max_iterations`, `session_id`, `shell_allow`,
-`shell_feedback`, `timeout_sec`.
+`shell_feedback`, `timeout_sec`, `trust` (`"verified"` default | `"self"` = L5: verify
+optional, server gates on the worker's own suite + ratchet), `workers` (best-of-N),
+`worktree` (`auto`|`off` isolation + MERGE receipt), `executor` (C7 profile),
+`touch_scope` (modify-allowlist, out-of-scope edits auto-revert), `batch` (N delegations
+in one call, fanned across worktrees), `on_compaction` (`reinject`|`discard`).
 
 **Approval modes** — measured by probing; the upstream bundle documents none of this:
 
