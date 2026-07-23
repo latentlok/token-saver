@@ -721,6 +721,15 @@ and giving the graph to the WORKER (in QWEN.md) rather than the architect. The
 skill's "graph-first" rule is REVERTED to qwen_query-first with graphify as the
 no-queue fallback.
 
+**Resolved same day — the graph belongs to the worker (L5W arm, `results_existing_large/L5W.*`):**
+behavior-only LLDs (no file/function names, ever) + `approval_mode="scoped"` with
+graphify reads on the allowlist + a QWEN.md graph-before-grep rule. **$2.153 — the
+cheapest arm (−69% vs solo, −9% vs L5)** — with first-attempt convergence restored
+(4 of 5 delegations attempt-1; L5G was 3,2,3) and 4/4 acceptance + regression green.
+Confirms coherence from the winning side: the builder locating for itself, cheaply,
+beats any architect-side locate relay. Final B ladder:
+solo $6.85 → architect-graph $3.86 → worker-locate-by-query $2.35 → worker-graph $2.15.
+
 ## Numbers
 
 - **Python source ≈ 5.54 bytes/token**, not 4.0 (measured: 379,571 bytes → 68,564 tokens).
