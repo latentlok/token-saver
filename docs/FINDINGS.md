@@ -636,6 +636,34 @@ outline-grain at ~6 modules / ~400 LOC (rung 2) both clear on attempt 1 with amp
 context headroom. The workable altitude for coarse delegation is at least outline-grain;
 the ceiling is above both probes.
 
+## The lean L5 pipe beats solo at the thesis's WORST scale — crossover at feature 3
+
+Grow benchmark rerun (2026-07-23, `token-saver-eval/results_grow_l5/`): same 5
+task-tracker features, same single accumulating inline session, no subagents — but the
+delegating arm now runs the R1–R4 pipe (descriptor schemas, compact receipts,
+`trust="self"` + ratchet, architect discipline in the preamble). Claude cost per feature:
+
+    feat   SOLO(old)   LLD(old)   L5(new)     context read: SOLO vs L5
+    F1     $0.327      $0.471     $0.381         98k     57k
+    F2     $0.335      $0.485     $0.372         82k     39k
+    F3     $0.265      $0.233     $0.181        122k     54k
+    F4     $0.388      $0.260     $0.212        165k     59k
+    F5     $0.338      $0.284     $0.210        154k     64k
+    total  $1.652      $1.733     $1.357   — L5 is −18% vs solo, −22% vs the old LLD arm
+
+- **Crossover at F3, widening after** — F1–F2 delegation pays warmup (LLD + call
+  overhead > writing tiny code inline); by F4–F5 the marginal feature costs ~40% less
+  than solo. 5 features / ~200 lines is the *worst* scale for the compression thesis and
+  it already wins; the old run at this scale was +5% (parity).
+- **The architect's context is ~flat: +7k over features 2–5, vs solo's +56k.** The
+  "context stops growing with the code" claim is now measured, not structural argument.
+- **Savings are on the input side.** Output tokens are ~equal (9.8k vs 9.9k) — the win
+  is the session NOT accumulating/re-reading code and receipts (and R1's smaller
+  resident schemas: the L5 arm's baseline reads start ~30k below the old LLD arm's).
+- Worker side: 5/5 features green on attempt 1, `trust: self`, ratchet engaged from F2
+  on, peaks 24–34k (free). **Hidden acceptance suite: PASS** — cheap did not mean
+  drifted (functional drift; structural conformance still untested — parked).
+
 ## Numbers
 
 - **Python source ≈ 5.54 bytes/token**, not 4.0 (measured: 379,571 bytes → 68,564 tokens).
