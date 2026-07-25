@@ -1,12 +1,5 @@
 name: tests
 
-# Runs the full hermetic spec suite on every PR and on pushes to master.
-# The specs are stdlib-unittest, tempdir + local-git, no network, no real qwen backend.
-# Excluded: dispatch_spec — its batch assertion is wall-clock-timing based and flaky by
-# nature, which would make a required check unreliable. verdict_spec reads a context
-# window from ~/.qwen/settings.json for its compaction-warning test, so CI writes a
-# minimal stub (the dev window, 196608) to make that assertion bind.
-
 on:
   pull_request:
   push:
@@ -17,35 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Configure git identity
-        # The specs init temp repos and commit (pre_sha assertions need a HEAD).
-        run: |
-          git config --global user.email "ci@token-saver.test"
-          git config --global user.name "token-saver CI"
-
-      - name: Minimal ~/.qwen config (context window for verdict_spec's compaction test)
-        run: |
-          mkdir -p ~/.qwen
-          cat > ~/.qwen/settings.json <<'JSON'
-          {
-            "model": { "name": "ci-model" },
-            "modelProviders": {
-              "ci": [ { "id": "ci-model", "generationConfig": { "contextWindowSize": 196608 } } ]
-            }
-          }
-          JSON
-
-      - name: Spec suite (dispatch_spec excluded — wall-clock flaky)
-        run: |
-          fail=0
-          for f in specs/*_spec.py; do
-            case "$f" in */dispatch_spec.py) echo "skip (flaky): $f"; continue;; esac
-            echo "== $f =="
-            python3 "$f" || fail=1
-          done
-          exit $fail
+      - name: Spec suite (full hermetic suite; dispatch_spec excluded — wall-clock flaky)
+        run: bash ci/run-specs.sh
