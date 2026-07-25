@@ -161,7 +161,7 @@ to the `qwen-manager` subagent.
 2 DECIDE      pick the approach. Verify Qwen's plan against the code. Never hand back a menu.
 3 SPECIFY     write the *_spec gate yourself — this IS the design decision
 4 EXECUTE     delegate the build against that gate (auto-edit)
-5 VERIFY      run the gate yourself, check CHANGED, roll back if wrong
+5 VERIFY      read the receipt (the server already ran the gate); check CHANGED, roll back if wrong
 ```
 
 **Ownership:** you own every judgment; Qwen owns implementation *inside a pinned spec*
