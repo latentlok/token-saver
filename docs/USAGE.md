@@ -72,8 +72,20 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
   `qwen_delegate`. Anything else is refused by name (L1–L4 are a parked design).
 - **Per project (the slider position):** set `"trust"` in `.qwen-delegate.json` —
   the standing default for every delegation in that repo, overridden by a per-call
-  `trust`. Omit both and you get the built-in default, `"self"` (L5). This is the
-  one place to move the slider; you never touch code to change a project's stance.
+  `trust`. You never touch code to move the slider.
+- **Machine-wide default:** set `"trust"` in `~/.qwen-delegate/config.json` — the
+  standing position for *every* project, below per-project and per-call. The full
+  chain: **per-call `trust` > project `.qwen-delegate.json` > `~/.qwen-delegate/config.json`
+  > built-in `"self"`** (L5). The server re-reads it each call, so a change takes
+  effect on the next delegation — no restart.
+- **`auto` — let the model pick per task:** set the default (project or machine)
+  to `"auto"` and there is *no silent fallback* — the server refuses a bare call, so
+  the orchestrator must classify each task and pass `trust` explicitly: `"verified"`
+  for correctness-critical / irreversible / outward-facing / security·data·money·auth
+  work, `"self"` for low-stakes mechanical or greenfield work. Criticality is a
+  judgement only the model can make, so `"auto"` routes it there rather than guessing
+  server-side. Turn it on machine-wide with `{"trust": "auto"}` in
+  `~/.qwen-delegate/config.json`.
 - **The unverified path is now opt-in:** omitting both `trust` and `verify` fires
   the L5 self-gate (a real gate), not an *unverified claim*. The only route to
   `STATUS: unverified` is asking for `trust="verified"` with no `verify` — for

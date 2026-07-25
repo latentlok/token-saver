@@ -120,7 +120,15 @@ delegate's OWN suite behind a non-vacuous guard (`min_tests` in `.qwen-delegate.
 default 5) and stamps `TRUST: self` in the receipt. Max token saving, max reliance: a
 self-graded suite can share the code's blindspot (measured — see FINDINGS "L5
 self-grading"). `"verified"` — your `verify` command is the gate; pass it for stakes you
-must know rather than trust. Pick per task by stakes.
+must know rather than trust.
+
+**Choosing per task (the `auto` discipline):** classify each task and pass `trust`
+explicitly — `"verified"` when it is correctness-critical, irreversible, outward-facing,
+or touches security / data-loss / money / auth; `"self"` for low-stakes mechanical or
+greenfield work. When in doubt, `"verified"`. If the standing default (project
+`.qwen-delegate.json` or machine `~/.qwen-delegate/config.json`) is `"auto"`, the server
+*enforces* this — it refuses a bare call, so there is no silent fallback and you must
+make the criticality call on every delegation.
 
 **Hygiene:** re-read any file Qwen touched before editing it yourself (your cached copy
 is stale); parallel delegations need separate worktrees — `batch` handles that for you.

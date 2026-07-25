@@ -80,10 +80,31 @@ def _project_config(cwd):
 
     Recognised keys: `spec_globs` (list), `max_iterations` (int, the retry budget),
     `executor` (profile name), `min_tests` (int, self-gate floor), and `trust`
-    (`"self"`|`"verified"` — the project's default slider position).
+    (`"self"`|`"verified"`|`"auto"` — the project's default slider position).
     A missing or corrupt file is treated as no overrides, never an error."""
     try:
         p = os.path.join(cwd, PROJECT_CONFIG)
+        if os.path.isfile(p):
+            with open(p) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
+def _global_config():
+    """Parsed machine-level ~/.qwen-delegate/config.json (or $QWEN_DELEGATE_CONFIG), or {}.
+
+    The machine-wide defaults file — lowest-precedence override, below any per-project
+    .qwen-delegate.json. Recognised key: `trust` (`"self"`|`"verified"`|`"auto"`), the
+    standing slider position for every project on this machine. Same env-override +
+    tolerant-read convention as the executors/registry machine files.
+    A missing or corrupt file is treated as no overrides, never an error."""
+    try:
+        p = os.environ.get("QWEN_DELEGATE_CONFIG") or os.path.expanduser(
+            "~/.qwen-delegate/config.json")
         if os.path.isfile(p):
             with open(p) as f:
                 d = json.load(f)

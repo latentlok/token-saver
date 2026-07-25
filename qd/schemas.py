@@ -91,7 +91,7 @@ TOOL = json.loads(r'''
       },
       "trust": {
         "type": "string",
-        "description": "'self': L5 full trust -- the delegate writes AND grades its own suite; `verify` optional (server generates a non-vacuous-suite gate). 'verified': your `verify` command is the gate -- pass it for stakes you must know rather than trust. Omit to use the project's slider position (`trust` in .qwen-delegate.json), else the built-in default 'self'. Intermediate levels: parked."
+        "description": "'self': L5 full trust -- the delegate writes AND grades its own suite; `verify` optional (server generates a non-vacuous-suite gate). 'verified': your `verify` command is the gate -- pass it for correctness-critical, irreversible, or outward-facing work. Omit to use the configured default: project .qwen-delegate.json `trust` > machine ~/.qwen-delegate/config.json `trust` > built-in 'self'. If that default is 'auto', a bare call is refused so YOU pick 'self'/'verified' per task by criticality. Intermediate levels: parked."
       },
       "touch_scope": {
         "type": "array",

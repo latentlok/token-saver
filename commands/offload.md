@@ -46,7 +46,9 @@ the notification.
 
 - **Question:** one `qwen_query`, verify the load-bearing bits, relay. That's it.
   Questions run **synchronously** — they take ~20s and the user is waiting on the answer.
-- **Build (default: INLINE, per §1):** pin the behavior or author the gate, call
+- **Build (default: INLINE, per §1):** set `trust` by criticality (`"verified"` for
+  correctness-critical / irreversible / outward-facing work, else `"self"` — the
+  `delegation` skill has the rule), pin the behavior or author the gate, call
   `qwen_delegate` directly, read the receipt, relay. No subagent — a bare tool call
   costs nothing extra, and the server runs the iterate loop on free tokens either
   way. An MCP call that outlives ~2 minutes is auto-backgrounded by the client, so a
