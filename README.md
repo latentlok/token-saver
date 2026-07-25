@@ -156,11 +156,17 @@ installed` and Qwen greps instead).
     uv tool install "graphifyy[ollama]"     # package `graphifyy` (Graphify-Labs/graphify); CLI `graphify`
 
 Index a repo once — `graphify update . --no-cluster` (~2s, structural, no LLM) — and the
-server keeps it fresh after every delegation, tracking staleness against the git SHA and
-stamping a `GRAPH:` line on each receipt. The worker queries it (`graphify explain/path`)
-in `approval_mode="scoped"`; Claude does **not** — it locates via `qwen_query` (measured
-+64% when Claude uses the graph itself). Full setup, the semantic backend, and how it
-plugs in: **[docs/USAGE.md](docs/USAGE.md)**.
+server keeps it fresh after every delegation (also `--no-cluster`, so it never reaches an
+LLM), tracking staleness against the git SHA and stamping a `GRAPH:` line on each receipt.
+The worker queries it (`graphify explain/path`) in `approval_mode="scoped"`; Claude does
+**not** — it locates via `qwen_query` (measured +64% when Claude uses the graph itself).
+
+> **⚠ Any semantic/LLM graphify command needs an explicit `--backend`.** Without one,
+> graphify auto-selects from your environment (**AWS Bedrock if `AWS_PROFILE` is set** —
+> bills a real cloud account and egresses your code). Always pass
+> `--backend ollama --model <your-model>`.
+
+Full setup, the semantic backend, and how it plugs in: **[docs/USAGE.md](docs/USAGE.md)**.
 
 ### Per-project setup — none required
 

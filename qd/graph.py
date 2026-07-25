@@ -64,9 +64,18 @@ def staleness(cwd):
 
 
 def graphify_cmd(cwd, files=None):
-    """Return the command list for *graphify update <cwd>*."""
+    """Return the command list for the per-delegation refresh: a STRUCTURAL
+    `graphify update <cwd> --no-cluster`.
+
+    `--no-cluster` is load-bearing, not cosmetic: it keeps this refresh from ever
+    reaching an LLM. A bare `graphify update` lets graphify pick a backend from the
+    environment -- AWS Bedrock if `AWS_PROFILE` is exported -- which would BILL a real
+    cloud account AND ship the corpus off-box, silently, because this runs as the
+    server's own subprocess outside any approval gate. Semantic clustering stays a
+    deliberate manual `graphify update . --backend <local> --model <local>`.
+    """
     bin_ = os.environ.get("QWEN_DELEGATE_GRAPHIFY", "graphify")
-    return [bin_, "update", cwd]
+    return [bin_, "update", cwd, "--no-cluster"]
 
 
 def _do_refresh(cwd, files, prior_sha):

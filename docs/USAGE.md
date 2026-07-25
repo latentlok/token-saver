@@ -87,16 +87,24 @@ Point the server at a non-default binary with `QWEN_DELEGATE_GRAPHIFY=/path/to/g
       graphify update . --no-cluster        # ~2s, writes graphify-out/graph.json
 
 - **Semantic** — adds LLM-derived clusters/labels for orienting in a large *unfamiliar*
-  codebase; runs against your local endpoint, so do it as an offline job:
+  codebase; needs an LLM, so **always name the backend and model explicitly**:
 
       OLLAMA_BASE_URL=http://<your-endpoint>/v1 \
       OLLAMA_MODEL=<your-model> \
       OLLAMA_API_KEY=<key> \
       GRAPHIFY_MAX_WORKERS=1 \
-      graphify update . --backend ollama    # MAX_WORKERS=1 is mandatory on a 1-worker Ollama
+      graphify update . --backend ollama --model <your-model>   # MAX_WORKERS=1 mandatory on 1-worker Ollama
 
-After the first index you never run it by hand again: the server runs `graphify update`
-in the background after every delegation and tracks freshness in `.qwen-delegate/graph.json`,
+> **⚠ Never run a semantic / LLM graphify command without an explicit `--backend`.**
+> With none, graphify auto-selects one from your environment — notably **AWS Bedrock if
+> `AWS_PROFILE` is exported** — which **bills a real cloud account** *and* ships your code
+> off-box. Always pass `--backend ollama --model <your-model>` (or your intended local
+> backend). The server's per-delegation refresh is safe by construction — it runs
+> `--no-cluster`, so it never reaches an LLM and can't pick up a cloud backend.
+
+After the first index you never run it by hand again: the server runs
+`graphify update --no-cluster` (structural, never touches an LLM) in the background after
+every delegation and tracks freshness in `.qwen-delegate/graph.json`,
 keyed to the git SHA. Every receipt carries a `GRAPH:` line — `fresh @ <sha>`,
 `stale (N files) — refresh running`, `indexing`, `failed: <reason>`, or `none`.
 

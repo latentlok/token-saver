@@ -187,6 +187,13 @@ class GraphifyCmd(Fixture):
         del os.environ["QWEN_DELEGATE_GRAPHIFY"]
         self.assertEqual(graph.graphify_cmd(self.cwd, [])[0], "graphify")
 
+    def test_cmd_forces_structural_no_cluster(self):
+        # Load-bearing safety: the auto-refresh must never reach an LLM. A bare
+        # `graphify update` would let graphify pick a backend from the env
+        # (AWS Bedrock if AWS_PROFILE is set) -- billing prod and egressing the
+        # corpus, unseen, since the server runs it outside any approval gate.
+        self.assertIn("--no-cluster", graph.graphify_cmd(self.cwd, ["a.py"]))
+
 
 # Documented cosmetic survivors of the adversarial pass (graph round), left as
 # documentation rather than brittle tests: the failure-reason wording and its
