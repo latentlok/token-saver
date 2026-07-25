@@ -115,12 +115,12 @@ Qwen past compaction, after which it fabricates having read things. Structure an
 semantics are reliable; precise citations are not (measured: a perfect library map with
 every line number fabricated). The VERIFY list says what to confirm.
 
-**trust:** `"verified"` (default) — your `verify` command is the gate. `"self"` — L5
-full trust: omit `verify`, the server gates on the delegate's OWN suite behind a
-non-vacuous guard (`min_tests` in `.qwen-delegate.json`, default 5) and stamps
-`TRUST: self` in the receipt. Max token saving, max reliance: a self-graded suite can
-share the code's blindspot (measured — see FINDINGS "L5 self-grading"). Pick per task
-by stakes.
+**trust:** `"self"` (default) — L5 full trust: omit `verify`, the server gates on the
+delegate's OWN suite behind a non-vacuous guard (`min_tests` in `.qwen-delegate.json`,
+default 5) and stamps `TRUST: self` in the receipt. Max token saving, max reliance: a
+self-graded suite can share the code's blindspot (measured — see FINDINGS "L5
+self-grading"). `"verified"` — your `verify` command is the gate; pass it for stakes you
+must know rather than trust. Pick per task by stakes.
 
 **Hygiene:** re-read any file Qwen touched before editing it yourself (your cached copy
 is stale); parallel delegations need separate worktrees — `batch` handles that for you.

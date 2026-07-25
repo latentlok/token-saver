@@ -69,11 +69,12 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
 ### Configuring it
 
 - **Per call (the only switch):** `trust="self"` or `trust="verified"` on
-  `qwen_delegate`. Omitted = `"verified"`. Anything else is refused by name
+  `qwen_delegate`. Omitted = `"self"` (L5). Anything else is refused by name
   (L1–L4 are a parked design).
-- **Careful with the one bad combination:** `trust` omitted AND no `verify` →
-  the receipt is an *unverified claim* (`STATUS: unverified`). If you meant full
-  trust, say `trust="self"`; if you meant a gate, pass one.
+- **The unverified path is now opt-in:** omitting both `trust` and `verify` fires
+  the L5 self-gate (a real gate), not an *unverified claim*. The only route to
+  `STATUS: unverified` is asking for `trust="verified"` with no `verify` — for
+  stakes, pass both.
 - **Tuning the `self` gate** — project `.qwen-delegate.json`:
   - `"min_tests": N` — floor for the non-vacuous guard (default 5). On a repo
     with an existing green suite you don't need to touch it: the server

@@ -178,7 +178,7 @@ def delegate(args):
     touch_scope = args.get("touch_scope")
 
     # --- Precondition: trust (R3: both ends of the slider) ---
-    trust = args.get("trust", "verified")
+    trust = args.get("trust", "self")
     if trust not in ("verified", "self"):
         return {
             "status": "refused",

@@ -10,7 +10,7 @@ component boundaries, the delegation lifecycle, and **every cross-module contrac
 Claude is the architect: it writes designs and gates (specs). Qwen is the builder: it
 writes code on free local compute. A small Python referee (`server.py` + `qd/`) runs the
 builder against the gate and reports a short receipt. The builder's word is never
-evidence; the gate decides. Trust level is a stubbed seam (`verified` only, for now).
+evidence; the gate decides. Trust level is a two-ended dial — `self` (L5) by default, or `verified`.
 
 **Backend: Python 3, stdlib only.** 98% of delegation wall-clock is model inference
 (measured); the referee only launches processes, runs git, and shuffles JSON. It must be

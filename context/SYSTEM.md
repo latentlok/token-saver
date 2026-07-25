@@ -120,8 +120,8 @@ aggregator can find every project's log. Relocate with `QWEN_DELEGATE_REGISTRY`.
 
 **`qwen_delegate`** — the build tool. `task`, `cwd`, `verify` (**the gate**: exits 0 only
 on real success), `approval_mode`, `max_iterations`, `session_id`, `shell_allow`,
-`shell_feedback`, `timeout_sec`, `trust` (`"verified"` default | `"self"` = L5: verify
-optional, server gates on the worker's own suite + ratchet), `workers` (best-of-N),
+`shell_feedback`, `timeout_sec`, `trust` (`"self"` default = L5: verify optional, server
+gates on the worker's own suite + ratchet | `"verified"` = caller's verify is the gate), `workers` (best-of-N),
 `worktree` (`auto`|`off` isolation + MERGE receipt), `executor` (C7 profile),
 `touch_scope` (modify-allowlist, out-of-scope edits auto-revert), `batch` (N delegations
 in one call, fanned across worktrees), `on_compaction` (`reinject`|`discard`).

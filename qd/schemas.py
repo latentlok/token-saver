@@ -91,7 +91,7 @@ TOOL = json.loads(r'''
       },
       "trust": {
         "type": "string",
-        "description": "'verified' (default): your `verify` command is the gate. 'self': L5 full trust -- the delegate writes AND grades its own suite; `verify` optional (server generates a non-vacuous-suite gate). Intermediate levels: parked."
+        "description": "'self' (default): L5 full trust -- the delegate writes AND grades its own suite; `verify` optional (server generates a non-vacuous-suite gate). 'verified': your `verify` command is the gate -- pass it for stakes you must know rather than trust. Intermediate levels: parked."
       },
       "touch_scope": {
         "type": "array",
