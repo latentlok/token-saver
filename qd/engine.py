@@ -20,6 +20,7 @@ from qd.invoke import (
 from qd.gittree import (
     git, is_git_repo,
     snapshot, violated_specs, revert_specs,
+    _project_config, _global_config,
 )
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
@@ -177,8 +178,37 @@ def delegate(args):
     worktree_mode = args.get("worktree")
     touch_scope = args.get("touch_scope")
 
-    # --- Precondition: trust (R3: both ends of the slider) ---
-    trust = args.get("trust", "verified")
+    # --- Precondition: trust (R3: the slider) ---
+    # Position resolves like `executor`: call arg > project .qwen-delegate.json
+    # 'trust' > machine ~/.qwen-delegate/config.json 'trust' > builtin ("self"/L5).
+    # The resolved value is validated below, so a bad config value is refused by
+    # name exactly like a bad call arg.
+    trust = (args.get("trust")
+             or _project_config(cwd).get("trust")
+             or _global_config().get("trust")
+             or "self")
+    if trust == "auto":
+        # "auto" has no gate of its own -- the server cannot judge criticality.
+        # Refuse the bare call so the orchestrator classifies THIS task and passes
+        # a concrete level. A concrete call arg overrides an "auto" default above,
+        # so this only fires when nobody chose.
+        return {
+            "status": "refused",
+            "session_id": None,
+            "trail": [],
+            "result_text": (
+                "Trust is \"auto\" — pick per task by criticality and pass it "
+                "explicitly. Use trust=\"verified\" for correctness-critical, "
+                "irreversible, outward-facing, or security / data-loss / money / "
+                "auth work; trust=\"self\" (L5) for low-stakes mechanical or "
+                "greenfield work. \"auto\" has no gate of its own (the server "
+                "cannot judge criticality), so the orchestrator decides."
+            ),
+            "denials": [],
+            "max_iter": max_iter,
+            "last_verify": None,
+            "ctx": {},
+        }
     if trust not in ("verified", "self"):
         return {
             "status": "refused",

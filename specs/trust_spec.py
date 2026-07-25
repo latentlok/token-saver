@@ -105,6 +105,101 @@ class TrustPrecondition(unittest.TestCase):
         self.assertIn('"self"', r["result_text"])
 
 
+class TrustResolution(unittest.TestCase):
+    """R3 slider resolves: call arg > project .qwen-delegate.json > machine
+    ~/.qwen-delegate/config.json > builtin 'self'. A resolved 'auto' is refused,
+    steering the orchestrator to pick 'self'/'verified' per task.
+
+    Proven hermetically through the refusal branch (which runs before git/worker):
+    a position reaches validation only if that source was consulted. "Trust dial"
+    fingerprints the unknown-value refusal; "criticality" the 'auto' refusal.
+    """
+
+    def setUp(self):
+        # Point the machine config at a nonexistent file so the global tier is
+        # empty unless a test sets it -- never the real ~/.qwen-delegate/config.json.
+        self._saved = os.environ.get("QWEN_DELEGATE_CONFIG")
+        os.environ["QWEN_DELEGATE_CONFIG"] = os.path.join(
+            tempfile.mkdtemp(), "none.json")
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("QWEN_DELEGATE_CONFIG", None)
+        else:
+            os.environ["QWEN_DELEGATE_CONFIG"] = self._saved
+
+    def _proj(self, trust_val):
+        cwd = tempfile.mkdtemp()
+        with open(os.path.join(cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"trust": "%s"}' % trust_val)
+        return cwd
+
+    def _set_global(self, trust_val):
+        p = os.path.join(tempfile.mkdtemp(), "config.json")
+        with open(p, "w") as f:
+            f.write('{"trust": "%s"}' % trust_val)
+        os.environ["QWEN_DELEGATE_CONFIG"] = p
+
+    # --- project tier ---
+    def test_project_config_sets_the_default(self):
+        # No call arg: the project position is used. A bogus value forces the
+        # refusal, proving it was read (a real "self" default would proceed).
+        r = engine.delegate({"task": "t", "cwd": self._proj("nope")})
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("Trust dial", r["result_text"])
+
+    def test_call_arg_overrides_project_config(self):
+        # Valid project position "self", but an explicit bogus call arg wins.
+        r = engine.delegate({"task": "t", "cwd": self._proj("self"),
+                             "trust": "nope"})
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("Trust dial", r["result_text"])
+
+    # --- machine (global) tier ---
+    def test_global_config_sets_the_default(self):
+        # No call arg, no project file: the machine position is used.
+        self._set_global("nope")
+        r = engine.delegate({"task": "t", "cwd": tempfile.mkdtemp()})
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("Trust dial", r["result_text"])
+
+    def test_project_overrides_global(self):
+        # Global "nope" would refuse; project "self" wins -> past the trust gate.
+        self._set_global("nope")
+        r = engine.delegate({"task": "t", "cwd": self._proj("self")})
+        self.assertNotIn("Trust dial", r["result_text"])
+        self.assertNotIn("criticality", r["result_text"])
+
+    def test_no_config_no_arg_falls_back_to_self(self):
+        # Nothing set -> builtin "self" (valid) -> not refused for trust (it later
+        # refuses on the non-git cwd, a different reason).
+        r = engine.delegate({"task": "t", "cwd": tempfile.mkdtemp()})
+        self.assertNotIn("Trust dial", r["result_text"])
+        self.assertNotIn("criticality", r["result_text"])
+
+    # --- auto ---
+    def test_auto_default_refuses_bare_call_asking_for_a_choice(self):
+        self._set_global("auto")
+        r = engine.delegate({"task": "t", "cwd": tempfile.mkdtemp()})
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("criticality", r["result_text"])
+        self.assertIn("verified", r["result_text"])
+        self.assertIn("self", r["result_text"])
+
+    def test_project_auto_also_refuses(self):
+        r = engine.delegate({"task": "t", "cwd": self._proj("auto")})
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("criticality", r["result_text"])
+
+    def test_auto_is_overridden_by_explicit_call_arg(self):
+        # Under an auto default a concrete per-call trust proceeds -- no auto
+        # refusal (it later refuses on the non-git cwd instead).
+        self._set_global("auto")
+        r = engine.delegate({"task": "t", "cwd": tempfile.mkdtemp(),
+                             "trust": "self"})
+        self.assertNotIn("criticality", r["result_text"])
+
+
 class ReceiptTrustLine(unittest.TestCase):
     def test_trust_self_line_present(self):
         from qd import verdict

@@ -127,8 +127,8 @@ subprocess argv equals the v1 hardcoded invocation (the crane and the new engine
    frozen.
 3. **Notes assembly:** `ctx["notes"]` = builder's handoff BLOCKED/flag content +
    prefilter clause, truncated to 200 chars (C2).
-4. **Trust stub (C9):** `args["trust"]` ≠ "verified" → structured refusal;
-   `ctx["trust"]="verified"`.
+4. **Trust (C9):** `args["trust"]` ∉ {"verified", "self"} → structured refusal;
+   default `ctx["trust"]="self"` (L5).
 
 5. **Batch (C9, from probe 5):** `batch: [items]` fans N independent delegations
    across worktrees on server-side threads (endpoint semaphore caps real concurrency;

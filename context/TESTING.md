@@ -16,11 +16,11 @@ comes from — Qwen burns millions of tokens, you ingest a verdict.
 
 | thing | where | status |
 |---|---|---|
-| repo | `~/projects/qwen-delegate` | clean, remote `github.com/latentlok/token-saver` (private) |
+| repo | `~/projects/token-saver` | clean, remote `github.com/latentlok/token-saver` (private) |
 | MCP server | `server.py` via bundled `.mcp.json` | stdio; `"timeout": 7200000` (2h) |
 | subagent | `agents/qwen-manager.md` | plugin-bundled, auto-discovered |
 | skill | `skills/lld-principles` | plugin-bundled, preloaded via manager frontmatter |
-| command | `commands/delegate.md` | plugin-bundled, invoke as `/delegate` |
+| command | `commands/offload.md` | plugin-bundled, invoke as `/offload` |
 | worker model | `qwen3.6:27b-agent` on Ollama over Tailscale | configured in `~/.qwen/settings.json` (has the API key — never in the repo) |
 | idle timeout | none needed on 2.1.203+ | the `.mcp.json` `timeout` floors idle to 2h; pre-2.1.203 fallback is `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` |
 | Firecrawl | `localhost:3002` (podman) | optional, gives Qwen web access |
@@ -55,7 +55,7 @@ command exiting 0 only on real success), `approval_mode`, `max_iterations`, `ses
 | `yolo` | yes | yes | only when running something *is* the task |
 | `default`, `auto` | no | no | never — headless auto-denies |
 
-**`/delegate <task or question>`** — the front door. Routes questions to `qwen_query`,
+**`/offload <task or question>`** — the front door. Routes questions to `qwen_query`,
 builds to the `qwen-manager` subagent.
 
 ---
@@ -94,7 +94,7 @@ is disposable; delete it when done. If an experiment produces a finding worth ke
 write the finding into `docs/FINDINGS.md` and let the artifact go.
 
 ### A. Tools load
-Confirm `qwen_delegate` and `qwen_query` are available, and `/delegate` is invocable.
+Confirm `qwen_delegate` and `qwen_query` are available, and `/offload` is invocable.
 (These load at session start; if missing, restart Claude Code.)
 
 ### B. `qwen_query` — read-only Q&A
@@ -139,7 +139,7 @@ Then delegate the same spec in `auto-edit` → expect it to **game the gate to g
 That contrast is the core finding; confirm both halves.
 
 ### H. End-to-end via the manager
-`/delegate <a real goal, stated as a goal not steps>` or spawn `qwen-manager` directly.
+`/offload <a real goal, stated as a goal not steps>` or spawn `qwen-manager` directly.
 Expect a report: `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`. Check that
 **`VERIFIED` names a command it actually ran**, and that `DECIDED` shows real calls made
 (not a menu handed back — a manager that returns options has failed its job).

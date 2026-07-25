@@ -68,12 +68,28 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
 
 ### Configuring it
 
-- **Per call (the only switch):** `trust="self"` or `trust="verified"` on
-  `qwen_delegate`. Omitted = `"verified"`. Anything else is refused by name
-  (L1–L4 are a parked design).
-- **Careful with the one bad combination:** `trust` omitted AND no `verify` →
-  the receipt is an *unverified claim* (`STATUS: unverified`). If you meant full
-  trust, say `trust="self"`; if you meant a gate, pass one.
+- **Per call (highest precedence):** `trust="self"` or `trust="verified"` on
+  `qwen_delegate`. Anything else is refused by name (L1–L4 are a parked design).
+- **Per project (the slider position):** set `"trust"` in `.qwen-delegate.json` —
+  the standing default for every delegation in that repo, overridden by a per-call
+  `trust`. You never touch code to move the slider.
+- **Machine-wide default:** set `"trust"` in `~/.qwen-delegate/config.json` — the
+  standing position for *every* project, below per-project and per-call. The full
+  chain: **per-call `trust` > project `.qwen-delegate.json` > `~/.qwen-delegate/config.json`
+  > built-in `"self"`** (L5). The server re-reads it each call, so a change takes
+  effect on the next delegation — no restart.
+- **`auto` — let the model pick per task:** set the default (project or machine)
+  to `"auto"` and there is *no silent fallback* — the server refuses a bare call, so
+  the orchestrator must classify each task and pass `trust` explicitly: `"verified"`
+  for correctness-critical / irreversible / outward-facing / security·data·money·auth
+  work, `"self"` for low-stakes mechanical or greenfield work. Criticality is a
+  judgement only the model can make, so `"auto"` routes it there rather than guessing
+  server-side. Turn it on machine-wide with `{"trust": "auto"}` in
+  `~/.qwen-delegate/config.json`.
+- **The unverified path is now opt-in:** omitting both `trust` and `verify` fires
+  the L5 self-gate (a real gate), not an *unverified claim*. The only route to
+  `STATUS: unverified` is asking for `trust="verified"` with no `verify` — for
+  stakes, pass both.
 - **Tuning the `self` gate** — project `.qwen-delegate.json`:
   - `"min_tests": N` — floor for the non-vacuous guard (default 5). On a repo
     with an existing green suite you don't need to touch it: the server

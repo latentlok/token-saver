@@ -52,7 +52,7 @@ reusable underneath it.
 | architect | `agents/architect.md` + `skills/architect/` | the L5 loop: PRD→SRS→module tree→behavior-only handoffs→receipts |
 | discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into manager units |
 | loop | `skills/delegation/SKILL.md` | the canonical delegation loop + parameter facts |
-| front door | `commands/delegate.md` | `/delegate <task or question>` |
+| front door | `commands/offload.md` | `/offload <task or question>` |
 | worker rules | `templates/QWEN.md` | per-project standing rules Qwen auto-loads (graph-before-grep) |
 | manifest | `.claude-plugin/plugin.json` | plugin identity; agent/skill/command auto-discovery |
 | mcp config | `.mcp.json` | registers the `qwen-delegate` MCP server + 2h timeout |
@@ -120,8 +120,9 @@ aggregator can find every project's log. Relocate with `QWEN_DELEGATE_REGISTRY`.
 
 **`qwen_delegate`** — the build tool. `task`, `cwd`, `verify` (**the gate**: exits 0 only
 on real success), `approval_mode`, `max_iterations`, `session_id`, `shell_allow`,
-`shell_feedback`, `timeout_sec`, `trust` (`"verified"` default | `"self"` = L5: verify
-optional, server gates on the worker's own suite + ratchet), `workers` (best-of-N),
+`shell_feedback`, `timeout_sec`, `trust` (resolves call arg > project `.qwen-delegate.json`
+> machine `~/.qwen-delegate/config.json` > `"self"` L5 default; `"verified"` = caller's gate;
+`"auto"` = refuse bare call so the model picks per task by criticality), `workers` (best-of-N),
 `worktree` (`auto`|`off` isolation + MERGE receipt), `executor` (C7 profile),
 `touch_scope` (modify-allowlist, out-of-scope edits auto-revert), `batch` (N delegations
 in one call, fanned across worktrees), `on_compaction` (`reinject`|`discard`).
@@ -149,7 +150,7 @@ a shell to converge, and arbitrary execution at user privilege stays unreachable
 
 ## 5. How to drive it
 
-**Front door:** `/delegate <task or question>` — routes questions to `qwen_query`, builds
+**Front door:** `/offload <task or question>` — routes questions to `qwen_query`, builds
 to the `qwen-manager` subagent.
 
 **The loop the manager runs** (and the shape to follow if driving directly):

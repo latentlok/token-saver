@@ -17,7 +17,7 @@ via the real profile chain. Load-bearing:
   4. C8 prefilter is ADVISORY: gate green + self-tests red => success + NOTES;
      gate red => prefilter output joins the feedback; no test command or no
      *_qwen.* files => skipped silently. It never affects status.
-  5. C3: the result exposes ctx with the v2 keys, trust stubbed to "verified",
+  5. C3: the result exposes ctx with the v2 keys, trust defaulting to "self" (L5),
      and pre_sha as the FULL 40-char sha (gittree contract).
   6. Refusals never run the worker: non-verified trust, dirty protected spec,
      non-git cwd.
@@ -157,7 +157,7 @@ class Loop(Fixture):
         ctx = r["ctx"]
         self.assertEqual(len(ctx["pre_sha"]), 40)          # FULL sha
         int(ctx["pre_sha"], 16)
-        self.assertEqual(ctx["trust"], "verified")
+        self.assertEqual(ctx["trust"], "self")             # L5 is the default
         self.assertEqual(ctx["notes"], "")
         self.assertIsNone(ctx["worktree"])
         self.assertIsNone(ctx["merge"])
@@ -186,8 +186,11 @@ class Loop(Fixture):
         self.assertEqual(len(r["trail"]), 1)
 
     def test_unverified_without_gate(self):
+        # verified-mode with no gate -> unverified. Must ask for verified
+        # explicitly now that "self" (L5) is the default: omitting verify under
+        # the default instead fires the server self-gate (see trust_spec).
         self.steps([{"write": {"out.py": "whatever\n"}}])
-        r = self.delegate(verify=None)
+        r = self.delegate(trust="verified", verify=None)
         self.assertEqual(r["status"], "unverified")
 
 
