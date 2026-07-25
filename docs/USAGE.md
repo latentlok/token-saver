@@ -104,6 +104,16 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
 - **What the receipt tells you:** at `self`, a `TRUST: self (L5)` line is stamped
   so a green can never be misread as independently verified; the run log records
   the trust level per run.
+- **Bounding the blast radius (`touch_scope`) — independent of `trust`:** pass
+  `touch_scope=["a.py","b.py"]` on `qwen_delegate` to allow edits only to those
+  **existing** files. An out-of-scope edit to a tracked file auto-reverts and the
+  attempt fails; **new files are always allowed** (so a `self`-mode worker can still
+  write its own test suite). Off by default — unset means the worker may modify any
+  file, and the gate (self-suite or your `verify`) is the only check. Composes with
+  any trust level: `self` + `touch_scope` is "self-graded **and** kept to this
+  surface." Claude passes it when you name a target surface or ask; it is not applied
+  automatically. Note it constrains *modifications*, not creation — pair it with a
+  gate if new files also matter.
 
 ## Recipes
 
