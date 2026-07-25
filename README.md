@@ -127,7 +127,7 @@ Verify the components loaded without starting a session:
 
     claude --plugin-dir ~/projects/token-saver plugin details token-saver
     # -> MCP servers (1) qwen-delegate · Agents (2) qwen-manager, architect
-    #    Skills (3) delegation, architect, lld-principles
+    #    Skills (4) delegation, architect, lld-principles, graphify-setup
 
 The `.mcp.json` sets a per-server `"timeout": 7200000` (2h). On Claude Code **2.1.203+**
 that one field caps the wall clock *and* floors the stdio idle timeout to 2h, so no
@@ -234,7 +234,7 @@ Or call the tool directly for something already specified:
     specs/                 the engine's own gate suite (13 spec files)
     scoped_hook.py         allowlist hook for scoped mode
     agents/                qwen-manager (isolation container) · architect (L5 loop)
-    skills/                delegation (the loop) · architect (L5) · lld-principles
+    skills/                delegation · architect (L5) · lld-principles · graphify-setup
     commands/offload.md   the front door — /offload <task or question>
     templates/             QWEN.md worker rules · CLAUDE-snippet.md policy block
     docs/                  USAGE (day-to-day) · HLD/LLD (design) · FINDINGS (evidence)

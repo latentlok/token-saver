@@ -70,6 +70,10 @@ graph-before-grep rule the worker auto-loads, keeps the index fresh, and stamps 
 `GRAPH:` line on each receipt. Claude never queries the graph itself — it stays on
 `qwen_query`. Nothing indexed / graphify missing → delegations just fall back to grep.
 
+**Or hands-off:** say *"set up graphify here"* and the **`graphify-setup`** skill runs this
+exact sequence — install → structural index → confirm — and refuses any bare LLM command
+(the `--backend`/Bedrock trap below).
+
 **Install (once per machine).**
 
     uv tool install "graphifyy[ollama]"     # pip works too. Package: `graphifyy`; CLI: `graphify`
