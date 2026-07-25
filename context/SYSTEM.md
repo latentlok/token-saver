@@ -52,7 +52,7 @@ reusable underneath it.
 | architect | `agents/architect.md` + `skills/architect/` | the L5 loop: PRD→SRS→module tree→behavior-only handoffs→receipts |
 | discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into manager units |
 | loop | `skills/delegation/SKILL.md` | the canonical delegation loop + parameter facts |
-| front door | `commands/delegate.md` | `/delegate <task or question>` |
+| front door | `commands/offload.md` | `/offload <task or question>` |
 | worker rules | `templates/QWEN.md` | per-project standing rules Qwen auto-loads (graph-before-grep) |
 | manifest | `.claude-plugin/plugin.json` | plugin identity; agent/skill/command auto-discovery |
 | mcp config | `.mcp.json` | registers the `qwen-delegate` MCP server + 2h timeout |
@@ -149,7 +149,7 @@ a shell to converge, and arbitrary execution at user privilege stays unreachable
 
 ## 5. How to drive it
 
-**Front door:** `/delegate <task or question>` — routes questions to `qwen_query`, builds
+**Front door:** `/offload <task or question>` — routes questions to `qwen_query`, builds
 to the `qwen-manager` subagent.
 
 **The loop the manager runs** (and the shape to follow if driving directly):

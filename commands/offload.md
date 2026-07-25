@@ -3,7 +3,7 @@ description: Delegate a coding task or question to the free local model under su
 argument-hint: <a task or question about code; name the repo if it isn't obvious>
 ---
 
-# token-saver — delegate
+# token-saver — offload
 
 Request: $ARGUMENTS
 

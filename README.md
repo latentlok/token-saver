@@ -1,4 +1,4 @@
-# qwen-delegate
+# token-saver
 
 **Claude architects, a free local model builds — measured: the same work for 18–69%
 fewer Claude tokens, at equal quality.** On a 14k-line codebase, four real changes
@@ -113,8 +113,8 @@ The manifest (`.claude-plugin/plugin.json`) plus a bundled `.mcp.json` register 
 
 **Local / dev** (this repo, live-editable):
 
-    git clone <this repo> ~/projects/qwen-delegate
-    claude --plugin-dir ~/projects/qwen-delegate
+    git clone <this repo> ~/projects/token-saver
+    claude --plugin-dir ~/projects/token-saver
 
 Edit a component and pick it up in the same session with `/reload-plugins`. A `git pull`
 takes effect on the next session (or `/reload-plugins`) — nothing to reinstall.
@@ -125,7 +125,7 @@ takes effect on the next session (or `/reload-plugins`) — nothing to reinstall
 
 Verify the components loaded without starting a session:
 
-    claude --plugin-dir ~/projects/qwen-delegate plugin details token-saver
+    claude --plugin-dir ~/projects/token-saver plugin details token-saver
     # -> MCP servers (1) qwen-delegate · Agents (2) qwen-manager, architect
     #    Skills (3) delegation, architect, lld-principles
 
@@ -177,10 +177,10 @@ a TypeScript project with no config. If your project uses a different convention
 ## Use
 
 In normal conversation Claude delegates **inline** — the default and the cheapest
-path. `/delegate <task or question>` is the explicit fire-and-forget door:
+path. `/offload <task or question>` is the explicit fire-and-forget door:
 
-    /delegate how does auth flow from the request handler to the token check?
-    /delegate make the CLI in ./tools usable without PYTHONPATH
+    /offload how does auth flow from the request handler to the token check?
+    /offload make the CLI in ./tools usable without PYTHONPATH
 
 Questions are answered read-only and cheap. Builds run the same **inline** loop —
 no subagent, no extra cost; long delegations are auto-backgrounded by the client, so
@@ -213,7 +213,7 @@ Or call the tool directly for something already specified:
     scoped_hook.py         allowlist hook for scoped mode
     agents/                qwen-manager (isolation container) · architect (L5 loop)
     skills/                delegation (the loop) · architect (L5) · lld-principles
-    commands/delegate.md   the front door — /delegate <task or question>
+    commands/offload.md   the front door — /offload <task or question>
     templates/             QWEN.md worker rules · CLAUDE-snippet.md policy block
     docs/                  USAGE (day-to-day) · HLD/LLD (design) · FINDINGS (evidence)
                            · PENDING (the v4 queue) · archive/ (history)

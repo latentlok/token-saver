@@ -51,8 +51,8 @@ Non-functional:
     Claude Code ──(MCP)──▶ graphify server          queries only; we never proxy them
     qwen CLI ──(its own MCP)──▶ firecrawl           web access; invisible to our server
 
-Claude-side: `skills/delegate/` (the canonical loop, loaded by main session and by the
-thin `agents/qwen-manager.md` shell alike), `commands/delegate.md`, tool descriptions
+Claude-side: `skills/delegation/` (the canonical loop, loaded by main session and by the
+thin `agents/qwen-manager.md` shell alike), `commands/offload.md`, tool descriptions
 as the ambient capability map.
 
 ## 4. The delegation lifecycle (the "conversation")
