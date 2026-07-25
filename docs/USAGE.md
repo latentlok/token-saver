@@ -70,6 +70,10 @@ graph-before-grep rule the worker auto-loads, keeps the index fresh, and stamps 
 `GRAPH:` line on each receipt. Claude never queries the graph itself — it stays on
 `qwen_query`. Nothing indexed / graphify missing → delegations just fall back to grep.
 
+**Or hands-off:** say *"set up graphify here"* and the **`graphify-setup`** skill runs this
+exact sequence — install → structural index → confirm — and refuses any bare LLM command
+(the `--backend`/Bedrock trap below).
+
 **Install (once per machine).**
 
     uv tool install "graphifyy[ollama]"     # pip works too. Package: `graphifyy`; CLI: `graphify`
@@ -86,29 +90,39 @@ Point the server at a non-default binary with `QWEN_DELEGATE_GRAPHIFY=/path/to/g
 
       graphify update . --no-cluster        # ~2s, writes graphify-out/graph.json
 
-- **Semantic** — adds LLM-derived clusters/labels for orienting in a large *unfamiliar*
-  codebase; runs against your local endpoint, so do it as an offline job:
+- **Semantic** (optional) — LLM-named clusters for a human-readable report; **not needed
+  for delegation** (the worker reads the raw structural graph). A separate step *after* the
+  structural build — `cluster-only` / `label` / `extract` — and it reaches an LLM, so name a
+  LOCAL backend explicitly (exact flags vary by version — `graphify --help`):
 
-      OLLAMA_BASE_URL=http://<your-endpoint>/v1 \
-      OLLAMA_MODEL=<your-model> \
-      OLLAMA_API_KEY=<key> \
+      OLLAMA_BASE_URL=http://<endpoint>/v1 OLLAMA_MODEL=<model> OLLAMA_API_KEY=<key> \
       GRAPHIFY_MAX_WORKERS=1 \
-      graphify update . --backend ollama    # MAX_WORKERS=1 is mandatory on a 1-worker Ollama
+      graphify cluster-only . --backend ollama    # MAX_WORKERS=1 mandatory on 1-worker Ollama
 
-After the first index you never run it by hand again: the server runs `graphify update`
-in the background after every delegation and tracks freshness in `.qwen-delegate/graph.json`,
+> **⚠ Only three subcommands reach an LLM — `extract`, `label`, `cluster-only` — and each
+> must name its backend.** Bare, graphify auto-selects from the environment (**AWS Bedrock
+> if `AWS_PROFILE` is exported**), **billing a real cloud account** *and* egressing your
+> code. Always pass `--backend ollama` (local). Everything token-saver itself runs —
+> `update` (server refresh) and `explain`/`path`/`affected`/`query` (worker) — is **local
+> and LLM-free**, so the plugin can never hit a cloud backend; the risk is only a manual
+> semantic run.
+
+After the first index you never run it by hand again: the server runs
+`graphify update --no-cluster` (structural, never touches an LLM) in the background after
+every delegation and tracks freshness in `.qwen-delegate/graph.json`,
 keyed to the git SHA. Every receipt carries a `GRAPH:` line — `fresh @ <sha>`,
 `stale (N files) — refresh running`, `indexing`, `failed: <reason>`, or `none`.
 
 **How it plugs in — the graph belongs to the WORKER, not Claude.** The one thing measured
 hard, and easy to get backwards:
 
-- The **worker (Qwen)** locates through the graph — `graphify explain "<symbol>"`,
-  `graphify path "A" "B"`, `graphify diagnose` — *before* grepping. To enable it, delegate
-  in **`approval_mode="scoped"`**: its shell allowlist includes exactly those three read
-  queries (`update`/`add`/`install` are blocked as state-changing). The `QWEN.md`
-  graph-before-grep rule does the steering; in `auto-edit` (no shell) the worker greps
-  instead — still correct, just less cheap.
+- The **worker (Qwen)** locates through the graph — `explain`, `affected` (every call site
+  that depends on a symbol — key before a rename), `path`, `query`, `diagnose`, `god-nodes`
+  — *before* grepping. To enable it, delegate in **`approval_mode="scoped"`**: its shell
+  allowlist includes those LLM-free reads (`update`/`add`/`install` and the LLM steps
+  `extract`/`label`/`cluster-only` are blocked). The `QWEN.md` graph-before-grep rule does
+  the steering; in `auto-edit` (no shell) the worker greps instead — still correct, cheaper
+  with the graph.
 - **Claude does NOT locate through graphify.** Measured: Claude querying the graph in its
   own shell cost **+64%** (every shell call is a turn that bloats context) versus one
   compact `qwen_query` receipt. So Claude locates via `qwen_query`; the graph is the

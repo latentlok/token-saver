@@ -187,6 +187,42 @@ class GraphifyCmd(Fixture):
         del os.environ["QWEN_DELEGATE_GRAPHIFY"]
         self.assertEqual(graph.graphify_cmd(self.cwd, [])[0], "graphify")
 
+    def test_cmd_forces_structural_no_cluster(self):
+        # Load-bearing safety: the auto-refresh must never reach an LLM. A bare
+        # `graphify update` would let graphify pick a backend from the env
+        # (AWS Bedrock if AWS_PROFILE is set) -- billing prod and egressing the
+        # corpus, unseen, since the server runs it outside any approval gate.
+        self.assertIn("--no-cluster", graph.graphify_cmd(self.cwd, ["a.py"]))
+
+
+class GraphAvailability(unittest.TestCase):
+    """available()/bootstrap_line(): graph setup is offered per project, and is a
+    no-op tip (not an error) when graphify is absent."""
+
+    def setUp(self):
+        self._saved = os.environ.get("QWEN_DELEGATE_GRAPHIFY")
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("QWEN_DELEGATE_GRAPHIFY", None)
+        else:
+            os.environ["QWEN_DELEGATE_GRAPHIFY"] = self._saved
+
+    def test_available_and_line_when_binary_present(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "graphify")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
+        os.environ["QWEN_DELEGATE_GRAPHIFY"] = p
+        self.assertTrue(graph.available())
+        self.assertIn("structural code graph", graph.bootstrap_line())
+
+    def test_unavailable_and_tip_when_binary_missing(self):
+        os.environ["QWEN_DELEGATE_GRAPHIFY"] = "/nonexistent/graphify-xyz-123"
+        self.assertFalse(graph.available())
+        self.assertIn("isn't installed", graph.bootstrap_line())
+
 
 # Documented cosmetic survivors of the adversarial pass (graph round), left as
 # documentation rather than brittle tests: the failure-reason wording and its

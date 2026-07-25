@@ -127,7 +127,7 @@ Verify the components loaded without starting a session:
 
     claude --plugin-dir ~/projects/token-saver plugin details token-saver
     # -> MCP servers (1) qwen-delegate · Agents (2) qwen-manager, architect
-    #    Skills (3) delegation, architect, lld-principles
+    #    Skills (4) delegation, architect, lld-principles, graphify-setup
 
 The `.mcp.json` sets a per-server `"timeout": 7200000` (2h). On Claude Code **2.1.203+**
 that one field caps the wall clock *and* floors the stdio idle timeout to 2h, so no
@@ -156,11 +156,20 @@ installed` and Qwen greps instead).
     uv tool install "graphifyy[ollama]"     # package `graphifyy` (Graphify-Labs/graphify); CLI `graphify`
 
 Index a repo once — `graphify update . --no-cluster` (~2s, structural, no LLM) — and the
-server keeps it fresh after every delegation, tracking staleness against the git SHA and
-stamping a `GRAPH:` line on each receipt. The worker queries it (`graphify explain/path`)
-in `approval_mode="scoped"`; Claude does **not** — it locates via `qwen_query` (measured
-+64% when Claude uses the graph itself). Full setup, the semantic backend, and how it
-plugs in: **[docs/USAGE.md](docs/USAGE.md)**.
+server keeps it fresh after every delegation (also `--no-cluster`, so it never reaches an
+LLM), tracking staleness against the git SHA and stamping a `GRAPH:` line on each receipt.
+The worker queries it (`graphify explain/affected/path`) in `approval_mode="scoped"`;
+Claude does **not** — it locates via `qwen_query` (measured +64% when Claude uses the
+graph itself).
+
+> **⚠ Only the semantic subcommands — `extract`, `label`, `cluster-only` — reach an LLM,
+> and each needs an explicit `--backend`.** Bare, graphify auto-selects from the
+> environment (**AWS Bedrock if `AWS_PROFILE` is set** — bills a real cloud account and
+> egresses your code). Everything token-saver runs (`update`, `explain/affected/path`) is
+> local and LLM-free, so the plugin itself never hits a cloud backend; always pass
+> `--backend ollama` on a manual semantic run.
+
+Full setup, the semantic backend, and how it plugs in: **[docs/USAGE.md](docs/USAGE.md)**.
 
 ### Per-project setup — none required
 
@@ -228,7 +237,7 @@ Or call the tool directly for something already specified:
     specs/                 the engine's own gate suite (13 spec files)
     scoped_hook.py         allowlist hook for scoped mode
     agents/                qwen-manager (isolation container) · architect (L5 loop)
-    skills/                delegation (the loop) · architect (L5) · lld-principles
+    skills/                delegation · architect (L5) · lld-principles · graphify-setup
     commands/offload.md   the front door — /offload <task or question>
     templates/             QWEN.md worker rules · CLAUDE-snippet.md policy block
     docs/                  USAGE (day-to-day) · HLD/LLD (design) · FINDINGS (evidence)
