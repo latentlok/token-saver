@@ -48,23 +48,53 @@ The saving grows with the size of your codebase, because Claude never reads it.
 
 ## Install
 
-There's no installer and nothing to build. Clone it, and point Claude Code at it:
+Two commands. Nothing to build, no installer:
+
+    claude plugin marketplace add latentlok/token-saver
+    claude plugin install token-saver@token-saver
+
+The name looks doubled because it is: this repo *is* its own marketplace, so the id is
+`<plugin>@<marketplace>` and both halves happen to be called `token-saver`.
+
+Restart Claude Code, and you're done.
+
+### Check it worked
+
+    claude plugin list
+    claude plugin details token-saver
+
+You should see version `0.3.0`, status `enabled`, and an inventory of **1 MCP server**
+(`qwen-delegate`), **2 agents**, and **5 skills**.
+
+### Update
+
+Two commands, in this order — the first refreshes the marketplace, the second upgrades
+the plugin:
+
+    claude plugin marketplace update token-saver
+    claude plugin update token-saver@token-saver
+
+Use the full `token-saver@token-saver` here. The bare name fails with
+`Plugin "token-saver" not found`. Restart Claude Code to apply the new version.
+
+### Uninstall
+
+    claude plugin uninstall token-saver@token-saver
+    claude plugin marketplace remove token-saver
+
+### Or run it from a clone instead
+
+If you want to edit the plugin yourself, skip the marketplace and point Claude Code
+straight at a checkout:
 
     git clone https://github.com/latentlok/token-saver.git ~/projects/token-saver
     claude --plugin-dir ~/projects/token-saver
 
-That's it. Claude Code finds everything by itself.
+Changes then apply with `/reload-plugins` in the same session, and `git pull` is the
+update. Don't do both — a marketplace install and a `--plugin-dir` clone will load the
+plugin twice.
 
-Check that it loaded, without starting a session:
-
-    claude --plugin-dir ~/projects/token-saver plugin details token-saver
-
-You should see **1 MCP server** (`qwen-delegate`), **2 agents**, and **4 skills**. If you
-edit the plugin, `/reload-plugins` picks it up in the same session.
-
-To install a published copy from a marketplace instead:
-
-    claude plugin install token-saver@<marketplace>
+### One extra step on old versions
 
 **On Claude Code older than 2.1.203**, also add this to `~/.claude/settings.json`, or
 long jobs will time out after 30 minutes:
