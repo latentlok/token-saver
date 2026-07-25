@@ -6,13 +6,13 @@ Measured 2026-07-22, per HLD §8. Raw artifacts in scratch (`~/scratch/graphify-
 ## Probe 1 — graphify semantic backend on local Qwen: **PASS**
 
 `graphifyy` 0.9.23 (= github.com/Graphify-Labs/graphify) has a native `ollama` backend.
-Verified end-to-end against the real endpoint: semantic extraction ran via the snowy
+Verified end-to-end against the real endpoint: semantic extraction ran via a local
 proxy, real token accounting (`815 in / 2,056 out, est. cost $0.0000`).
 
 Recipe (the qwen-local graph profile):
 
     uv tool install "graphifyy[ollama]"        # the openai client extra is REQUIRED
-    OLLAMA_BASE_URL=http://snowy.tailcdc241.ts.net:11434/v1 \
+    OLLAMA_BASE_URL=http://<your-ollama-host>:11434/v1 \
     OLLAMA_MODEL=qwen3.6:27b-agent \
     OLLAMA_API_KEY=<proxy key> \
     GRAPHIFY_MAX_WORKERS=1 \
