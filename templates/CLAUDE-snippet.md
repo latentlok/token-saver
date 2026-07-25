@@ -42,11 +42,18 @@ spending your context. Treat its answers as leads to verify, not as truth.
   gate yourself — the server already ran it green, so a re-run just respends your tokens on
   a result the receipt already carries. (High-stakes `self` work worth double-checking?
   Run an *independent* audit — different tests — never a re-run of Qwen's own suite.)
-- Never let the worker write the file that grades it. Gates are `*_spec.*`, authored by
-  you, auto-reverted if touched.
+- **By default, let Qwen write and grade its own tests (`trust="self"`)** — the cheap path,
+  and how this runs unless you're told otherwise. **When you are told to, or the work must
+  be right, author the gate yourself (`trust="verified"`)**: then it is `*_spec.*`, and the
+  worker can never write or weaken *that* file — auto-reverted if it touches it. (A gate you
+  authored is yours alone; a self-graded suite passing is not proof it's correct — see the
+  `self` caveat above.)
 - A gate you have not tested is a hope. Break the thing it watches and confirm it fails
   before trusting a pass.
 - Prefer `auto-edit`. `scoped` grants a shell and is not a sandbox.
+- Bound the blast radius when you know the target: pass `touch_scope=["a.py","b.py"]` and
+  any edit to another *existing* file auto-reverts (new files stay allowed). Worth it under
+  `self`, which grades the suite but does not constrain which files the worker may change.
 
 <!-- qwen-delegate:end -->
 
