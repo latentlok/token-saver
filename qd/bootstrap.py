@@ -56,12 +56,17 @@ def detect_test_cmd(cwd):
         return "go test ./..."
     if os.path.isfile(j("Gemfile")):
         return "bundle exec rspec"
+    # pytest's default `python_files` collects test_*.py / *_test.py but NOT
+    # *_spec.py -- which is our gate convention. A `*_spec` gate run through a bare
+    # pytest therefore collects nothing and passes vacuously (the server flags it
+    # `success_but_preflight_passed`). Force collection of both so a gate can't be
+    # silently skipped.
     if os.access(j("venv", "bin", "pytest"), os.X_OK):
-        return "venv/bin/pytest -q"
+        return 'venv/bin/pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
     if os.access(j(".venv", "bin", "pytest"), os.X_OK):
-        return ".venv/bin/pytest -q"
+        return '.venv/bin/pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
     if os.path.isfile(j("pyproject.toml")) or os.path.isfile(j("setup.py")):
-        return "python -m pytest -q"
+        return 'python -m pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
     return ""
 
 
