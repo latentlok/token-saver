@@ -131,10 +131,10 @@ hard, and easy to get backwards:
   structure backfires (+64% retries); let the worker locate for itself and read where the
   change landed from the receipt's `CHANGED` line.
 
-**What's written / committed.** `graphify update` writes `graphify-out/`; the freshness
-sidecar lives in self-gitignored `.qwen-delegate/`. Committing the structural
-`graphify-out/graph.json` gives teammates a warm index (this repo does); dated semantic
-snapshots (`graphify-out/2026-*/`) are gitignored.
+**What's written.** `graphify update` writes `graphify-out/` — **git-ignored**, since it's a
+generated, machine-specific cache (it hard-codes absolute paths). The freshness sidecar
+lives in self-ignored `.qwen-delegate/`. Each clone builds its own structural graph on the
+first delegation (~2s), so there's nothing to commit or share.
 
 ## The trust dial — the one decision per task
 
