@@ -68,9 +68,12 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
 
 ### Configuring it
 
-- **Per call (the only switch):** `trust="self"` or `trust="verified"` on
-  `qwen_delegate`. Omitted = `"self"` (L5). Anything else is refused by name
-  (L1–L4 are a parked design).
+- **Per call (highest precedence):** `trust="self"` or `trust="verified"` on
+  `qwen_delegate`. Anything else is refused by name (L1–L4 are a parked design).
+- **Per project (the slider position):** set `"trust"` in `.qwen-delegate.json` —
+  the standing default for every delegation in that repo, overridden by a per-call
+  `trust`. Omit both and you get the built-in default, `"self"` (L5). This is the
+  one place to move the slider; you never touch code to change a project's stance.
 - **The unverified path is now opt-in:** omitting both `trust` and `verify` fires
   the L5 self-gate (a real gate), not an *unverified claim*. The only route to
   `STATUS: unverified` is asking for `trust="verified"` with no `verify` — for

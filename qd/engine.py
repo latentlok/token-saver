@@ -20,6 +20,7 @@ from qd.invoke import (
 from qd.gittree import (
     git, is_git_repo,
     snapshot, violated_specs, revert_specs,
+    _project_config,
 )
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
@@ -177,8 +178,11 @@ def delegate(args):
     worktree_mode = args.get("worktree")
     touch_scope = args.get("touch_scope")
 
-    # --- Precondition: trust (R3: both ends of the slider) ---
-    trust = args.get("trust", "self")
+    # --- Precondition: trust (R3: the slider) ---
+    # Position resolves like `executor`: call arg > project .qwen-delegate.json
+    # 'trust' > builtin default ("self"/L5). The resolved value is validated below,
+    # so a bad config value is refused by name exactly like a bad call arg.
+    trust = args.get("trust") or _project_config(cwd).get("trust") or "self"
     if trust not in ("verified", "self"):
         return {
             "status": "refused",

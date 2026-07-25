@@ -105,6 +105,41 @@ class TrustPrecondition(unittest.TestCase):
         self.assertIn('"self"', r["result_text"])
 
 
+class TrustResolution(unittest.TestCase):
+    """R3 slider position resolves: call arg > project .qwen-delegate.json > 'self'.
+
+    Proven hermetically through the refusal branch (which runs before git/worker):
+    a bogus position reaches validation only if that source was consulted.
+    """
+
+    def _cfg(self, trust_val):
+        cwd = tempfile.mkdtemp()
+        with open(os.path.join(cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"trust": "%s"}' % trust_val)
+        return cwd
+
+    def test_project_config_sets_the_default(self):
+        # No call arg: the config position is used. A bogus value forces the
+        # refusal, proving it was read (a real "self" default would proceed).
+        r = engine.delegate({"task": "t", "cwd": self._cfg("nope")})
+        self.assertEqual(r["status"], "refused")
+        self.assertIn('"verified"', r["result_text"])
+        self.assertIn('"self"', r["result_text"])
+
+    def test_call_arg_overrides_project_config(self):
+        # Valid config position "self", but an explicit bogus call arg wins.
+        r = engine.delegate({"task": "t", "cwd": self._cfg("self"),
+                             "trust": "nope"})
+        self.assertEqual(r["status"], "refused")
+
+    def test_no_config_no_arg_falls_back_to_self(self):
+        # Neither source set -> builtin "self" (valid) -> NOT refused for trust.
+        # A bare tempdir has no .qwen-delegate.json; delegate proceeds past the
+        # trust gate (and later refuses on the non-git cwd, a different reason).
+        r = engine.delegate({"task": "t", "cwd": tempfile.mkdtemp()})
+        self.assertNotIn("Trust dial", r["result_text"])
+
+
 class ReceiptTrustLine(unittest.TestCase):
     def test_trust_self_line_present(self):
         from qd import verdict
