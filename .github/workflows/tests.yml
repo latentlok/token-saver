@@ -1,12 +1,11 @@
 name: tests
 
-# Runs the trust-dial spec suite on every PR and on pushes to master.
-# These specs are hermetic (stdlib unittest, tempdirs, local git) — no network,
-# no local qwen backend, no ~/.qwen config (that read is try/except-guarded).
-# Scope is deliberately the trust work: trust_spec (the R3 slider: resolution
-# chain, self-gate guards, auto mode) + engine_spec (L5-default + refusal paths).
-# The wall-clock-timing dispatch_spec is intentionally excluded — it is flaky by
-# nature and would make a required check unreliable.
+# Runs the full hermetic spec suite on every PR and on pushes to master.
+# The specs are stdlib-unittest, tempdir + local-git, no network, no real qwen backend.
+# Excluded: dispatch_spec — its batch assertion is wall-clock-timing based and flaky by
+# nature, which would make a required check unreliable. verdict_spec reads a context
+# window from ~/.qwen/settings.json for its compaction-warning test, so CI writes a
+# minimal stub (the dev window, 196608) to make that assertion bind.
 
 on:
   pull_request:
@@ -14,7 +13,7 @@ on:
     branches: [master]
 
 jobs:
-  trust-specs:
+  specs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +28,24 @@ jobs:
           git config --global user.email "ci@token-saver.test"
           git config --global user.name "token-saver CI"
 
-      - name: Trust slider + self-gate specs
-        run: python3 specs/trust_spec.py
+      - name: Minimal ~/.qwen config (context window for verdict_spec's compaction test)
+        run: |
+          mkdir -p ~/.qwen
+          cat > ~/.qwen/settings.json <<'JSON'
+          {
+            "model": { "name": "ci-model" },
+            "modelProviders": {
+              "ci": [ { "id": "ci-model", "generationConfig": { "contextWindowSize": 196608 } } ]
+            }
+          }
+          JSON
 
-      - name: Engine default + refusal specs
-        run: python3 specs/engine_spec.py
+      - name: Spec suite (dispatch_spec excluded — wall-clock flaky)
+        run: |
+          fail=0
+          for f in specs/*_spec.py; do
+            case "$f" in */dispatch_spec.py) echo "skip (flaky): $f"; continue;; esac
+            echo "== $f =="
+            python3 "$f" || fail=1
+          done
+          exit $fail
