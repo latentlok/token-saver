@@ -256,7 +256,7 @@ def delegate(args):
                 "last_verify": None,
                 "ctx": {},
             }
-        bootstrap_note = bootstrap_notice(cmd, path)
+        bootstrap_note = bootstrap_notice(cmd, path) + " " + graph.bootstrap_line()
 
     # --- Precondition: no dirty protected spec ---
     pre_dirty = violated_specs(cwd)

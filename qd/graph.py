@@ -10,6 +10,7 @@ and HEAD. refresh_sync/refresh_async shell out to graphify to update the index.
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 
@@ -63,19 +64,50 @@ def staleness(cwd):
     return {"indexed_sha": sha, "stale": sorted(files), "status": "stale"}
 
 
+def graphify_bin():
+    """The graphify binary: $QWEN_DELEGATE_GRAPHIFY or `graphify` on PATH."""
+    return os.environ.get("QWEN_DELEGATE_GRAPHIFY", "graphify")
+
+
+def available():
+    """True if the graphify binary is resolvable (PATH or QWEN_DELEGATE_GRAPHIFY)."""
+    return bool(shutil.which(graphify_bin()))
+
+
 def graphify_cmd(cwd, files=None):
     """Return the command list for the per-delegation refresh: a STRUCTURAL
     `graphify update <cwd> --no-cluster`.
 
-    `--no-cluster` is load-bearing, not cosmetic: it keeps this refresh from ever
-    reaching an LLM. A bare `graphify update` lets graphify pick a backend from the
-    environment -- AWS Bedrock if `AWS_PROFILE` is exported -- which would BILL a real
-    cloud account AND ship the corpus off-box, silently, because this runs as the
-    server's own subprocess outside any approval gate. Semantic clustering stays a
-    deliberate manual `graphify update . --backend <local> --model <local>`.
+    `graphify update` is LLM-free by design ("no LLM needed" per the CLI -- it only
+    re-extracts the AST), so this refresh never reaches a backend and cannot bill a
+    cloud LLM. Only `extract`/`label`/`cluster-only` (semantic naming) touch an LLM,
+    and the plugin never runs those. `--no-cluster` skips even the local clustering
+    pass: the worker's lookups (`explain`/`path`/`affected`) read the raw graph, not
+    communities, so clustering would be wasted work every delegation. Semantic naming
+    stays a deliberate manual step with an explicit `--backend <local>` -- never bare,
+    which auto-selects Bedrock when AWS_PROFILE is set.
     """
-    bin_ = os.environ.get("QWEN_DELEGATE_GRAPHIFY", "graphify")
-    return [bin_, "update", cwd, "--no-cluster"]
+    return [graphify_bin(), "update", cwd, "--no-cluster"]
+
+
+def bootstrap_line():
+    """One SETUP sentence about the code graph, for a first delegation on a fresh repo.
+
+    Installed -> the post-delegation refresh will build/maintain a structural graph;
+    absent -> an optional install tip. Structural only; semantic naming is never
+    triggered here.
+    """
+    if available():
+        return (
+            "graphify is installed, so I'll keep a structural code graph here (free, "
+            "local, no LLM) -- from the next run on, the worker locates code through it "
+            "instead of reading files."
+        )
+    return (
+        "Tip: graphify isn't installed. Installing it (`uv tool install \"graphifyy[ollama]\"`) "
+        "lets the worker locate code without reading it -- optional; the graphify-setup "
+        "skill sets it up."
+    )
 
 
 def _do_refresh(cwd, files, prior_sha):

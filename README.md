@@ -158,13 +158,16 @@ installed` and Qwen greps instead).
 Index a repo once — `graphify update . --no-cluster` (~2s, structural, no LLM) — and the
 server keeps it fresh after every delegation (also `--no-cluster`, so it never reaches an
 LLM), tracking staleness against the git SHA and stamping a `GRAPH:` line on each receipt.
-The worker queries it (`graphify explain/path`) in `approval_mode="scoped"`; Claude does
-**not** — it locates via `qwen_query` (measured +64% when Claude uses the graph itself).
+The worker queries it (`graphify explain/affected/path`) in `approval_mode="scoped"`;
+Claude does **not** — it locates via `qwen_query` (measured +64% when Claude uses the
+graph itself).
 
-> **⚠ Any semantic/LLM graphify command needs an explicit `--backend`.** Without one,
-> graphify auto-selects from your environment (**AWS Bedrock if `AWS_PROFILE` is set** —
-> bills a real cloud account and egresses your code). Always pass
-> `--backend ollama --model <your-model>`.
+> **⚠ Only the semantic subcommands — `extract`, `label`, `cluster-only` — reach an LLM,
+> and each needs an explicit `--backend`.** Bare, graphify auto-selects from the
+> environment (**AWS Bedrock if `AWS_PROFILE` is set** — bills a real cloud account and
+> egresses your code). Everything token-saver runs (`update`, `explain/affected/path`) is
+> local and LLM-free, so the plugin itself never hits a cloud backend; always pass
+> `--backend ollama` on a manual semantic run.
 
 Full setup, the semantic backend, and how it plugs in: **[docs/USAGE.md](docs/USAGE.md)**.
 

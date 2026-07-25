@@ -90,21 +90,22 @@ Point the server at a non-default binary with `QWEN_DELEGATE_GRAPHIFY=/path/to/g
 
       graphify update . --no-cluster        # ~2s, writes graphify-out/graph.json
 
-- **Semantic** — adds LLM-derived clusters/labels for orienting in a large *unfamiliar*
-  codebase; needs an LLM, so **always name the backend and model explicitly**:
+- **Semantic** (optional) — LLM-named clusters for a human-readable report; **not needed
+  for delegation** (the worker reads the raw structural graph). A separate step *after* the
+  structural build — `cluster-only` / `label` / `extract` — and it reaches an LLM, so name a
+  LOCAL backend explicitly (exact flags vary by version — `graphify --help`):
 
-      OLLAMA_BASE_URL=http://<your-endpoint>/v1 \
-      OLLAMA_MODEL=<your-model> \
-      OLLAMA_API_KEY=<key> \
+      OLLAMA_BASE_URL=http://<endpoint>/v1 OLLAMA_MODEL=<model> OLLAMA_API_KEY=<key> \
       GRAPHIFY_MAX_WORKERS=1 \
-      graphify update . --backend ollama --model <your-model>   # MAX_WORKERS=1 mandatory on 1-worker Ollama
+      graphify cluster-only . --backend ollama    # MAX_WORKERS=1 mandatory on 1-worker Ollama
 
-> **⚠ Never run a semantic / LLM graphify command without an explicit `--backend`.**
-> With none, graphify auto-selects one from your environment — notably **AWS Bedrock if
-> `AWS_PROFILE` is exported** — which **bills a real cloud account** *and* ships your code
-> off-box. Always pass `--backend ollama --model <your-model>` (or your intended local
-> backend). The server's per-delegation refresh is safe by construction — it runs
-> `--no-cluster`, so it never reaches an LLM and can't pick up a cloud backend.
+> **⚠ Only three subcommands reach an LLM — `extract`, `label`, `cluster-only` — and each
+> must name its backend.** Bare, graphify auto-selects from the environment (**AWS Bedrock
+> if `AWS_PROFILE` is exported**), **billing a real cloud account** *and* egressing your
+> code. Always pass `--backend ollama` (local). Everything token-saver itself runs —
+> `update` (server refresh) and `explain`/`path`/`affected`/`query` (worker) — is **local
+> and LLM-free**, so the plugin can never hit a cloud backend; the risk is only a manual
+> semantic run.
 
 After the first index you never run it by hand again: the server runs
 `graphify update --no-cluster` (structural, never touches an LLM) in the background after
@@ -115,12 +116,13 @@ keyed to the git SHA. Every receipt carries a `GRAPH:` line — `fresh @ <sha>`,
 **How it plugs in — the graph belongs to the WORKER, not Claude.** The one thing measured
 hard, and easy to get backwards:
 
-- The **worker (Qwen)** locates through the graph — `graphify explain "<symbol>"`,
-  `graphify path "A" "B"`, `graphify diagnose` — *before* grepping. To enable it, delegate
-  in **`approval_mode="scoped"`**: its shell allowlist includes exactly those three read
-  queries (`update`/`add`/`install` are blocked as state-changing). The `QWEN.md`
-  graph-before-grep rule does the steering; in `auto-edit` (no shell) the worker greps
-  instead — still correct, just less cheap.
+- The **worker (Qwen)** locates through the graph — `explain`, `affected` (every call site
+  that depends on a symbol — key before a rename), `path`, `query`, `diagnose`, `god-nodes`
+  — *before* grepping. To enable it, delegate in **`approval_mode="scoped"`**: its shell
+  allowlist includes those LLM-free reads (`update`/`add`/`install` and the LLM steps
+  `extract`/`label`/`cluster-only` are blocked). The `QWEN.md` graph-before-grep rule does
+  the steering; in `auto-edit` (no shell) the worker greps instead — still correct, cheaper
+  with the graph.
 - **Claude does NOT locate through graphify.** Measured: Claude querying the graph in its
   own shell cost **+64%** (every shell call is a turn that bloats context) versus one
   compact `qwen_query` receipt. So Claude locates via `qwen_query`; the graph is the
