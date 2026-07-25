@@ -57,6 +57,19 @@ just stamps `GRAPH: failed: graphify not installed` and Qwen falls back to grep.
 a large existing codebase it is where the biggest saving comes from, because locating is
 the expensive part and the graph turns a read into a lookup.
 
+**Turn on automatic worker-side graph use — three steps, then it's hands-off:**
+
+1. **Install** graphify once per machine (below).
+2. **Index** the repo once — `graphify update . --no-cluster`. The server re-indexes
+   after every delegation from then on, so this is the only manual index you run.
+3. **Delegate in `approval_mode="scoped"`** — this is what gives the worker the shell to
+   query the graph. (`auto-edit` has no shell, so the worker greps instead.)
+
+That's everything you set. The rest is automatic: the server injects the `QWEN.md`
+graph-before-grep rule the worker auto-loads, keeps the index fresh, and stamps the
+`GRAPH:` line on each receipt. Claude never queries the graph itself — it stays on
+`qwen_query`. Nothing indexed / graphify missing → delegations just fall back to grep.
+
 **Install (once per machine).**
 
     uv tool install "graphifyy[ollama]"     # pip works too. Package: `graphifyy`; CLI: `graphify`
