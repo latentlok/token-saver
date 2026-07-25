@@ -244,7 +244,7 @@ Claude's moves, in order:
     git commit -am "checkpoint before delegation"        <- Claude's move, automatic
 
     qwen_delegate(
-      cwd  = "/home/dev-vishal/projects/myapp",
+      cwd  = "/home/you/projects/myapp",
       trust = "self",                     # Qwen writes code AND the tests that grade it
       approval_mode = "scoped",           # it may run the suite + query the graph
       task = "Add rate limiting to the API client.

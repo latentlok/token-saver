@@ -177,4 +177,4 @@ The whole value is the token/cost saving; keep every design decision pointed at 
   `results_gf_large/`, `results_existing/`, `results_3arm_pilot/`,
   `results_combined_summary.md`, and `grow/` (the accumulating harness).
 - Bloat evidence: transcripts under
-  `~/.claude/projects/-home-dev-vishal-scratch-bench-grow-repo-{SOLO,LLD}/`.
+  `~/.claude/projects/-home-you-scratch-bench-grow-repo-{SOLO,LLD}/`.
