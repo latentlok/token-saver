@@ -146,6 +146,22 @@ is never in this repo. Configure it once per machine:
 
       qwen mcp add -s user -e FIRECRAWL_API_URL=http://localhost:3002 --trust firecrawl npx -- -y firecrawl-mcp
 
+### Optional: the code graph (graphify)
+
+`graphify` is an external code-graph tool the **worker** locates through instead of
+reading files — it's where the −69% (existing-codebase) case comes from. Fully optional:
+absent, delegations run unchanged (the receipt just says `GRAPH: failed: graphify not
+installed` and Qwen greps instead).
+
+    uv tool install "graphifyy[ollama]"     # package `graphifyy` (Graphify-Labs/graphify); CLI `graphify`
+
+Index a repo once — `graphify update . --no-cluster` (~2s, structural, no LLM) — and the
+server keeps it fresh after every delegation, tracking staleness against the git SHA and
+stamping a `GRAPH:` line on each receipt. The worker queries it (`graphify explain/path`)
+in `approval_mode="scoped"`; Claude does **not** — it locates via `qwen_query` (measured
++64% when Claude uses the graph itself). Full setup, the semantic backend, and how it
+plugs in: **[docs/USAGE.md](docs/USAGE.md)**.
+
 ### Per-project setup — none required
 
 **Work in a git repo.** That's the only hard rule (`git init` first). Git history is

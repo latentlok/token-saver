@@ -49,6 +49,79 @@ local worker is slow; your tokens are the scarce thing, its time is not.
   codebase, additionally delegate a one-time semantic index (`graphify update .`
   with the local backend) as an offline job.
 
+## The code graph (graphify) — optional, but the −69% case runs on it
+
+`graphify` is an external code-graph tool the **worker** uses to locate code without
+reading it. Fully optional: with it absent, every delegation still runs — the server
+just stamps `GRAPH: failed: graphify not installed` and Qwen falls back to grep. But on
+a large existing codebase it is where the biggest saving comes from, because locating is
+the expensive part and the graph turns a read into a lookup.
+
+**Turn on automatic worker-side graph use — three steps, then it's hands-off:**
+
+1. **Install** graphify once per machine (below).
+2. **Index** the repo once — `graphify update . --no-cluster`. The server re-indexes
+   after every delegation from then on, so this is the only manual index you run.
+3. **Delegate in `approval_mode="scoped"`** — this is what gives the worker the shell to
+   query the graph. (`auto-edit` has no shell, so the worker greps instead.)
+
+That's everything you set. The rest is automatic: the server injects the `QWEN.md`
+graph-before-grep rule the worker auto-loads, keeps the index fresh, and stamps the
+`GRAPH:` line on each receipt. Claude never queries the graph itself — it stays on
+`qwen_query`. Nothing indexed / graphify missing → delegations just fall back to grep.
+
+**Install (once per machine).**
+
+    uv tool install "graphifyy[ollama]"     # pip works too. Package: `graphifyy`; CLI: `graphify`
+
+The package is `graphifyy` (github.com/Graphify-Labs/graphify); the installed command is
+`graphify`. The `[ollama]` extra pulls the OpenAI client the semantic backend needs —
+install it even if you only want the structural graph, so you can add semantics later.
+Point the server at a non-default binary with `QWEN_DELEGATE_GRAPHIFY=/path/to/graphify`.
+
+**Index a repo (once — the server keeps it fresh after that).**
+
+- **Structural** — fast, deterministic, no LLM; the default for repos you work in
+  repeatedly:
+
+      graphify update . --no-cluster        # ~2s, writes graphify-out/graph.json
+
+- **Semantic** — adds LLM-derived clusters/labels for orienting in a large *unfamiliar*
+  codebase; runs against your local endpoint, so do it as an offline job:
+
+      OLLAMA_BASE_URL=http://<your-endpoint>/v1 \
+      OLLAMA_MODEL=<your-model> \
+      OLLAMA_API_KEY=<key> \
+      GRAPHIFY_MAX_WORKERS=1 \
+      graphify update . --backend ollama    # MAX_WORKERS=1 is mandatory on a 1-worker Ollama
+
+After the first index you never run it by hand again: the server runs `graphify update`
+in the background after every delegation and tracks freshness in `.qwen-delegate/graph.json`,
+keyed to the git SHA. Every receipt carries a `GRAPH:` line — `fresh @ <sha>`,
+`stale (N files) — refresh running`, `indexing`, `failed: <reason>`, or `none`.
+
+**How it plugs in — the graph belongs to the WORKER, not Claude.** The one thing measured
+hard, and easy to get backwards:
+
+- The **worker (Qwen)** locates through the graph — `graphify explain "<symbol>"`,
+  `graphify path "A" "B"`, `graphify diagnose` — *before* grepping. To enable it, delegate
+  in **`approval_mode="scoped"`**: its shell allowlist includes exactly those three read
+  queries (`update`/`add`/`install` are blocked as state-changing). The `QWEN.md`
+  graph-before-grep rule does the steering; in `auto-edit` (no shell) the worker greps
+  instead — still correct, just less cheap.
+- **Claude does NOT locate through graphify.** Measured: Claude querying the graph in its
+  own shell cost **+64%** (every shell call is a turn that bloats context) versus one
+  compact `qwen_query` receipt. So Claude locates via `qwen_query`; the graph is the
+  builder's tool for finding the code it will edit.
+- Keep your LLD **behavior-only** — never name files or functions. Location-pinning from
+  structure backfires (+64% retries); let the worker locate for itself and read where the
+  change landed from the receipt's `CHANGED` line.
+
+**What's written / committed.** `graphify update` writes `graphify-out/`; the freshness
+sidecar lives in self-gitignored `.qwen-delegate/`. Committing the structural
+`graphify-out/graph.json` gives teammates a warm index (this repo does); dated semantic
+snapshots (`graphify-out/2026-*/`) are gitignored.
+
 ## The trust dial — the one decision per task
 
 - **`trust="self"` (L5, max savings — the default for most work):** you pass NO

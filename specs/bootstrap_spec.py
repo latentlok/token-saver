@@ -92,10 +92,12 @@ class DetectTable(unittest.TestCase):
         def setup(d):
             p = put(d, "venv/bin/pytest", "#!/bin/sh\n")
             os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
-        self.check(setup, "venv/bin/pytest -q")
+        self.check(setup,
+                   'venv/bin/pytest -q -o "python_files=test_*.py *_test.py *_spec.py"')
 
     def test_pyproject(self):
-        self.check(lambda d: put(d, "pyproject.toml", ""), "python -m pytest -q")
+        self.check(lambda d: put(d, "pyproject.toml", ""),
+                   'python -m pytest -q -o "python_files=test_*.py *_test.py *_spec.py"')
 
     def test_nothing(self):
         self.check(lambda d: None, "")

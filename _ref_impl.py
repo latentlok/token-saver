@@ -430,12 +430,14 @@ def detect_test_cmd(cwd):
         return "go test ./..."
     if os.path.isfile(j("Gemfile")):
         return "bundle exec rspec"
+    # Kept in sync with qd/bootstrap.py: force pytest to collect *_spec.py gates
+    # (its default python_files skips them), else a *_spec gate passes vacuously.
     if os.access(j("venv", "bin", "pytest"), os.X_OK):
-        return "venv/bin/pytest -q"
+        return 'venv/bin/pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
     if os.access(j(".venv", "bin", "pytest"), os.X_OK):
-        return ".venv/bin/pytest -q"
+        return '.venv/bin/pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
     if os.path.isfile(j("pyproject.toml")) or os.path.isfile(j("setup.py")):
-        return "python -m pytest -q"
+        return 'python -m pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
     return ""
 
 
