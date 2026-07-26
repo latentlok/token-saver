@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.1 — the other truncation
+
+0.4.0 opened with "a day of debugging one truncated query" and fixed the
+executor's side of it: a truncated run now says so instead of arriving as an
+empty success. It did not find the second cap, which was ours.
+
+`qwen_query` capped its answer at **4,500 characters** — `RESULT_CAP = 3000`
+plus an undocumented `+ 1500` at the call site — and then handed the caller a
+fluent paragraph with a truncation marker at the end of it. Measured across the
+six logged queries in this repo, four came back at exactly 4,693/4,694 chars
+against 4k–19k completion tokens actually generated. The answers were being cut
+mid-sentence and the caller had no reason to doubt them.
+
+The cap is now **50,000**, and the constant is the whole of it — the `+ 1500`
+is gone, so `RESULT_CAP` describes what the caller gets. It exists to stop a
+runaway, not to budget context: for a query the answer *is* the deliverable,
+unlike a delegate receipt where the diff is the deliverable and the text is
+commentary (`verdict.py` keeps its own, smaller cap for that reason).
+`format='map'` was the worst affected — MAP + KEY SYMBOLS + CONNECTIONS +
+ANSWER + VERIFY for any real repo does not fit in 4,500 chars, so the
+orient-yourself format was the one most reliably truncated.
+
+Worth being explicit about what this was *not*, since the first guess was wrong
+in an instructive way: not plan mode, which imposes no output limit, and not
+qwen-code's client-side `max_tokens` — the cap 0.4.0 documented. Peak context on
+those runs was 36k–40k against a 262k window, nowhere near compaction. Every
+suspect outside the repo was innocent.
+
+`specs/queries_spec.py` never asserted on truncation, which is why a cap this
+tight survived a release *about* truncation. It does now: a large answer must
+survive intact, the effective cap must equal `RESULT_CAP` with no slack at the
+call site, and the constant must stay large enough for a map.
+
 ## 0.4.0 — the executor tells the truth
 
 A day of debugging one truncated query turned into a run of silent-failure fixes.
