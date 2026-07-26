@@ -14,7 +14,7 @@ import subprocess
 from qd.profiles import resolve, cost_usd
 from qd.invoke import (
     run_executor, accum_stats, cum_zero,
-    was_compacted_since_ack, ack_compaction,
+    was_compacted_since_ack, ack_compaction, compaction_counts,
     truncate,
 )
 from qd.gittree import (
@@ -27,6 +27,7 @@ from qd.bootstrap import (
     bootstrap_notice, bootstrap_failed_refusal,
     nongit_refusal, detect_test_cmd,
 )
+from qd import doctor
 from qd import worktrees
 from qd.verdict import render, HANDOFF_SUFFIX, VERIFY_CAP
 from qd import refs
@@ -172,9 +173,14 @@ def delegate(args):
     else:
         timeout = _DEFAULT_TIMEOUT
     session_id = args.get("session_id")
-    on_compaction = args.get("on_compaction") or "reinject"
-    if on_compaction not in ("reinject", "discard"):
-        on_compaction = "reinject"
+    # "refuse" is the default: compaction is the documented fabrication trigger, so a
+    # run that reaches it has already exceeded what one delegation can hold honestly.
+    # Continuing on a summarised history -- reinject or discard -- buys a result whose
+    # provenance nobody can vouch for. Stopping hands the call back to the orchestrator,
+    # which can split the task; that is the only fix that addresses the cause.
+    on_compaction = args.get("on_compaction") or "refuse"
+    if on_compaction not in ("refuse", "reinject", "discard"):
+        on_compaction = "refuse"
     worktree_mode = args.get("worktree")
     touch_scope = args.get("touch_scope")
 
@@ -257,6 +263,16 @@ def delegate(args):
                 "ctx": {},
             }
         bootstrap_note = bootstrap_notice(cmd, path) + " " + graph.bootstrap_line()
+        # First delegation in a repo is also the first on a NEW MACHINE, and the
+        # settings that decide whether a run comes back whole do not travel with
+        # this plugin. Say so once, here, rather than let it surface later as an
+        # unexplained truncation someone debugs the repo over.
+        try:
+            executor_note = doctor.summary_line()
+            if executor_note:
+                bootstrap_note += " " + executor_note
+        except Exception:
+            pass
 
     # --- Precondition: no dirty protected spec ---
     pre_dirty = violated_specs(cwd)
@@ -376,12 +392,14 @@ def delegate(args):
         send_suffix = False
 
         # --- Invoke executor ---
+        compaction_before = compaction_counts(session_id)
         text, denials, sid, err, meta = run_executor(
             profile, prompt, work_cwd, approval_mode,
             timeout=timeout, session_id=session_id,
             verify=verify,
             shell_allow=args.get("shell_allow"),
             suffix=suffix,
+            compaction_policy=on_compaction,
         )
 
         ctx["meta"] = meta or {}
@@ -397,6 +415,24 @@ def delegate(args):
         if err:
             trail.append(f"attempt {attempt}: {err}")
             break
+
+        # --- Compaction, under the refuse policy: stop, do not retry ---
+        # Checked before anything reads `text`: past a compaction the worker's report
+        # is exactly what cannot be trusted, so it must not reach a gate, a spec
+        # check, or the receipt as if it were ordinary output.
+        if on_compaction == "refuse":
+            done_after, tried_after = compaction_counts(sid or session_id)
+            if (done_after > compaction_before[0]
+                    or tried_after > compaction_before[1]):
+                blocked = done_after == compaction_before[0]
+                trail.append(
+                    f"attempt {attempt}: COMPACTION "
+                    + ("blocked -- run stopped before the summary"
+                       if blocked else
+                       "fired -- history was summarised; result not trusted"))
+                ctx["compaction_blocked"] = blocked
+                result_text = ""
+                break
 
         result_text = text or ""
 
@@ -563,6 +599,8 @@ def delegate(args):
         status = "error"
     elif trail[-1].endswith(": VERIFY PASS"):
         status = "success"
+    elif "COMPACTION" in trail[-1].upper():
+        status = "compaction_refused"
     elif "SPEC VIOLATION" in trail[-1].upper():
         status = "spec_violation"
     elif "IDENTICAL to preflight" in trail[-1]:

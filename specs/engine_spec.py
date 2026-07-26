@@ -72,6 +72,19 @@ result = {"type": "result", "result": step.get("result", "did the work\n\nHANDOF
           "session_id": step.get("sid", "e-sess-%d" % (n + 1)), "permission_denials": [],
           "stats": {"tools": {"totalCalls": 1, "totalFail": 0, "byName": {}},
                     "models": {}}}
+# Stand in for compact_hook.py firing inside the run: "pre" is a compaction that
+# was attempted (and possibly blocked), "post" one that completed.
+if step.get("compact"):
+    cd = os.environ["QCOMPACT_DIR"]
+    os.makedirs(cd, exist_ok=True)
+    mp = os.path.join(cd, result["session_id"] + ".json")
+    try:
+        st = json.load(open(mp))
+    except Exception:
+        st = {"session_id": result["session_id"], "events": [], "acked": 0}
+    st.setdefault("pending" if step["compact"] == "pre" else "events", []).append(
+        {"ts": "stub"})
+    json.dump(st, open(mp, "w"))
 sys.stdout.write(json.dumps([
     {"type": "assistant", "message": {"usage": {"input_tokens": 25000}}}, result]))
 """
@@ -104,6 +117,11 @@ class Fixture(unittest.TestCase):
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "base"],
                        check=True)
         os.environ["QWEN_DELEGATE_WORKTREES"] = tempfile.mkdtemp()
+        # invoke.COMPACT_DIR is read at import; point it at a temp dir so marker
+        # files from these runs never touch the real ~/.qwen-delegate.
+        from qd import invoke as _invoke
+        self._compact_dir_saved = _invoke.COMPACT_DIR
+        _invoke.COMPACT_DIR = tempfile.mkdtemp()
         self.stub = os.path.join(td, "stub.py")
         with open(self.stub, "w") as f:
             f.write(STUB)
@@ -122,6 +140,8 @@ class Fixture(unittest.TestCase):
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._env)
+        from qd import invoke as _invoke
+        _invoke.COMPACT_DIR = self._compact_dir_saved
 
     def steps(self, steps):
         with open(os.path.join(self.sdir, "steps.json"), "w") as f:
@@ -383,10 +403,73 @@ class MutationHardening(Fixture):
         r = self.delegate()
         self.assertEqual(r["ctx"]["sessions"].count("same-sid"), 1)
 
-    def test_on_compaction_default_is_reinject(self):      # survivor 8
+    def test_on_compaction_default_is_refuse(self):        # survivor 8
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         r = self.delegate()
-        self.assertEqual(r["ctx"]["on_compaction"], "reinject")
+        self.assertEqual(r["ctx"]["on_compaction"], "refuse")
+
+    def test_unknown_on_compaction_value_falls_back_to_refuse(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(on_compaction="carry-on")
+        self.assertEqual(r["ctx"]["on_compaction"], "refuse")
+
+
+class CompactionRefusal(Fixture):
+    """Compaction is the documented fabrication trigger. The default policy is to
+    stop rather than build on a summarised history -- so the load-bearing claims
+    are that the run ENDS, that nothing from it is graded, and that the receipt
+    tells the orchestrator to split the task instead of retrying it."""
+
+    def test_refuse_stops_the_run_on_the_attempt_it_happens(self):
+        # Attempt 1 compacts and leaves the wrong output; without the refusal the
+        # loop would retry and could still go green on attempt 2.
+        self.steps([{"write": {"out.py": "wrong\n"}, "compact": "pre"},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "compaction_refused")
+        self.assertEqual(len(r["trail"]), 1)          # no second attempt
+        self.assertIn("COMPACTION", r["trail"][0])
+
+    def test_refused_run_returns_no_result_text_to_grade(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}, "compact": "post"}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "compaction_refused")
+        self.assertEqual(r["result_text"], "")
+
+    def test_blocked_and_completed_compactions_are_distinguished(self):
+        self.steps([{"write": {"out.py": "wrong\n"}, "compact": "pre"}])
+        self.assertIs(self.delegate()["ctx"]["compaction_blocked"], True)
+        self.setUp()
+        self.steps([{"write": {"out.py": "wrong\n"}, "compact": "post"}])
+        self.assertIs(self.delegate()["ctx"]["compaction_blocked"], False)
+
+    def test_receipt_says_split_it_not_retry_it(self):
+        self.steps([{"write": {"out.py": "wrong\n"}, "compact": "pre"}])
+        receipt = engine.run({
+            "task": "t", "cwd": self.cwd, "verify": "grep -q MARKER out.py",
+            "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("STATUS: compaction_refused", receipt)
+        self.assertIn("split it into smaller units", receipt)
+        self.assertIn("Do NOT re-delegate this task unchanged", receipt)
+
+    def test_a_clean_run_is_untouched_by_the_policy(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.assertEqual(self.delegate()["status"], "success")
+
+    def test_reinject_still_continues_for_anyone_who_asks_for_it(self):
+        self.steps([{"write": {"out.py": "wrong\n"}, "compact": "post"},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(on_compaction="reinject")
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["reinjects"], 1)
+
+    def test_the_policy_reaches_the_hook_as_an_env_var(self):
+        # compact_hook.py decides whether to block from QCOMPACT_POLICY; if the
+        # engine stops passing it, the hook silently reverts to never blocking.
+        import inspect
+        from qd import invoke
+        src = inspect.getsource(invoke.run_executor)
+        self.assertIn("QCOMPACT_POLICY", src)
 
     def test_prefilter_output_capped_at_2000(self):        # survivor 2
         self.enable_prefilter()

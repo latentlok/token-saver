@@ -41,10 +41,11 @@ TOOL = json.loads(r'''
       "on_compaction": {
         "type": "string",
         "enum": [
+          "refuse",
           "reinject",
           "discard"
         ],
-        "description": "If the worker's session compacts mid-run: 'reinject' (default; keep the warm session) or 'discard' (cold restart; safest -- compaction is the documented fabrication trigger)."
+        "description": "If the worker's session compacts mid-run: 'refuse' (default -- stop, trust nothing from the run, hand back so you can split the task), 'reinject' (continue on the summarised history, keeping the warm session) or 'discard' (cold restart). Compaction is the documented fabrication trigger; only 'refuse' declines to build on it."
       },
       "session_id": {
         "type": "string",
