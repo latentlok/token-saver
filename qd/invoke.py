@@ -12,6 +12,22 @@ import tempfile
 COMPACT_DIR = os.environ.get("QCOMPACT_DIR") or os.path.expanduser(
     "~/.qwen-delegate/compacted"
 )
+
+# Fraction of the context window at which the executor may auto-compact. 1.0 = "as
+# late as this executor permits", which is the only setting consistent with the
+# refuse policy: a compaction ends the run, so every token before the trigger is
+# work that gets to happen. Upstream's default is 0.85.
+#
+# This number is rarely what decides the trigger. COMPACTION_RESERVE below is
+# subtracted from the window unconditionally, and on any window under ~220k it is
+# the binding term -- see compaction_ceiling().
+COMPACTION_PCT = 1.0
+
+# SUMMARY_RESERVE (20,000: room to generate the summary) + AUTOCOMPACT_BUFFER
+# (13,000), both hardcoded in qwen. No setting reaches them, so no configuration
+# can move a compaction later than `window - 33,000`. Raising the *window* is the
+# only lever -- and only if the endpoint really serves it.
+COMPACTION_RESERVE = 33_000
 HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "scoped_hook.py")
 HOOK_COMPACT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -54,7 +70,7 @@ def _cleanup(td):
 
 
 def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
-                 verify=None, shell_allow=None, suffix=""):
+                 verify=None, shell_allow=None, suffix="", compaction_policy=None):
     """Invoke the Qwen Code executor and parse the result.
 
     Return (text, denials, session_id, err, meta).
@@ -75,6 +91,21 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
                 {"type": "command", "command": f"python3 {HOOK_SCRIPT}"},
             ]},
         ]
+    # Where auto-compaction fires, per run. Pushed as late as the setting allows:
+    # under the refuse policy a compaction ENDS the run, so every token before the
+    # trigger is work that gets to happen, and every token after it is work nobody
+    # would have trusted anyway. A profile may override with compaction_threshold.
+    threshold = profile.get("compaction_threshold", COMPACTION_PCT)
+    target = profile.get("compaction_at")
+    if target:
+        # An absolute token target beats a fraction: it is what a caller actually
+        # means. Unreachable targets are not clamped into silence -- they resolve
+        # to the latest the reserve allows, and doctor reports the gap.
+        pct, _ = compaction_pct_for(context_window(), target)
+        threshold = pct
+    if threshold:
+        hooks_dict.setdefault("context", {})["autoCompactThreshold"] = float(threshold)
+
     if profile["settings_overlay"] is not None:
         for key, value in profile["settings_overlay"].items():
             hooks_dict[key] = value
@@ -87,6 +118,7 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
     env = dict(os.environ)
     env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
     env["QCOMPACT_DIR"] = COMPACT_DIR
+    env["QCOMPACT_POLICY"] = compaction_policy or "reinject"
     env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = sys_settings
     env.update(profile["env"])
     if mode == "scoped":
@@ -117,6 +149,9 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
     text, denials, sid = parse_qwen_json(proc.stdout)
     meta = {"peak": peak_context(proc.stdout), "stats": parse_stats(proc.stdout),
             "blocked": blocked}
+    failure = result_error(proc.stdout)
+    if failure:
+        return None, denials, sid, failure, meta
     if text is None:
         tail = (proc.stderr or proc.stdout or "").strip()[-800:]
         return None, [], sid, f"unparseable output (exit {proc.returncode}): {tail}", meta
@@ -139,17 +174,52 @@ def context_window():
     return None
 
 
-def compaction_thresholds(window):
+def compaction_thresholds(window, pct=None):
     """
-    Mirrors qwen's computeThresholds() (chunks/chunk-NJOFRXTM.js):
-      DEFAULT_PCT=0.85, SUMMARY_RESERVE=20000, AUTOCOMPACT_BUFFER=13000, WARN_BUFFER=20000
+    Mirrors qwen's computeThresholds(window, pct) (chunks/chunk-NJOFRXTM.js):
+      SUMMARY_RESERVE=20000, AUTOCOMPACT_BUFFER=13000, WARN_BUFFER=20000.
+    Upstream DEFAULT_PCT is 0.85; we configure COMPACTION_PCT, and this mirror
+    defaults to the same constant so the receipt's warnings describe the trigger we
+    actually set rather than the one we replaced.
+
+    THE PCT IS NOT THE ONLY GATE. An absolute ceiling of `window - 33,000` applies
+    too, and below a ~220k window it binds first -- at 196,608 the trigger sits at
+    163,608 (83.2%) whether pct is 0.85 or 0.98. Raising pct only moves anything on
+    windows large enough for the proportional term to be the smaller of the two.
+
     Compaction is LOSSY -- it summarizes history away, which can drop QWEN.md rules
     mid-task. Statelessness normally keeps us near 11%, far below these.
     """
-    effective = max(0, window - 20000)
-    ceiling = effective - 13000
-    auto = min(0.85 * window, ceiling) if ceiling > 0 else 0.85 * window
+    pct = COMPACTION_PCT if pct is None else pct
+    pct = min(1.0, max(0.0, pct))
+    ceiling = compaction_ceiling(window)
+    proportional = pct * window
+    auto = min(proportional, ceiling) if ceiling > 0 else proportional
     return max(0, auto - 20000), auto
+
+
+def compaction_ceiling(window):
+    """The LATEST token count at which auto-compaction can be made to fire.
+
+    `window - COMPACTION_RESERVE`, and no setting reaches past it. This is the
+    number to answer "can I hold N tokens before it compacts?" with -- the
+    configured pct only matters when it lands below this.
+    """
+    return max(0, window - COMPACTION_RESERVE)
+
+
+def compaction_pct_for(window, target):
+    """(pct, reachable) to put the trigger at `target` tokens on `window`.
+
+    `reachable` is False when the reserve puts `target` out of range whatever the
+    pct -- the caller must say so rather than silently configure a number that
+    cannot take effect. The window needed for a given target is
+    `target + COMPACTION_RESERVE`, actually served, not merely declared.
+    """
+    if not window or window <= 0:
+        return COMPACTION_PCT, False
+    return (min(1.0, float(target) / window),
+            float(target) <= compaction_ceiling(window))
 
 
 def peak_context(stdout):
@@ -305,6 +375,25 @@ def compaction_state(session_id):
         return 0, 0
 
 
+def compaction_counts(session_id):
+    """(completed, attempted) marker counts for a session — an absolute reading.
+
+    `attempted` counts PreCompact, which fires whether or not the block took, so
+    the refuse policy holds even on an executor that ignores the block. Compare a
+    snapshot taken before an attempt with one taken after: that attributes the
+    event to THAT attempt without any acked-counter bookkeeping, and works for a
+    fresh session (no marker file, so (0, 0)) exactly as well as a resumed one.
+    """
+    if not session_id:
+        return 0, 0
+    try:
+        with open(os.path.join(COMPACT_DIR, f"{session_id}.json")) as f:
+            state = json.load(f)
+        return (len(state.get("events") or []), len(state.get("pending") or []))
+    except Exception:
+        return 0, 0
+
+
 def was_compacted_since_ack(session_id):
     seen, acked = compaction_state(session_id)
     return seen > acked
@@ -360,6 +449,66 @@ def parse_qwen_json(stdout):
         None,
     )
     return None, [], sid
+
+
+# Truncation is a CLIENT-side cap, so it is invisible in the endpoint's config:
+# qwen-code always sends max_tokens, defaulting to 32k for a model name it does
+# not recognise (its normalize() keeps only the part after ":", so an Ollama tag
+# like "qwen3.6:27b-agent" reads as "27b-agent" and matches no known-limits
+# pattern). Thinking tokens count against that cap. When the cut lands inside a
+# tool call the call is rejected outright, so the run ends with no result --
+# which used to reach the caller as an empty success.
+_TRUNCATION_HINT = (
+    "The executor hit its OUTPUT TOKEN cap, not a server-side limit -- "
+    "qwen-code sends max_tokens itself (32k default for an unrecognised model "
+    "name), and thinking tokens count against it. This is an executor/endpoint "
+    "setting, NOT a defect in this repo: raise it with QWEN_CODE_MAX_OUTPUT_TOKENS "
+    "or `generationConfig.maxTokens` in ~/.qwen/settings.json, or ask for less "
+    "output per turn. Report this and move on -- do not debug the plugin."
+)
+
+
+def result_error(stdout):
+    """qwen's OWN failure report from the last result record, or None.
+
+    An error record carries `is_error` + `error.message` and NO `result` field,
+    so reading it like a success yields "" -- a failed run then arrived as a
+    green receipt with an empty answer, and the only honest account of what
+    went wrong (truncation, provider error) was dropped on the floor.
+    """
+    for m in reversed(_result_records(stdout)):
+        if not m.get("is_error"):
+            return None
+        msg = ((m.get("error") or {}).get("message")
+               or m.get("subtype") or "unknown error")
+        msg = str(msg).strip()[:800]
+        out = f"executor reported failure: {msg}"
+        low = msg.lower()
+        if "truncat" in low or "max_tokens" in low or "max tokens" in low:
+            out += f"\n{_TRUNCATION_HINT}"
+        return out
+    return None
+
+
+def _result_records(stdout):
+    """Every `type: "result"` record in a run's stdout, in order."""
+    stdout = (stdout or "").strip()
+    if not stdout:
+        return []
+    try:
+        parsed = json.loads(stdout)
+        msgs = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        msgs = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msgs.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return [m for m in msgs if isinstance(m, dict) and m.get("type") == "result"]
 
 
 def truncate(s, cap):

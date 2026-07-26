@@ -9,6 +9,39 @@ from qd import refs
 RESULT_CAP = 3000
 VERIFY_CAP = 2500
 
+# A run past this many INPUT tokens is reported as heavy. Set where a 27B-class
+# local model spends roughly an hour of GPU: enough headroom that ordinary work
+# never trips it, low enough that a runaway agentic loop does.
+BURN_WARN_TOKENS = 3_000_000
+
+
+def burn_line(ctx):
+    """One BURN: line — input tokens, calls, and the per-call context average.
+
+    On a local endpoint COST is $0.0000 whatever happens, so a run that made 218
+    calls averaging 87k of context looked exactly like one that made four. The
+    spend is real (GPU minutes, and the queue behind it) and nothing in the
+    receipt showed it. Input is reported first because that is where it goes:
+    a local endpoint does no cross-call prompt caching that these counters can
+    see, so every turn re-sends the whole accumulated context and a long
+    agentic loop costs roughly the SQUARE of its length.
+    """
+    cum = ctx.get("cum") or {}
+    tokens = cum.get("tokens") or {}
+    tin = int(tokens.get("prompt") or 0)
+    tout = int(tokens.get("completion") or 0)
+    if not tin and not tout:
+        return None
+    turns = int(cum.get("turns") or 0)
+    parts = [f"BURN: {tin:,} in / {tout:,} out"]
+    if turns:
+        parts.append(f"{turns} calls, ~{tin // turns:,} ctx/call")
+    line = ", ".join(parts)
+    if tin >= BURN_WARN_TOKENS:
+        line += (" -- HEAVY. Free in money, not in time; a loop this long also "
+                 "risks compaction. Split the task into smaller delegations.")
+    return line
+
 HANDOFF_SUFFIX = """
 
 ---
@@ -62,6 +95,24 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if not clean:
         for t in trail:
             body.append(f"  - {t}")
+
+    # The one status that is not a failure of the work: the task was too big to hold.
+    # Say what to do about it, because "retry" is the wrong instinct here -- the same
+    # task will reach the same wall, and the worker's post-compaction output is the
+    # exact thing that must not be trusted or graded.
+    if status == "compaction_refused":
+        blocked = ctx.get("compaction_blocked")
+        body.append(
+            "COMPACTION: this run hit the executor's context limit and was STOPPED "
+            + ("before the summary was made. "
+               if blocked else
+               "after the history was summarised (the block was not honoured). ")
+            + "Nothing here is trusted -- no gate was run and any work on disk is "
+              "partial. Do NOT re-delegate this task unchanged: split it into "
+              "smaller units with their own gates, or narrow its scope. "
+              "`on_compaction=\"reinject\"` restores the old continue-anyway "
+              "behaviour if you truly want it."
+        )
 
     # R3: what a green here MEANS depends on who authored the gate -- say so.
     if ctx.get("trust") == "self":
@@ -314,6 +365,10 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if cost_usd > 0:
         c2_blocks.append(
             (f"COST: ${cost_usd:.4f} ({executor or 'unknown'})", True, 4))
+
+    burn = burn_line(ctx)
+    if burn:
+        c2_blocks.append((burn, True, 5))
 
     # Insert C2 blocks before the "--- qwen result ---" line.
     tail = [f"--- qwen result ---\n{truncate(strip_handoff(result_text), RESULT_CAP)}"]

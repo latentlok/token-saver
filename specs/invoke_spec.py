@@ -36,6 +36,7 @@ Run:  python3 specs/invoke_spec.py
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -183,6 +184,17 @@ class SettingsMerge(Fixture):
         self.assertEqual(env.get("QGATE_VERIFY"), "python3 -c 'pass'")
         self.assertEqual(json.loads(env.get("QGATE_EXTRA", "[]")), ["^make$"])
 
+    def test_compaction_threshold_reaches_the_executor_settings(self):
+        self.run_exec()
+        s = self.recorded("settings.json")
+        self.assertEqual(s["context"]["autoCompactThreshold"],
+                         invoke.COMPACTION_PCT)
+
+    def test_profile_can_override_the_threshold(self):
+        self.run_exec(profile=self.profile(compaction_threshold=0.6))
+        s = self.recorded("settings.json")
+        self.assertEqual(s["context"]["autoCompactThreshold"], 0.6)
+
     def test_temp_settings_cleaned_up_after_run(self):
         self.run_exec()
         env = self.recorded("env.json")
@@ -217,6 +229,80 @@ class Failures(Fixture):
         text, _, _, err, _ = self.run_exec(profile=p)
         self.assertIsNone(text)
         self.assertIn("unparseable", err)
+
+
+class CompactionHook(unittest.TestCase):
+    """compact_hook.py end-to-end: it is the only thing inside the executor that
+    can see a compaction coming, and the refusal policy rests on it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.hook = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "compact_hook.py")
+
+    def fire(self, event, policy="reinject", sid="s-1", **extra):
+        payload = {"hook_event_name": event, "session_id": sid,
+                   "trigger": "auto"}
+        payload.update(extra)
+        env = dict(os.environ, QCOMPACT_DIR=self.dir, QCOMPACT_POLICY=policy)
+        return subprocess.run([sys.executable, self.hook], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+
+    def state(self, sid="s-1"):
+        with open(os.path.join(self.dir, f"{sid}.json")) as f:
+            return json.load(f)
+
+    def test_precompact_under_refuse_exits_2_to_block(self):
+        # 2 is qwen's documented "block compaction" code. Best effort upstream,
+        # but sending anything else guarantees the compaction proceeds.
+        p = self.fire("PreCompact", policy="refuse")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("refused", p.stderr.lower())
+
+    def test_precompact_under_reinject_does_not_block(self):
+        self.assertEqual(self.fire("PreCompact", policy="reinject").returncode, 0)
+
+    def test_precompact_records_pending_not_events(self):
+        # `events` means a summary HAPPENED -- it arms re-injection. A blocked
+        # compaction recorded there would make the server treat surviving history
+        # as summarised.
+        self.fire("PreCompact", policy="refuse")
+        st = self.state()
+        self.assertEqual(len(st["pending"]), 1)
+        self.assertEqual(st.get("events"), [])
+
+    def test_postcompact_records_events_and_never_blocks(self):
+        p = self.fire("PostCompact", policy="refuse", compact_summary="x" * 40)
+        self.assertEqual(p.returncode, 0)          # too late to block
+        st = self.state()
+        self.assertEqual(len(st["events"]), 1)
+        self.assertEqual(st["events"][0]["summary_chars"], 40)
+
+    def test_summary_text_itself_is_never_written_to_the_marker(self):
+        secret = "CUSTOMER_SECRET_" + "y" * 30
+        self.fire("PostCompact", compact_summary=secret)
+        with open(os.path.join(self.dir, "s-1.json")) as f:
+            self.assertNotIn("CUSTOMER_SECRET", f.read())
+
+    def test_counts_read_both_lists(self):
+        from qd import invoke as inv
+        saved, inv.COMPACT_DIR = inv.COMPACT_DIR, self.dir
+        try:
+            self.assertEqual(inv.compaction_counts("s-1"), (0, 0))   # no marker
+            self.fire("PreCompact", policy="refuse")
+            self.assertEqual(inv.compaction_counts("s-1"), (0, 1))
+            self.fire("PostCompact")
+            self.assertEqual(inv.compaction_counts("s-1"), (1, 1))
+            self.assertEqual(inv.compaction_counts(None), (0, 0))
+        finally:
+            inv.COMPACT_DIR = saved
+
+    def test_a_malformed_payload_never_breaks_the_run(self):
+        env = dict(os.environ, QCOMPACT_DIR=self.dir, QCOMPACT_POLICY="refuse")
+        p = subprocess.run([sys.executable, self.hook], input="not json",
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0)
 
 
 class PureFunctions(unittest.TestCase):
@@ -265,11 +351,91 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(int(auto), 163608)
         self.assertEqual(int(warn), 143608)
 
+    def test_absolute_ceiling_binds_below_a_220k_window(self):
+        # The headline case: at 196,608 the configured pct is IRRELEVANT because
+        # window-33,000 is the smaller term. A reading of this that credits the pct
+        # would report a trigger ~29k tokens later than the real one.
+        for pct in (0.85, 0.98, 1.0):
+            _, auto = invoke.compaction_thresholds(196608, pct)
+            self.assertEqual(int(auto), 163608, f"pct={pct}")
+
+    def test_pct_binds_on_a_large_enough_window(self):
+        _, at_85 = invoke.compaction_thresholds(1_000_000, 0.85)
+        _, at_98 = invoke.compaction_thresholds(1_000_000, 0.98)
+        self.assertEqual(int(at_85), 850_000)
+        self.assertEqual(int(at_98), 967_000)      # ceiling is 967,000 here
+
+    def test_default_pct_is_the_one_we_configure_not_upstreams(self):
+        # If these drift apart, every CONTEXT warning describes a trigger the
+        # executor is not using.
+        self.assertEqual(invoke.compaction_thresholds(1_000_000),
+                         invoke.compaction_thresholds(1_000_000,
+                                                      invoke.COMPACTION_PCT))
+
+    def test_pct_is_clamped_not_trusted(self):
+        _, high = invoke.compaction_thresholds(1_000_000, 5.0)
+        self.assertEqual(int(high), 967_000)       # clamped to 1.0, then ceiling
+        _, low = invoke.compaction_thresholds(1_000_000, -1)
+        self.assertEqual(int(low), 0)
+
+    def test_ceiling_is_the_answer_to_how_late_can_it_compact(self):
+        self.assertEqual(invoke.compaction_ceiling(196_608), 163_608)
+        self.assertEqual(invoke.compaction_ceiling(227_000), 194_000)
+        self.assertEqual(invoke.compaction_ceiling(10_000), 0)   # never negative
+
+    def test_a_reachable_target_resolves_to_its_exact_pct(self):
+        pct, ok = invoke.compaction_pct_for(227_000, 194_000)
+        self.assertTrue(ok)
+        _, auto = invoke.compaction_thresholds(227_000, pct)
+        self.assertEqual(int(auto), 194_000)
+
+    def test_an_unreachable_target_is_reported_not_silently_clamped(self):
+        # 194,000 on a 196,608 window: the reserve makes it impossible, and a
+        # caller that believes it was configured will size tasks on a number the
+        # executor never uses.
+        pct, ok = invoke.compaction_pct_for(196_608, 194_000)
+        self.assertFalse(ok)
+        _, auto = invoke.compaction_thresholds(196_608, pct)
+        self.assertEqual(int(auto), 163_608)       # what it will REALLY be
+
+    def test_target_with_no_known_window_is_unreachable_not_a_crash(self):
+        pct, ok = invoke.compaction_pct_for(None, 194_000)
+        self.assertFalse(ok)
+        self.assertEqual(pct, invoke.COMPACTION_PCT)
+
     def test_parse_qwen_json_jsonl_fallback_and_sid(self):
         jsonl = '{"type":"assistant","session_id":"s2"}\n{"broken\n'
         text, denials, sid = invoke.parse_qwen_json(jsonl)
         self.assertIsNone(text)
         self.assertEqual(sid, "s2")
+
+    def test_error_result_is_a_failure_not_an_empty_success(self):
+        # An error record carries is_error + error.message and NO "result"
+        # field. Read like a success it yields "" -- the run reads GREEN with
+        # an empty answer and qwen's own account of why is dropped. That is
+        # the silent-failure class this system exists to catch.
+        out = json.dumps([{"type": "result", "subtype": "error_during_execution",
+                           "is_error": True, "session_id": "s-9",
+                           "error": {"message": "boom in the executor"}}])
+        err = invoke.result_error(out)
+        self.assertIn("boom in the executor", err)
+        self.assertIn("executor reported failure", err)
+
+    def test_truncation_error_names_the_cause_and_forbids_debugging(self):
+        # The cap is CLIENT-side (qwen-code sends max_tokens itself), so a
+        # reader who trusts the endpoint config concludes "no cap set" and
+        # goes hunting for a bug in the repo. The receipt must say where the
+        # limit lives and that it is not this codebase.
+        out = json.dumps({"type": "result", "is_error": True,
+                          "error": {"message": "response truncated: max_tokens"}})
+        err = invoke.result_error(out)
+        self.assertIn("QWEN_CODE_MAX_OUTPUT_TOKENS", err)
+        self.assertIn("do not debug the plugin", err.lower())
+
+    def test_successful_result_is_not_an_error(self):
+        self.assertIsNone(invoke.result_error(RESULT_JSON))
+        self.assertIsNone(invoke.result_error(""))
+        self.assertIsNone(invoke.result_error("not json at all"))
 
     def test_truncate(self):
         self.assertEqual(invoke.truncate("abc", 10), "abc")
