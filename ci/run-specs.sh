@@ -8,6 +8,13 @@
 # so we write a minimal stub (the dev window, 196608) to make that assertion bind.
 set -uo pipefail
 
+# Run under a THROWAWAY HOME. This script writes a stub ~/.qwen/settings.json and
+# a --global git identity; on a CI runner that is harmless, but run locally it
+# silently overwrote a developer's real qwen config -- API key, endpoint and all.
+# A test suite that eats your credentials on a bad day is not a test suite.
+export HOME="$(mktemp -d)"
+echo "specs running under HOME=$HOME (throwaway)"
+
 git config --global user.email "ci@token-saver.test"
 git config --global user.name "token-saver CI"
 
@@ -22,7 +29,13 @@ json.dump(
 PY
 
 fail=0
-for f in specs/*_spec.py; do
+
+# Worker-written tests (*_qwen.py) run here too. They are never a delegation
+# GATE -- that stays the Claude-authored spec -- but once their work is
+# accepted they are regression coverage like any other, and a test file that
+# ran once and is never run again protects nothing.
+for f in specs/*_spec.py qd/*_qwen.py; do
+  [ -e "$f" ] || continue
   case "$f" in
     */dispatch_spec.py) echo "skip (flaky): $f"; continue ;;
   esac

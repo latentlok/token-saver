@@ -48,23 +48,37 @@ The saving grows with the size of your codebase, because Claude never reads it.
 
 ## Install
 
-Two commands. Nothing to build, no installer:
+**Step 1 — add the marketplace.** In your terminal:
 
     claude plugin marketplace add latentlok/token-saver
+
+**Step 2 — install the plugin.**
+
     claude plugin install token-saver@token-saver
 
-The name looks doubled because it is: this repo *is* its own marketplace, so the id is
-`<plugin>@<marketplace>` and both halves happen to be called `token-saver`.
+The name looks doubled because it is: this repo *is* its own marketplace. The id is the
+plugin name, then `@`, then the marketplace name — and both happen to be `token-saver`.
 
-Restart Claude Code, and you're done.
+**Step 3 — restart Claude Code.** That's the install done.
 
-### Check it worked
+**Step 4 — check it worked.**
 
     claude plugin list
     claude plugin details token-saver
 
-You should see version `0.3.0`, status `enabled`, and an inventory of **1 MCP server**
+You should see version `0.4.0`, status `enabled`, and an inventory of **1 MCP server**
 (`qwen-delegate`), **2 agents**, and **5 skills**.
+
+**Step 5 — let it check your machine.** The first Claude Code session after installing
+runs a one-off check of your local model setup and speaks up only if something will
+actually cause trouble. Silence means you're set. To run it yourself at any time:
+
+    /token-saver:doctor
+
+**Step 6 — on Claude Code older than 2.1.203 only**, add this to
+`~/.claude/settings.json`, or long jobs time out after 30 minutes:
+
+    "env": { "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "7200000" }
 
 ### Update
 
@@ -75,31 +89,13 @@ the plugin:
     claude plugin update token-saver@token-saver
 
 Use the full `token-saver@token-saver` here. The bare name fails with
-`Plugin "token-saver" not found`. Restart Claude Code to apply the new version.
+`Plugin "token-saver" not found`. Restart Claude Code to apply the new version. The
+machine check re-runs once after an update, so a new requirement never passes silently.
 
 ### Uninstall
 
     claude plugin uninstall token-saver@token-saver
     claude plugin marketplace remove token-saver
-
-### Or run it from a clone instead
-
-If you want to edit the plugin yourself, skip the marketplace and point Claude Code
-straight at a checkout:
-
-    git clone https://github.com/latentlok/token-saver.git ~/projects/token-saver
-    claude --plugin-dir ~/projects/token-saver
-
-Changes then apply with `/reload-plugins` in the same session, and `git pull` is the
-update. Don't do both — a marketplace install and a `--plugin-dir` clone will load the
-plugin twice.
-
-### One extra step on old versions
-
-**On Claude Code older than 2.1.203**, also add this to `~/.claude/settings.json`, or
-long jobs will time out after 30 minutes:
-
-    "env": { "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "7200000" }
 
 ## Nothing to set up per project
 
@@ -110,9 +106,14 @@ say so explicitly:
     /offload how does auth flow from the request handler to the token check?
     /offload make the CLI in ./tools usable without PYTHONPATH
 
+If it can't work out how to run your tests, tell it once in `.qwen-delegate.json` —
+see [docs/USAGE.md](docs/USAGE.md).
+
 ## Read more
 
 - **[docs/OVERVIEW.md](docs/OVERVIEW.md)** — how it works, the architecture, and why every
   guard in it exists
-- **[docs/USAGE.md](docs/USAGE.md)** — day-to-day driving, the trust dial, recipes
+- **[docs/USAGE.md](docs/USAGE.md)** — day-to-day driving, every setting, working from a
+  clone, recipes
+- **[docs/CHANGELOG.md](docs/CHANGELOG.md)** — what changed and why
 - **[docs/FINDINGS.md](docs/FINDINGS.md)** — the evidence behind every number above

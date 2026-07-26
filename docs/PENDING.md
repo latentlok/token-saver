@@ -51,3 +51,48 @@ is model inference, baseline prefill ~19–22k/session, Ollama serialized at 1.
 Priority order if wall-clock starts to matter: engine swap → speculative decoding →
 quant check, in that order — all three are re-validated for free by re-running the
 existing benchmark arms (`grow`, `existing_large`, `bugs`).
+
+## Done (was parked): compaction is refused, not survived
+
+Shipped as `on_compaction="refuse"` (the default) — the run stops on a compaction,
+its output is discarded ungraded, and the receipt tells the orchestrator to split
+the task. `compact_hook.py` also exits 2 on PreCompact to ask the executor to block.
+
+**What could not be done:** auto-compaction cannot be turned OFF. qwen's
+`autoCompactThreshold` is a fraction of the window with a 0.01 floor, so it only
+moves the trigger; and the auto-compaction call site reads only the hook's
+additionalContext, so the documented "exit 2 blocks compaction" is unverified there.
+The stop is the mechanism that holds; the block is best-effort. If upstream ever
+honours it, the refusal gets cheaper (no summary is ever built) with no code change.
+
+Still open: `compaction_threshold` on a profile is unset by default. Lowering it
+buys an earlier stop with more headroom, but ONLY if the block is honoured —
+otherwise it just compacts more often. Measure the block on a real run before
+setting it.
+
+## Open after 0.4.0
+
+Carried from the release notes so they stay visible:
+
+- **Streaming loses tool and line counts.** The streaming adapter's result record
+  omits `stats` entirely. Tokens are recovered from the top-level `usage`, but
+  `tools` and `lines_added`/`lines_removed` read 0 in stream mode with no way to
+  tell that from a measured zero — the exact ambiguity this release spent the day
+  removing elsewhere.
+- **The `usage` fallback has never run for real.** Spec-covered only; it gets its
+  first live exercise the moment a delegation attaches a limit and streams.
+- **dispatch_spec is excluded from CI.** Its assertions are wall-clock based and
+  flake under load, so the cross-process endpoint locking added in 0.4.0 is not
+  covered by the automated suite. Either make the assertions load-independent or
+  split the timing tests out from the protocol ones.
+- **`workers` (best-of-N) is advertised and not implemented.** It is in the tool
+  schema and documented in the delegation skill; `qd/engine.py` never reads it.
+  Either build it or remove the claim — an advertised parameter that silently does
+  nothing is the same class of defect as a metric that reads 0 without measuring.
+- **Per-token records would replace the decode-rate knob.** Requesting partial
+  messages gives sub-second stall granularity instead of hours, making
+  `decode_tps` unnecessary. Cost: they must be filtered out of both the on_line
+  callback and the accumulated buffer, or they become noise and memory.
+- **`detect_test_cmd` still cannot place this repo.** 0.4.0 added `test_command` /
+  `test_dir` so any project can say where its tests are, but the detectors
+  themselves gained nothing for a `specs/*_spec.py` layout.

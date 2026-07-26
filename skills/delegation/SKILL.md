@@ -57,9 +57,26 @@ Same loop. Write the HLD, commit every inter-module contract as a `*_spec.*` fil
 **before any code**, then delegate bottom-up (each unit gated on its own spec + its
 dependencies'). Contracts-first is what makes the pieces compose.
 
+## Serial by default (`dispatch`)
+
+One local endpoint is one GPU. Concurrent requests do not each get a private
+context — on Ollama the loaded context is split across parallel slots — so fan-out
+buys wall-clock at the price of a shorter effective context per request, which is
+how a turn comes back truncated mid tool-call. Out of the box every endpoint holds
+**one slot**, and that slot is held machine-wide (a file lock), not just within
+this session — two Claude sessions pointed at one box now queue instead of
+colliding.
+
+Set `"dispatch": "serial"` in `.qwen-delegate.json` (or `~/.qwen-delegate/config.json`)
+to pin that even where an endpoint declares `parallel_max > 1`: batches then run
+their items in order, and every call queues for the single slot. `"parallel"`
+honours the declared capacity. Anything else reads as serial — a typo must not
+turn concurrency on.
+
 ## Fan-out (parallel builds)
 
-Pin the contracts, then either:
+Only worth it on real capacity (`parallel_max > 1` and `dispatch` not serial);
+otherwise these queue and buy nothing. Pin the contracts, then either:
 - **`batch=[{task, verify, ...}, ...]`** — N delegations in ONE call, fanned across
   worktrees server-side. The reliable way to parallelize from one session.
 - **`worktree="auto"`** per call — isolates each build on a `qwen/<id>` branch; the
@@ -101,11 +118,16 @@ Estimate, then set ~3× — p90 ran 3× median, and over-setting costs nothing.
 session re-reads QWEN.md, which is what makes the rules bind. Resume only for a tight
 follow-up on the SAME task, same cwd.
 
-**on_compaction:** compaction is the documented fabrication trigger. `reinject` (default)
-keeps the warm session cheaply; `discard` restarts cold and is the only option that
-removes the corrupted summary — choose it when a false "already did that" is expensive.
-For any run that might compact, put critical rules in the TASK TEXT — QWEN.md does not
-survive a compaction.
+**on_compaction:** compaction is the documented fabrication trigger, so the default is
+**`refuse`** — the run STOPS the moment one is attempted, nothing from it is graded, and
+you get the call back. That receipt is not a retry signal: the same task will hit the
+same wall. **Split it into smaller units with their own gates**, or narrow the scope.
+The plugin also asks the executor to block the compaction (PreCompact exit 2, which
+qwen documents but does not reliably honour) — treat that as a bonus, not the mechanism;
+the stop is what you can count on. `reinject` (continue on the summarised history) and
+`discard` (cold restart) are still there if you deliberately want them. For any run you
+choose to continue after a compaction, put critical rules in the TASK TEXT — QWEN.md
+does not survive one.
 
 **workers (best-of-N):** N independent candidates, first gate-pass wins. Free tokens but
 N× wall time; needs `verify` and a committed base.
@@ -139,6 +161,24 @@ Run the loop **inline** for interactive work and small counts. Hand it to the
 **qwen-manager** subagent when isolation earns its preamble: a multi-unit build whose
 verdicts would silt up this session, parallel fan-out, or work that should run off to the
 side while you keep talking to the user.
+
+## `STATUS: error` is the executor, not this repo — do not go debugging
+
+An error receipt means the *worker* failed (output-token truncation, endpoint
+down, timeout, unparseable run) — it is not a symptom of the code you were asked
+to change, and it is not a bug in the plugin to be traced. The receipt names the
+cause and the setting that fixes it. **Relay it and move on**: retry once with a
+tighter scope or a longer `timeout_sec`, otherwise do the work inline or hand the
+line to the user. Reading plugin source, tailing logs, or probing the endpoint to
+"find out why" spends exactly the context this system exists to save.
+
+Truncation specifically: the cap is **client-side** — qwen-code sends `max_tokens`
+itself (32k default for a model name it does not recognise; its normaliser keeps
+only the part after `:`, so an Ollama tag like `qwen3.6:27b-agent` reads as
+`27b-agent` and matches nothing), and thinking tokens count against it. Nothing on
+the inference server shows this. Fix is `QWEN_CODE_MAX_OUTPUT_TOKENS` or
+`generationConfig.maxTokens` in `~/.qwen/settings.json`, or ask for less output per
+turn — all user-side.
 
 ## Escalation ladder (build won't converge)
 

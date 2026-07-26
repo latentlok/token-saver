@@ -60,6 +60,41 @@ def _machine_path():
     )
 
 
+def _machine_config_path():
+    return os.environ.get(
+        "QWEN_DELEGATE_CONFIG",
+        os.path.expanduser("~/.qwen-delegate/config.json"),
+    )
+
+
+def dispatch_mode(cwd):
+    """The configured delegation dispatch policy, or None if nobody set one.
+
+    Precedence: project .qwen-delegate.json `dispatch` > machine
+    ~/.qwen-delegate/config.json `dispatch`.
+
+    `"serial"` pins every endpoint to ONE in-flight request whatever its
+    parallel_max says -- one local endpoint is one GPU, and concurrent requests
+    do not get a private context each (on Ollama the loaded context is split
+    across parallel slots), so fan-out buys wall-clock at the price of a
+    shorter effective context per request, which is how a turn gets truncated
+    mid tool-call.
+
+    Unset is not "parallel": with no endpoints section every endpoint already
+    holds one slot, so the out-of-the-box behaviour is serial. Setting this
+    only matters where an endpoint declares parallel_max > 1 -- there, an
+    explicit `"serial"` overrules it and `"parallel"` leaves it alone. Any
+    other value reads as "serial": a typo must not turn concurrency on.
+    """
+    for path in (os.path.join(cwd or ".", ".qwen-delegate.json"),
+                 _machine_config_path()):
+        data, _ = _load(path)
+        mode = (data or {}).get("dispatch")
+        if mode:
+            return "parallel" if str(mode).strip().lower() == "parallel" else "serial"
+    return None
+
+
 def _load(config_path):
     """Load and parse a JSON file. Returns (data, error_message)."""
     if not os.path.isfile(config_path):
@@ -125,7 +160,21 @@ def resolve(cwd, call_executor=None):
 
     Precedence: call_executor arg > project .qwen-delegate.json 'executor'
     > machine file 'default' > builtin qwen-local.
+
+    The resolved profile carries the EFFECTIVE dispatch policy (see
+    dispatch_mode): a configured "serial" pins the endpoint to one slot
+    whatever its parallel_max says, enforced here -- the one place every
+    caller already reads -- so no call site can route around the policy.
     """
+    profile = _resolve_profile(cwd, call_executor)
+    if dispatch_mode(cwd) == "serial":
+        profile["endpoint_cfg"]["parallel_max"] = 1
+    profile["dispatch"] = (
+        "serial" if profile["endpoint_cfg"]["parallel_max"] <= 1 else "parallel")
+    return profile
+
+
+def _resolve_profile(cwd, call_executor=None):
     mp_path = _machine_path()
 
     # Level 1: explicit call argument

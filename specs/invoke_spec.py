@@ -36,8 +36,10 @@ Run:  python3 specs/invoke_spec.py
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -53,7 +55,21 @@ if sp and os.path.isfile(sp):
     shutil.copy(sp, os.path.join(out, "settings.json"))
 if os.environ.get("STUB_SLEEP"):
     time.sleep(float(os.environ["STUB_SLEEP"]))
-sys.stdout.write(os.environ.get("STUB_STDOUT", "[]"))
+# Streaming mode: one record per line, flushed, with a beat between them, so a
+# reader that only sees output at exit is distinguishable from one that does not.
+if os.environ.get("STUB_STREAM"):
+    for line in json.loads(os.environ["STUB_STREAM"]):
+        sys.stdout.write(json.dumps(line) + "\n")
+        sys.stdout.flush()
+        time.sleep(float(os.environ.get("STUB_GAP", "0.05")))
+# Fill stderr NOBODY drains in the naive implementation. Well past a 64KB pipe
+# buffer: with a single-pipe reader the child blocks here forever and the test
+# hangs. This is the case a small stub would never reach.
+if os.environ.get("STUB_STDERR_BYTES"):
+    sys.stderr.write("x" * int(os.environ["STUB_STDERR_BYTES"]))
+    sys.stderr.flush()
+if not os.environ.get("STUB_STREAM"):
+    sys.stdout.write(os.environ.get("STUB_STDOUT", "[]"))
 """
 
 RESULT_JSON = json.dumps([
@@ -183,6 +199,17 @@ class SettingsMerge(Fixture):
         self.assertEqual(env.get("QGATE_VERIFY"), "python3 -c 'pass'")
         self.assertEqual(json.loads(env.get("QGATE_EXTRA", "[]")), ["^make$"])
 
+    def test_compaction_threshold_reaches_the_executor_settings(self):
+        self.run_exec()
+        s = self.recorded("settings.json")
+        self.assertEqual(s["context"]["autoCompactThreshold"],
+                         invoke.COMPACTION_PCT)
+
+    def test_profile_can_override_the_threshold(self):
+        self.run_exec(profile=self.profile(compaction_threshold=0.6))
+        s = self.recorded("settings.json")
+        self.assertEqual(s["context"]["autoCompactThreshold"], 0.6)
+
     def test_temp_settings_cleaned_up_after_run(self):
         self.run_exec()
         env = self.recorded("env.json")
@@ -217,6 +244,315 @@ class Failures(Fixture):
         text, _, _, err, _ = self.run_exec(profile=p)
         self.assertIsNone(text)
         self.assertIn("unparseable", err)
+
+
+class Streaming(Fixture):
+    """Phase 1 of streamed execution: records are read AS THEY ARRIVE, and the
+    reader can stop the run. Load-bearing claims, worst-first:
+
+      1. Both pipes are drained concurrently. A child that writes more to
+         stderr than a pipe buffer holds deadlocks against a single-pipe
+         reader -- and only at volume, so the small-output tests all pass
+         while a real 19M-token run hangs.
+      2. Streaming changes WHEN we read, not WHAT: the accumulated output
+         parses to the same result the batch format produced, so every parser
+         and every receipt downstream is untouched.
+      3. Lines reach the callback before the process exits (otherwise this is
+         a refactor with no observable behavior, and nothing to gate).
+      4. A callback may stop the run, and the receipt says WE stopped it --
+         blaming the executor for our decision sends someone debugging it.
+      5. An unrecognised argv degrades to batch rather than refusing to run.
+    """
+
+    def stream_profile(self, records, **over):
+        env = {"STUB_OUT": self.out, "STUB_STREAM": json.dumps(records)}
+        env.update(over.pop("env", {}))
+        return self.profile(env=env, **over)
+
+    def test_argv_switches_to_the_streaming_format(self):
+        argv = invoke.stream_argv(["qwen", "-p", "T", "-o", "json", "-r", "s"])
+        self.assertEqual(argv[4], "stream-json")
+        # ...and the long spelling
+        self.assertEqual(
+            invoke.stream_argv(["qwen", "--output-format", "json"])[2],
+            "stream-json")
+
+    def test_unrecognised_argv_is_left_alone(self):
+        # Degrade to batch; never refuse to run over an output flag.
+        argv = ["qwen", "-p", "T"]
+        self.assertEqual(invoke.stream_argv(argv), argv)
+
+    def test_batches_when_nobody_is_watching(self):
+        # Streaming costs the tool and line counts (the streaming adapter's
+        # result record carries no `stats` at all). A caller with no on_line
+        # buys nothing with that, so it must not pay it.
+        self.run_exec()
+        self.assertNotIn("stream-json", self.recorded("argv.json"))
+
+    def test_streams_when_a_callback_is_attached(self):
+        self.run_exec(on_line=lambda r: None)
+        self.assertIn("stream-json", self.recorded("argv.json"))
+
+    def test_a_profile_can_opt_out(self):
+        self.run_exec(profile=self.profile(stream=False), on_line=lambda r: None)
+        self.assertNotIn("stream-json", self.recorded("argv.json"))
+
+    def test_streamed_tokens_fall_back_to_the_result_usage(self):
+        # Measured against a real -o stream-json run: the result record has
+        # duration_ms / num_turns / usage / permission_denials / result and NO
+        # stats. Without this fallback a streamed run reports 0 tokens, which
+        # silently voids BURN, COST, and any budget built on them.
+        streamed = json.dumps({
+            "type": "result", "result": "done", "session_id": "s-1",
+            "duration_ms": 48995, "num_turns": 7,
+            "usage": {"input_tokens": 1_200_000, "output_tokens": 3_400},
+        })
+        st = invoke.parse_stats(streamed)
+        self.assertEqual(st["tokens"]["prompt"], 1_200_000)
+        self.assertEqual(st["tokens"]["completion"], 3_400)
+        self.assertEqual(st["ms"], 48995)
+        self.assertEqual(st["turns"], 7)
+        # Provenance is recorded, so "no tools" is never mistaken for measured.
+        self.assertEqual(st["token_source"], "usage")
+
+    def test_the_stats_split_still_wins_when_present(self):
+        # Batch runs keep the richer bySource split; the fallback must not
+        # shadow it.
+        st = invoke.parse_stats(RESULT_JSON)
+        self.assertEqual(st["token_source"], "bySource")
+        self.assertEqual(st["tokens"]["prompt"], 29421)
+
+    def test_streamed_records_parse_to_the_same_result(self):
+        # Case 2: the whole point of phase 1 -- nothing downstream changes.
+        records = json.loads(RESULT_JSON)
+        text, denials, sid, err, meta = self.run_exec(
+            profile=self.stream_profile(records))
+        self.assertIsNone(err)
+        self.assertEqual(text, "done text")
+        self.assertEqual(sid, "sess-9")
+        self.assertEqual(meta["peak"], 20285)              # parsed from the stream
+        self.assertEqual(meta["stats"]["tools"], 5)
+
+    def test_lines_arrive_before_the_process_exits(self):
+        # Case 3. Four records with a gap each; the first must be seen well
+        # before the last one is written.
+        records = [{"type": "assistant", "n": i} for i in range(4)]
+        seen = []
+        t0 = time.time()
+        self.run_exec(
+            profile=self.stream_profile(records, env={"STUB_GAP": "0.3"}),
+            on_line=lambda r: seen.append((r.get("n"), time.time() - t0)))
+        self.assertEqual([n for n, _ in seen], [0, 1, 2, 3])
+        first, last = seen[0][1], seen[-1][1]
+        self.assertLess(first, last - 0.5,
+                        f"all records arrived together ({first:.2f}..{last:.2f}s)"
+                        " -- output was batched, not streamed")
+
+    def test_callback_can_stop_the_run(self):
+        records = [{"type": "assistant", "n": i} for i in range(50)]
+        seen = []
+
+        def stop_at_two(record):
+            seen.append(record)
+            return "budget exceeded" if len(seen) >= 2 else None
+
+        t0 = time.time()
+        text, _, _, err, _ = self.run_exec(
+            profile=self.stream_profile(records, env={"STUB_GAP": "0.1"}),
+            on_line=stop_at_two)
+        self.assertLess(time.time() - t0, 3.0, "did not stop early")
+        self.assertLess(len(seen), 50)
+        self.assertIsNone(text)                       # nothing to grade
+        self.assertIn("run stopped", err)             # case 4: OUR decision...
+        self.assertIn("budget exceeded", err)         # ...and the reason
+
+    def test_a_raising_callback_does_not_kill_the_run(self):
+        # An observer must not take down the thing it observes.
+        records = json.loads(RESULT_JSON)
+
+        def boom(record):
+            raise RuntimeError("observer blew up")
+
+        text, _, _, err, _ = self.run_exec(
+            profile=self.stream_profile(records), on_line=boom)
+        self.assertIsNone(err)
+        self.assertEqual(text, "done text")
+
+    def test_a_stderr_flood_does_not_deadlock(self):
+        # Case 1, the one a small stub never reaches. 512KB is comfortably past
+        # any pipe buffer; a single-pipe reader hangs here until the timeout.
+        records = json.loads(RESULT_JSON)
+        prof = self.stream_profile(records, env={"STUB_STDERR_BYTES": "524288"})
+        t0 = time.time()
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=20)
+        self.assertLess(time.time() - t0, 15, "deadlocked on the undrained pipe")
+        self.assertIsNone(err)
+        self.assertEqual(text, "done text")
+
+    def test_every_parser_reads_both_formats(self):
+        # The divergence this replaced: parse_qwen_json had a JSONL path and
+        # peak_context/parse_stats did not, so a streamed run parsed to the
+        # right answer with ZEROED telemetry -- no error, just a receipt
+        # quietly reporting 0 context and 0 tokens. Pin all of them together.
+        batched = RESULT_JSON
+        streamed = "\n".join(json.dumps(r) for r in json.loads(RESULT_JSON))
+        for name, blob in (("batched", batched), ("streamed", streamed)):
+            self.assertEqual(invoke.peak_context(blob), 20285, name)
+            st = invoke.parse_stats(blob)
+            self.assertEqual(st["tools"], 5, name)
+            self.assertEqual(st["tokens"]["prompt"], 29421, name)
+            self.assertEqual(invoke.parse_qwen_json(blob)[0], "done text", name)
+            self.assertIsNone(invoke.result_error(blob), name)
+
+    def test_records_tolerates_junk_between_records(self):
+        # A warning line or a partial write must not cost us the run.
+        blob = "\n".join(["not json at all",
+                          json.dumps({"type": "assistant", "n": 1}),
+                          "",
+                          json.dumps({"type": "result", "result": "ok"})])
+        got = invoke.records(blob)
+        self.assertEqual(len(got), 2)
+        self.assertEqual(invoke.parse_qwen_json(blob)[0], "ok")
+
+    def test_stall_watchdog_stops_a_silent_run(self):
+        # A callback cannot see this: silence produces no lines, so nothing
+        # on_line could ever fire. Hence a watchdog thread.
+        prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "20",
+                                 "STUB_STDOUT": RESULT_JSON})
+        t0 = time.time()
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=60,
+                                           stall_after=1)
+        self.assertLess(time.time() - t0, 15, "watchdog never fired")
+        self.assertIsNone(text)
+        self.assertIn("run stopped", err)
+        self.assertIn("no output", err)
+
+    def test_a_run_that_keeps_talking_is_not_stalled(self):
+        # The failure mode that matters: killing a long run that is working.
+        records = [{"type": "assistant", "n": i} for i in range(6)]
+        records.append({"type": "result", "result": "done", "session_id": "s"})
+        prof = self.stream_profile(records, env={"STUB_GAP": "0.2"})
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=60,
+                                           stall_after=2, on_line=lambda r: None)
+        self.assertIsNone(err, "killed a run that was emitting steadily")
+        self.assertEqual(text, "done")
+
+    def test_no_stall_limit_means_no_watchdog(self):
+        prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "1",
+                                 "STUB_STDOUT": RESULT_JSON})
+        _, _, _, err, _ = self.run_exec(profile=prof, timeout=30)
+        self.assertIsNone(err)
+
+    def test_the_silence_budget_covers_a_full_generation(self):
+        # The load-bearing property, at BOTH ends of the hardware range: the
+        # budget must exceed max_output_tokens / decode_rate, or the watchdog
+        # kills a generation that is working. A 27B at ~70 tok/s needs ~1,830s
+        # for 128k; a 120B at ~17 tok/s needs ~7,530s for the same output. A
+        # single fixed number cannot serve both -- which is why the knob is the
+        # rate. (A previous fixed 1800s default was already under the fast case.)
+        saved, invoke.max_output_tokens = invoke.max_output_tokens, lambda: 128_000
+        try:
+            for tps, need in ((70, 128_000 / 70), (17, 128_000 / 17)):
+                budget = invoke.stall_seconds(config={"decode_tps": tps})
+                self.assertGreater(budget, need,
+                                   f"at {tps} tok/s a full generation is "
+                                   f"{need:.0f}s but the budget is {budget}s")
+            # Unconfigured falls back to the slow floor, never the fast one.
+            self.assertGreater(invoke.stall_seconds(config={}), 128_000 / 17)
+        finally:
+            invoke.max_output_tokens = saved
+
+    def test_an_explicit_seconds_override_wins(self):
+        self.assertEqual(invoke.stall_seconds(config={"stall_seconds": 600}), 600)
+        self.assertEqual(
+            invoke.stall_seconds(config={"stall_seconds": 600, "decode_tps": 70}),
+            600)
+
+    def test_a_nonsense_rate_falls_back_rather_than_dividing_by_zero(self):
+        for bad in (0, -5, "fast", None):
+            self.assertGreaterEqual(
+                invoke.stall_seconds(config={"decode_tps": bad}), 30)
+
+    def test_timeout_still_reports_as_a_timeout(self):
+        prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "5",
+                                 "STUB_STDOUT": RESULT_JSON})
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=1)
+        self.assertIsNone(text)
+        self.assertIn("timed out after 1s", err)
+
+
+class CompactionHook(unittest.TestCase):
+    """compact_hook.py end-to-end: it is the only thing inside the executor that
+    can see a compaction coming, and the refusal policy rests on it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.hook = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "compact_hook.py")
+
+    def fire(self, event, policy="reinject", sid="s-1", **extra):
+        payload = {"hook_event_name": event, "session_id": sid,
+                   "trigger": "auto"}
+        payload.update(extra)
+        env = dict(os.environ, QCOMPACT_DIR=self.dir, QCOMPACT_POLICY=policy)
+        return subprocess.run([sys.executable, self.hook], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+
+    def state(self, sid="s-1"):
+        with open(os.path.join(self.dir, f"{sid}.json")) as f:
+            return json.load(f)
+
+    def test_precompact_under_refuse_exits_2_to_block(self):
+        # 2 is qwen's documented "block compaction" code. Best effort upstream,
+        # but sending anything else guarantees the compaction proceeds.
+        p = self.fire("PreCompact", policy="refuse")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("refused", p.stderr.lower())
+
+    def test_precompact_under_reinject_does_not_block(self):
+        self.assertEqual(self.fire("PreCompact", policy="reinject").returncode, 0)
+
+    def test_precompact_records_pending_not_events(self):
+        # `events` means a summary HAPPENED -- it arms re-injection. A blocked
+        # compaction recorded there would make the server treat surviving history
+        # as summarised.
+        self.fire("PreCompact", policy="refuse")
+        st = self.state()
+        self.assertEqual(len(st["pending"]), 1)
+        self.assertEqual(st.get("events"), [])
+
+    def test_postcompact_records_events_and_never_blocks(self):
+        p = self.fire("PostCompact", policy="refuse", compact_summary="x" * 40)
+        self.assertEqual(p.returncode, 0)          # too late to block
+        st = self.state()
+        self.assertEqual(len(st["events"]), 1)
+        self.assertEqual(st["events"][0]["summary_chars"], 40)
+
+    def test_summary_text_itself_is_never_written_to_the_marker(self):
+        secret = "CUSTOMER_SECRET_" + "y" * 30
+        self.fire("PostCompact", compact_summary=secret)
+        with open(os.path.join(self.dir, "s-1.json")) as f:
+            self.assertNotIn("CUSTOMER_SECRET", f.read())
+
+    def test_counts_read_both_lists(self):
+        from qd import invoke as inv
+        saved, inv.COMPACT_DIR = inv.COMPACT_DIR, self.dir
+        try:
+            self.assertEqual(inv.compaction_counts("s-1"), (0, 0))   # no marker
+            self.fire("PreCompact", policy="refuse")
+            self.assertEqual(inv.compaction_counts("s-1"), (0, 1))
+            self.fire("PostCompact")
+            self.assertEqual(inv.compaction_counts("s-1"), (1, 1))
+            self.assertEqual(inv.compaction_counts(None), (0, 0))
+        finally:
+            inv.COMPACT_DIR = saved
+
+    def test_a_malformed_payload_never_breaks_the_run(self):
+        env = dict(os.environ, QCOMPACT_DIR=self.dir, QCOMPACT_POLICY="refuse")
+        p = subprocess.run([sys.executable, self.hook], input="not json",
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0)
 
 
 class PureFunctions(unittest.TestCase):
@@ -265,11 +601,91 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(int(auto), 163608)
         self.assertEqual(int(warn), 143608)
 
+    def test_absolute_ceiling_binds_below_a_220k_window(self):
+        # The headline case: at 196,608 the configured pct is IRRELEVANT because
+        # window-33,000 is the smaller term. A reading of this that credits the pct
+        # would report a trigger ~29k tokens later than the real one.
+        for pct in (0.85, 0.98, 1.0):
+            _, auto = invoke.compaction_thresholds(196608, pct)
+            self.assertEqual(int(auto), 163608, f"pct={pct}")
+
+    def test_pct_binds_on_a_large_enough_window(self):
+        _, at_85 = invoke.compaction_thresholds(1_000_000, 0.85)
+        _, at_98 = invoke.compaction_thresholds(1_000_000, 0.98)
+        self.assertEqual(int(at_85), 850_000)
+        self.assertEqual(int(at_98), 967_000)      # ceiling is 967,000 here
+
+    def test_default_pct_is_the_one_we_configure_not_upstreams(self):
+        # If these drift apart, every CONTEXT warning describes a trigger the
+        # executor is not using.
+        self.assertEqual(invoke.compaction_thresholds(1_000_000),
+                         invoke.compaction_thresholds(1_000_000,
+                                                      invoke.COMPACTION_PCT))
+
+    def test_pct_is_clamped_not_trusted(self):
+        _, high = invoke.compaction_thresholds(1_000_000, 5.0)
+        self.assertEqual(int(high), 967_000)       # clamped to 1.0, then ceiling
+        _, low = invoke.compaction_thresholds(1_000_000, -1)
+        self.assertEqual(int(low), 0)
+
+    def test_ceiling_is_the_answer_to_how_late_can_it_compact(self):
+        self.assertEqual(invoke.compaction_ceiling(196_608), 163_608)
+        self.assertEqual(invoke.compaction_ceiling(227_000), 194_000)
+        self.assertEqual(invoke.compaction_ceiling(10_000), 0)   # never negative
+
+    def test_a_reachable_target_resolves_to_its_exact_pct(self):
+        pct, ok = invoke.compaction_pct_for(227_000, 194_000)
+        self.assertTrue(ok)
+        _, auto = invoke.compaction_thresholds(227_000, pct)
+        self.assertEqual(int(auto), 194_000)
+
+    def test_an_unreachable_target_is_reported_not_silently_clamped(self):
+        # 194,000 on a 196,608 window: the reserve makes it impossible, and a
+        # caller that believes it was configured will size tasks on a number the
+        # executor never uses.
+        pct, ok = invoke.compaction_pct_for(196_608, 194_000)
+        self.assertFalse(ok)
+        _, auto = invoke.compaction_thresholds(196_608, pct)
+        self.assertEqual(int(auto), 163_608)       # what it will REALLY be
+
+    def test_target_with_no_known_window_is_unreachable_not_a_crash(self):
+        pct, ok = invoke.compaction_pct_for(None, 194_000)
+        self.assertFalse(ok)
+        self.assertEqual(pct, invoke.COMPACTION_PCT)
+
     def test_parse_qwen_json_jsonl_fallback_and_sid(self):
         jsonl = '{"type":"assistant","session_id":"s2"}\n{"broken\n'
         text, denials, sid = invoke.parse_qwen_json(jsonl)
         self.assertIsNone(text)
         self.assertEqual(sid, "s2")
+
+    def test_error_result_is_a_failure_not_an_empty_success(self):
+        # An error record carries is_error + error.message and NO "result"
+        # field. Read like a success it yields "" -- the run reads GREEN with
+        # an empty answer and qwen's own account of why is dropped. That is
+        # the silent-failure class this system exists to catch.
+        out = json.dumps([{"type": "result", "subtype": "error_during_execution",
+                           "is_error": True, "session_id": "s-9",
+                           "error": {"message": "boom in the executor"}}])
+        err = invoke.result_error(out)
+        self.assertIn("boom in the executor", err)
+        self.assertIn("executor reported failure", err)
+
+    def test_truncation_error_names_the_cause_and_forbids_debugging(self):
+        # The cap is CLIENT-side (qwen-code sends max_tokens itself), so a
+        # reader who trusts the endpoint config concludes "no cap set" and
+        # goes hunting for a bug in the repo. The receipt must say where the
+        # limit lives and that it is not this codebase.
+        out = json.dumps({"type": "result", "is_error": True,
+                          "error": {"message": "response truncated: max_tokens"}})
+        err = invoke.result_error(out)
+        self.assertIn("QWEN_CODE_MAX_OUTPUT_TOKENS", err)
+        self.assertIn("do not debug the plugin", err.lower())
+
+    def test_successful_result_is_not_an_error(self):
+        self.assertIsNone(invoke.result_error(RESULT_JSON))
+        self.assertIsNone(invoke.result_error(""))
+        self.assertIsNone(invoke.result_error("not json at all"))
 
     def test_truncate(self):
         self.assertEqual(invoke.truncate("abc", 10), "abc")

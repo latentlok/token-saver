@@ -14,8 +14,8 @@ import subprocess
 from qd.profiles import resolve, cost_usd
 from qd.invoke import (
     run_executor, accum_stats, cum_zero,
-    was_compacted_since_ack, ack_compaction,
-    truncate,
+    was_compacted_since_ack, ack_compaction, compaction_counts,
+    truncate, stall_seconds as invoke_stall_seconds,
 )
 from qd.gittree import (
     git, is_git_repo,
@@ -25,8 +25,10 @@ from qd.gittree import (
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
     bootstrap_notice, bootstrap_failed_refusal,
-    nongit_refusal, detect_test_cmd,
+    nongit_refusal, detect_test_cmd, test_dir as detect_test_dir,
 )
+from qd import doctor
+from qd import limits
 from qd import worktrees
 from qd.verdict import render, HANDOFF_SUFFIX, VERIFY_CAP
 from qd import refs
@@ -35,17 +37,36 @@ from qd import graph
 _DEFAULT_MAX_ITER = 3
 _DEFAULT_TIMEOUT = 900
 
+# Cumulative input tokens a single delegation may spend before it is stopped.
+# Set deliberately high: a limit that fires on legitimate work is worse than no
+# limit, because the first false positive is the one that gets it switched off.
+# For scale, measured in this repo: a real delegation that wrote a module and
+# its tests cost ~560k, while the runaway this exists to catch reached 19M. So
+# this sits an order of magnitude above known-good work and still ends the
+# runaway less than halfway. Tune down with `burn_budget` once a project knows
+# where its own normal sits; 0 or null disables it.
+_DEFAULT_BURN_BUDGET = 10_000_000
+
 _SELF_GATE_PATH = os.path.join(".qwen-delegate", "selfgate.sh")
 
 _SELF_GATE = """#!/bin/bash
 # Generated per-attempt by trust="self" (L5): the DELEGATE'S OWN suite is the
 # gate; this wrapper only guards the vacuous pass. Worker edits are overwritten.
 cd "$(dirname "$0")/.." || exit 1
-out=$({suite} 2>&1)
+# Braces group the WHOLE suite before redirecting: in `$(a; b 2>&1)` the
+# redirect binds only to `b`, so a compound test command (`a && b`, or a
+# script running several files) silently loses every earlier command's
+# stderr -- which is exactly where unittest reports its results.
+out=$({{ {suite} ; }} 2>&1)
 status=$?
 echo "$out" | tail -25
 [ "$status" -ne 0 ] && exit 1
-ran=$(echo "$out" | grep -Eo 'Ran [0-9]+ tests?|[0-9]+ passed' | grep -Eo '[0-9]+' | head -1)
+# SUM every count, don't take the first: a suite that runs many files prints
+# one line per file, and reading only the first compares the bar against a
+# single file's total. That can demand more tests than any one file holds, so
+# the gate is unsatisfiable and self-grading silently never works.
+ran=$(echo "$out" | grep -Eo 'Ran [0-9]+ tests?|[0-9]+ passed' | grep -Eo '[0-9]+' \
+      | awk '{{s+=$1}} END {{if (NR) print s}}')
 if [ -n "$ran" ] && [ "$ran" -lt {min} ]; then
   echo "SELF-GATE: only $ran tests ran -- write a real suite (>= {min} tests)"
   exit 1
@@ -78,7 +99,7 @@ def _ensure_self_gate(work_cwd, min_override=None):
     if min_override is not None:
         min_tests = max(min_tests, min_override)
     suite = detect_test_cmd(work_cwd) or \
-        "python3 -m unittest discover -s tests -t . -v"
+        f"python3 -m unittest discover -s {detect_test_dir(work_cwd) or 'tests'} -t . -v"
     d = os.path.join(work_cwd, ".qwen-delegate")
     os.makedirs(d, exist_ok=True)
     gi = os.path.join(d, ".gitignore")
@@ -172,9 +193,14 @@ def delegate(args):
     else:
         timeout = _DEFAULT_TIMEOUT
     session_id = args.get("session_id")
-    on_compaction = args.get("on_compaction") or "reinject"
-    if on_compaction not in ("reinject", "discard"):
-        on_compaction = "reinject"
+    # "refuse" is the default: compaction is the documented fabrication trigger, so a
+    # run that reaches it has already exceeded what one delegation can hold honestly.
+    # Continuing on a summarised history -- reinject or discard -- buys a result whose
+    # provenance nobody can vouch for. Stopping hands the call back to the orchestrator,
+    # which can split the task; that is the only fix that addresses the cause.
+    on_compaction = args.get("on_compaction") or "refuse"
+    if on_compaction not in ("refuse", "reinject", "discard"):
+        on_compaction = "refuse"
     worktree_mode = args.get("worktree")
     touch_scope = args.get("touch_scope")
 
@@ -257,6 +283,16 @@ def delegate(args):
                 "ctx": {},
             }
         bootstrap_note = bootstrap_notice(cmd, path) + " " + graph.bootstrap_line()
+        # First delegation in a repo is also the first on a NEW MACHINE, and the
+        # settings that decide whether a run comes back whole do not travel with
+        # this plugin. Say so once, here, rather than let it surface later as an
+        # unexplained truncation someone debugs the repo over.
+        try:
+            executor_note = doctor.summary_line()
+            if executor_note:
+                bootstrap_note += " " + executor_note
+        except Exception:
+            pass
 
     # --- Precondition: no dirty protected spec ---
     pre_dirty = violated_specs(cwd)
@@ -307,8 +343,12 @@ def delegate(args):
             # gate proves nothing -- and every later feature would read as
             # success_but_preflight_passed. Require MORE tests than preflight
             # found; the gate now binds on the delta, and preflight re-runs red.
-            m = re.search(r"Ran (\d+) tests?|(\d+) passed", preflight_out or "")
-            n = int(m.group(1) or m.group(2)) if m else 0
+            # Sum across files, for the same reason the gate script does:
+            # a multi-file suite prints one count per file, and the ratchet
+            # must ratchet against the whole suite, not its first member.
+            n = sum(int(a or b) for a, b in
+                    re.findall(r"Ran (\d+) tests?|(\d+) passed",
+                               preflight_out or ""))
             self_min = n + 1
             verify = _ensure_self_gate(work_cwd, min_override=self_min)
             preflight, preflight_out = _run_verify(verify, work_cwd)
@@ -365,6 +405,25 @@ def delegate(args):
         "trust": trust,
     }
 
+    # --- Live limits (config: project > machine > builtin) ---
+    # Both are ceilings on how wrong a run may go before we stop paying for it,
+    # and both are off the gate's critical path: neither can turn a failing run
+    # green, only end one early.
+    cfg = dict(_global_config())
+    cfg.update(_project_config(cwd))
+    budget = cfg.get("burn_budget", _DEFAULT_BURN_BUDGET)
+    try:
+        budget = int(budget or 0)
+    except (TypeError, ValueError):
+        budget = _DEFAULT_BURN_BUDGET
+    # One meter for the whole delegation, not one per attempt: three attempts
+    # under a per-attempt budget could spend three times the ceiling, and what
+    # a caller means by "this delegation cost X" is the total.
+    burn = limits.BurnLimit(budget) if budget else None
+    stall_after = invoke_stall_seconds(cwd, cfg)
+    ctx["burn_budget"] = budget
+    ctx["stall_after"] = stall_after
+
     trail = []
     result_text = ""
     denials = []
@@ -376,12 +435,16 @@ def delegate(args):
         send_suffix = False
 
         # --- Invoke executor ---
+        compaction_before = compaction_counts(session_id)
         text, denials, sid, err, meta = run_executor(
             profile, prompt, work_cwd, approval_mode,
             timeout=timeout, session_id=session_id,
             verify=verify,
             shell_allow=args.get("shell_allow"),
             suffix=suffix,
+            compaction_policy=on_compaction,
+            on_line=burn,
+            stall_after=stall_after,
         )
 
         ctx["meta"] = meta or {}
@@ -397,6 +460,24 @@ def delegate(args):
         if err:
             trail.append(f"attempt {attempt}: {err}")
             break
+
+        # --- Compaction, under the refuse policy: stop, do not retry ---
+        # Checked before anything reads `text`: past a compaction the worker's report
+        # is exactly what cannot be trusted, so it must not reach a gate, a spec
+        # check, or the receipt as if it were ordinary output.
+        if on_compaction == "refuse":
+            done_after, tried_after = compaction_counts(sid or session_id)
+            if (done_after > compaction_before[0]
+                    or tried_after > compaction_before[1]):
+                blocked = done_after == compaction_before[0]
+                trail.append(
+                    f"attempt {attempt}: COMPACTION "
+                    + ("blocked -- run stopped before the summary"
+                       if blocked else
+                       "fired -- history was summarised; result not trusted"))
+                ctx["compaction_blocked"] = blocked
+                result_text = ""
+                break
 
         result_text = text or ""
 
@@ -563,6 +644,10 @@ def delegate(args):
         status = "error"
     elif trail[-1].endswith(": VERIFY PASS"):
         status = "success"
+    elif "run stopped:" in trail[-1]:
+        status = "stopped"
+    elif "COMPACTION" in trail[-1].upper():
+        status = "compaction_refused"
     elif "SPEC VIOLATION" in trail[-1].upper():
         status = "spec_violation"
     elif "IDENTICAL to preflight" in trail[-1]:

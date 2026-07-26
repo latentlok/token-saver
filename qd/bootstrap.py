@@ -15,7 +15,7 @@ import re
 import shutil
 import sys
 
-from qd.gittree import git
+from qd.gittree import git, _project_config
 from qd.runlog import register_project
 
 # ---------- constants (byte-identical to server.py) ----------
@@ -38,9 +38,35 @@ def _log(msg):
 # ---------- detection ----------
 
 
+def test_dir(cwd):
+    """Where this project keeps its tests: `test_dir` in config, else a
+    conventional folder that actually exists, else None."""
+    cfg = _project_config(cwd)
+    named = cfg.get("test_dir")
+    if named:
+        return str(named)
+    for guess in ("tests", "test", "spec", "specs"):
+        if os.path.isdir(os.path.join(cwd, guess)):
+            return guess
+    return None
+
+
 def detect_test_cmd(cwd):
     """Return a test command string for this project, or '' if nothing detected.
-    Ordered detectors, first match wins."""
+
+    Config wins over detection. `test_command` in .qwen-delegate.json is an
+    exact answer for a project whose layout no detector can guess -- and every
+    detector here is a guess, so a project only has to be slightly unusual to
+    get a wrong one or none at all. `test_dir` names the folder for the
+    discovery fallbacks.
+
+    Ordered detectors after that; first match wins.
+    """
+    cfg = _project_config(cwd)
+    explicit = cfg.get("test_command")
+    if explicit:
+        return str(explicit)
+
     j = lambda *p: os.path.join(cwd, *p)  # noqa: E731
     try:
         pkg = j("package.json")
@@ -67,6 +93,12 @@ def detect_test_cmd(cwd):
         return '.venv/bin/pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
     if os.path.isfile(j("pyproject.toml")) or os.path.isfile(j("setup.py")):
         return 'python -m pytest -q -o "python_files=test_*.py *_test.py *_spec.py"'
+    # Plain-stdlib layout: a tests folder and no packaging metadata at all.
+    # Common enough that returning "" here -- and leaving the caller to guess
+    # a directory that may not exist -- is the wrong default.
+    d = test_dir(cwd)
+    if d:
+        return f"python3 -m unittest discover -s {d} -t . -v"
     return ""
 
 
