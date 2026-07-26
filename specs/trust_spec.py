@@ -64,6 +64,32 @@ class SelfGateScript(unittest.TestCase):
         rc, _ = run_gate(self.cwd)
         self.assertNotEqual(rc, 0)
 
+    def test_counts_are_summed_across_a_multi_file_suite(self):
+        # A suite that runs many files prints one count per file. Reading only
+        # the first compares the bar against a single file's total, so the gate
+        # can demand more tests than any one file holds and never be
+        # satisfiable -- self-grading then silently never works for anyone
+        # whose suite is more than one file.
+        write_suite(self.cwd, 3)
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"min_tests": 7, "test_command": '
+                    '"python3 -m unittest discover -s tests -t . -v; '
+                    'python3 -m unittest discover -s tests -t . -v; '
+                    'python3 -m unittest discover -s tests -t . -v"}')
+        rc, out = run_gate(self.cwd)
+        # 3 files x 3 tests = 9, which clears a bar of 7. Reading only the
+        # first would see 3 and fail.
+        self.assertEqual(rc, 0, out)
+
+    def test_an_unparseable_count_still_says_so(self):
+        # The summing must not turn "no count found" into a silent zero: the
+        # vacuous-pass guard being INACTIVE is something the reader must see.
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"test_command": "echo no counts here"}')
+        rc, out = run_gate(self.cwd)
+        self.assertEqual(rc, 0)
+        self.assertIn("vacuous-pass guard inactive", out)
+
     def test_min_tests_config_override(self):
         write_suite(self.cwd, 6)
         with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:

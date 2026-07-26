@@ -53,11 +53,20 @@ _SELF_GATE = """#!/bin/bash
 # Generated per-attempt by trust="self" (L5): the DELEGATE'S OWN suite is the
 # gate; this wrapper only guards the vacuous pass. Worker edits are overwritten.
 cd "$(dirname "$0")/.." || exit 1
-out=$({suite} 2>&1)
+# Braces group the WHOLE suite before redirecting: in `$(a; b 2>&1)` the
+# redirect binds only to `b`, so a compound test command (`a && b`, or a
+# script running several files) silently loses every earlier command's
+# stderr -- which is exactly where unittest reports its results.
+out=$({{ {suite} ; }} 2>&1)
 status=$?
 echo "$out" | tail -25
 [ "$status" -ne 0 ] && exit 1
-ran=$(echo "$out" | grep -Eo 'Ran [0-9]+ tests?|[0-9]+ passed' | grep -Eo '[0-9]+' | head -1)
+# SUM every count, don't take the first: a suite that runs many files prints
+# one line per file, and reading only the first compares the bar against a
+# single file's total. That can demand more tests than any one file holds, so
+# the gate is unsatisfiable and self-grading silently never works.
+ran=$(echo "$out" | grep -Eo 'Ran [0-9]+ tests?|[0-9]+ passed' | grep -Eo '[0-9]+' \
+      | awk '{{s+=$1}} END {{if (NR) print s}}')
 if [ -n "$ran" ] && [ "$ran" -lt {min} ]; then
   echo "SELF-GATE: only $ran tests ran -- write a real suite (>= {min} tests)"
   exit 1
@@ -334,8 +343,12 @@ def delegate(args):
             # gate proves nothing -- and every later feature would read as
             # success_but_preflight_passed. Require MORE tests than preflight
             # found; the gate now binds on the delta, and preflight re-runs red.
-            m = re.search(r"Ran (\d+) tests?|(\d+) passed", preflight_out or "")
-            n = int(m.group(1) or m.group(2)) if m else 0
+            # Sum across files, for the same reason the gate script does:
+            # a multi-file suite prints one count per file, and the ratchet
+            # must ratchet against the whole suite, not its first member.
+            n = sum(int(a or b) for a, b in
+                    re.findall(r"Ran (\d+) tests?|(\d+) passed",
+                               preflight_out or ""))
             self_min = n + 1
             verify = _ensure_self_gate(work_cwd, min_override=self_min)
             preflight, preflight_out = _run_verify(verify, work_cwd)
