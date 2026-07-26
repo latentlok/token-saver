@@ -35,6 +35,33 @@ local worker is slow; your tokens are the scarce thing, its time is not.
    `--verified <N>` records the context window you read off the endpoint, so the
    "declared but unverified" finding stops firing until one of the two changes.
 
+### Reference setup (what this is developed and measured against)
+
+Not a requirement — any model Qwen Code can reach works. This is the known-good
+configuration, recorded so the numbers elsewhere in these docs have a subject:
+
+| | |
+|---|---|
+| model tag | `qwen3.6:27b-agent-q8-maxctx` (Ollama, q8) |
+| context window | 262,144, confirmed against the endpoint |
+| max output | 128,000 |
+| thinking | on |
+| decode rate | ~70 tok/s on a 27B; ~17 tok/s on a 120B-class model |
+
+Two things about this tag are worth copying, whatever model you run:
+
+**Set `maxTokens` explicitly.** This tag normalises to `27b-agent-q8-maxctx` —
+qwen-code keeps only the part after the last `:` — which matches no known-limits
+pattern, so without an explicit value it silently takes the generic 32,000
+default. Declaring it is what makes the cap yours instead of a guess. Renaming the
+tag so it normalises to something recognisable (`qwen3.6-...`) works too.
+
+**Confirm the context window rather than declaring it.** Read `CONTEXT` off
+`ollama ps` for the loaded model and record it with `python3 -m qd.doctor
+--verified <that number>`. Every compaction and context line is computed from the
+declared value; if the endpoint actually serves less, receipts read "safe, well
+under compaction" while it truncates.
+
 ### Working from a clone instead (plugin development)
 
 To edit the plugin itself, skip the marketplace and point Claude Code at a checkout:

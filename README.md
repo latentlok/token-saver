@@ -34,17 +34,33 @@ Measured on real work, not benchmarks:
 
 The saving grows with the size of your codebase, because Claude never reads it.
 
-## Before you install
+## Requirements
 
-1. **Python 3** — already on almost every machine.
-2. **Claude Code.**
-3. **[Qwen Code](https://github.com/QwenLM/qwen-code)** — the local worker. It must run
-   as `qwen` in your terminal.
-4. **A model for Qwen to use** — typically [Ollama](https://ollama.com) on your own
-   machine. Qwen's settings live in `~/.qwen/settings.json` and hold your API key, so
-   they are not part of this repo. Set that up once per machine.
-5. **Your project must be a git repo.** Git is the undo button — there's no sandbox — so
-   the plugin refuses to run anywhere it couldn't roll changes back. `git init` if needed.
+Nothing to `pip install` — the plugin is Python standard library only.
+
+**Required:**
+
+| | why |
+|---|---|
+| **Python 3** | Runs the plugin. Already on almost every machine. |
+| **Claude Code** | The plugin host. |
+| **[Qwen Code](https://github.com/QwenLM/qwen-code)** | The local worker. Must run as `qwen` in your terminal. |
+| **A model for it to use** | Typically [Ollama](https://ollama.com) on your own machine. Its settings live in `~/.qwen/settings.json` and hold your API key, so they're per-machine and not part of this repo. |
+| **git** | Your project must be a git repo. Git is the undo button — there's no sandbox — so the plugin refuses to run anywhere it couldn't roll changes back. `git init` if needed. |
+| **bash, grep, awk** | Standard on Linux and macOS. Used to run your tests and check the result. |
+
+**Your project's own test runner** — pytest, npm, cargo, go, whatever you already use.
+The plugin runs your tests; it doesn't supply a test framework. It works out the command
+for common layouts, and you can state it outright if yours is unusual.
+
+**Optional:**
+
+| | why |
+|---|---|
+| **[graphify](https://pypi.org/project/graphifyy/)** | A code map so the worker locates code instead of reading it. Optional, but the biggest measured saving (−69%) runs on it. |
+
+Windows isn't supported as a host — the plugin uses file locks and a bash gate script.
+WSL works.
 
 ## Install
 
