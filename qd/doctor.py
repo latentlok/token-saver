@@ -56,8 +56,8 @@ def normalize_model(name):
     """qwen-code's normalize(), the part that decides a model's token limits.
 
     The load-bearing line is `s.split(":").pop()` -- it keeps only what follows
-    the LAST colon. An Ollama tag is `family:variant`, so `qwen3.6:27b-agent`
-    normalizes to `27b-agent`, matches nothing, and silently takes the 32k
+    the LAST colon. An Ollama tag is `family:variant`, so `qwen3.6:27b-agent-q8-maxctx`
+    normalizes to `27b-agent-q8-maxctx`, matches nothing, and silently takes the 32k
     default output cap instead of the 64k its family would have got.
     """
     s = (name or "").lower().strip()
