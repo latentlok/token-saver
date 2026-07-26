@@ -35,6 +35,7 @@ Public surface pinned here:
 Run:  python3 specs/bootstrap_spec.py
 """
 
+import json
 import os
 import stat
 import subprocess
@@ -200,6 +201,60 @@ class StatusAndNotices(unittest.TestCase):
         nong = tempfile.mkdtemp()
         self.assertEqual(bootstrap.nongit_refusal(nong),
                          server.nongit_refusal(nong))
+
+
+class TestLocation(unittest.TestCase):
+    """Where a project keeps its tests is a project's own business. Every
+    detector here is a guess, so a project only has to be slightly unusual to
+    get the wrong command or none at all -- and 'none at all' means the
+    self-graded gate falls back to a folder that may not exist and can never
+    go green."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def cfg(self, **keys):
+        with open(os.path.join(self.d, ".qwen-delegate.json"), "w") as f:
+            json.dump(keys, f)
+
+    def test_an_explicit_command_wins_over_every_detector(self):
+        os.makedirs(os.path.join(self.d, "tests"))
+        with open(os.path.join(self.d, "Cargo.toml"), "w") as f:
+            f.write("[package]\n")
+        self.cfg(test_command="make check")
+        self.assertEqual(bootstrap.detect_test_cmd(self.d), "make check")
+
+    def test_a_named_test_dir_is_used_for_discovery(self):
+        os.makedirs(os.path.join(self.d, "t"))
+        self.cfg(test_dir="t")
+        self.assertEqual(bootstrap.test_dir(self.d), "t")
+        self.assertIn("-s t ", bootstrap.detect_test_cmd(self.d))
+
+    def test_a_plain_tests_folder_is_found_without_any_config(self):
+        # The common case: stdlib unittest in tests/, no packaging metadata.
+        os.makedirs(os.path.join(self.d, "tests"))
+        self.assertEqual(bootstrap.test_dir(self.d), "tests")
+        self.assertIn("unittest discover -s tests", bootstrap.detect_test_cmd(self.d))
+
+    def test_other_conventional_names_are_recognised(self):
+        os.makedirs(os.path.join(self.d, "spec"))
+        self.assertEqual(bootstrap.test_dir(self.d), "spec")
+
+    def test_packaging_metadata_still_wins_over_the_folder_guess(self):
+        os.makedirs(os.path.join(self.d, "tests"))
+        with open(os.path.join(self.d, "pyproject.toml"), "w") as f:
+            f.write("[project]\n")
+        self.assertIn("pytest", bootstrap.detect_test_cmd(self.d))
+
+    def test_nothing_detectable_still_returns_empty(self):
+        self.assertEqual(bootstrap.detect_test_cmd(self.d), "")
+        self.assertIsNone(bootstrap.test_dir(self.d))
+
+    def test_a_corrupt_config_does_not_break_detection(self):
+        with open(os.path.join(self.d, ".qwen-delegate.json"), "w") as f:
+            f.write("{not json")
+        os.makedirs(os.path.join(self.d, "tests"))
+        self.assertIn("tests", bootstrap.detect_test_cmd(self.d))
 
 
 if __name__ == "__main__":

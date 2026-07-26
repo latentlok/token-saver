@@ -25,7 +25,7 @@ from qd.gittree import (
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
     bootstrap_notice, bootstrap_failed_refusal,
-    nongit_refusal, detect_test_cmd,
+    nongit_refusal, detect_test_cmd, test_dir as detect_test_dir,
 )
 from qd import doctor
 from qd import worktrees
@@ -79,7 +79,7 @@ def _ensure_self_gate(work_cwd, min_override=None):
     if min_override is not None:
         min_tests = max(min_tests, min_override)
     suite = detect_test_cmd(work_cwd) or \
-        "python3 -m unittest discover -s tests -t . -v"
+        f"python3 -m unittest discover -s {detect_test_dir(work_cwd) or 'tests'} -t . -v"
     d = os.path.join(work_cwd, ".qwen-delegate")
     os.makedirs(d, exist_ok=True)
     gi = os.path.join(d, ".gitignore")
