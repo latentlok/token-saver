@@ -51,3 +51,21 @@ is model inference, baseline prefill ~19–22k/session, Ollama serialized at 1.
 Priority order if wall-clock starts to matter: engine swap → speculative decoding →
 quant check, in that order — all three are re-validated for free by re-running the
 existing benchmark arms (`grow`, `existing_large`, `bugs`).
+
+## Done (was parked): compaction is refused, not survived
+
+Shipped as `on_compaction="refuse"` (the default) — the run stops on a compaction,
+its output is discarded ungraded, and the receipt tells the orchestrator to split
+the task. `compact_hook.py` also exits 2 on PreCompact to ask the executor to block.
+
+**What could not be done:** auto-compaction cannot be turned OFF. qwen's
+`autoCompactThreshold` is a fraction of the window with a 0.01 floor, so it only
+moves the trigger; and the auto-compaction call site reads only the hook's
+additionalContext, so the documented "exit 2 blocks compaction" is unverified there.
+The stop is the mechanism that holds; the block is best-effort. If upstream ever
+honours it, the refusal gets cheaper (no summary is ever built) with no code change.
+
+Still open: `compaction_threshold` on a profile is unset by default. Lowering it
+buys an earlier stop with more headroom, but ONLY if the block is honoured —
+otherwise it just compacts more often. Measure the block on a real run before
+setting it.

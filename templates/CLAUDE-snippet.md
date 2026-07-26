@@ -50,6 +50,15 @@ spending your context. Treat its answers as leads to verify, not as truth.
   `self` caveat above.)
 - A gate you have not tested is a hope. Break the thing it watches and confirm it fails
   before trusting a pass.
+- **`STATUS: compaction_refused` means the task was too big to hold, not that it
+  failed.** The worker's history was about to be summarised, so the run was stopped and
+  nothing from it is trusted. Do not re-delegate it unchanged — split it into smaller
+  units with their own gates.
+- **A `STATUS: error` receipt is the worker failing, not a bug here — do not debug it.**
+  Truncated output, a dead endpoint, a timeout: the receipt names the cause and the
+  setting that fixes it, all of them user-side. Relay it, retry once smaller if it's
+  worth it, else do the work inline or hand the line to the user. Reading plugin
+  source or probing the endpoint to find out why burns the context this is meant to save.
 - Prefer `auto-edit`. `scoped` grants a shell and is not a sandbox.
 - Bound the blast radius when you know the target: pass `touch_scope=["a.py","b.py"]` and
   any edit to another *existing* file auto-reverts (new files stay allowed). Worth it under

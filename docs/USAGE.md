@@ -184,6 +184,46 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
     demands N+1, so it always binds on the delta).
   - The suite command is auto-detected (npm/cargo/go/pytest/venv), else stdlib
     `unittest discover -s tests`.
+- **Compaction is refused, not survived.** Default `on_compaction="refuse"`: when the
+  worker's session tries to compact, the run stops there, its output is discarded
+  ungraded, and the receipt says to split the task. Compaction is the documented
+  fabrication trigger — a summarised history is precisely the state whose output
+  cannot be vouched for, so continuing on it buys a result with no provenance. The
+  plugin also asks the executor to *block* the compaction (`PreCompact` exit 2, which
+  qwen documents but its auto-compaction path does not reliably honour), and there is
+  **no way to disable auto-compaction outright** — qwen's `autoCompactThreshold` only
+  moves the trigger (fraction of the window, floor 0.01). So the stop is the real
+  mechanism; the block is best-effort. Set `on_compaction="reinject"` or `"discard"`
+  to get the old continue-anyway behaviour.
+- **The trigger is pushed as late as the executor permits** — `COMPACTION_PCT = 1.0`
+  in `qd/invoke.py`, written into every run's settings. Under the refuse policy a
+  compaction ends the run, so every token before the trigger is work that gets to
+  happen. Override per profile with `compaction_threshold` (a fraction) or
+  `compaction_at` (an absolute token count, which is usually what you mean).
+- **A hardcoded reserve, not the threshold, sets the real limit.** qwen subtracts
+  `SUMMARY_RESERVE` (20,000 — room to generate the summary) + `AUTOCOMPACT_BUFFER`
+  (13,000) from the window *before* applying any threshold, so the latest a
+  compaction can possibly fire is **`window − 33,000`**. No setting reaches past it.
+  On the common 196,608 window that is **163,608 tokens (83.2%)** — identical at
+  pct 0.85, 0.98 or 1.0. To hold N tokens before compaction you need a window of
+  **N + 33,000 actually served by the endpoint**: 194,000 needs 227,000. `qd doctor`
+  prints this number for your machine (`compaction-ceiling`), and
+  `compaction_at` resolves against it rather than silently configuring a target the
+  reserve makes unreachable.
+- **Setup runs itself on install and update.** A `SessionStart` hook
+  (`hooks/hooks.json` → `qd/setup.py`) runs the doctor once per plugin version and
+  stamps `~/.qwen-delegate/setup/<version>.json`. A version bump re-runs it; every
+  other session it does nothing and prints nothing. It only speaks up for HIGH
+  findings, because anything it prints is injected into the session's context.
+- **Serial vs parallel dispatch** — `"dispatch": "serial" | "parallel"` in project
+  `.qwen-delegate.json` or `~/.qwen-delegate/config.json`. Default (unset) is already
+  serial: with no `endpoints` section every endpoint holds one slot, and that slot is
+  now held **machine-wide** via a lock file, so separate Claude sessions queue instead
+  of hitting one GPU at once. Set `"serial"` explicitly to pin that even where an
+  endpoint declares `parallel_max > 1` (batches then run in order); `"parallel"` honours
+  the declared capacity. Concurrency is not free on a local box — parallel requests
+  divide the loaded context, and a request with less context than promised is one that
+  comes back truncated.
 - **Tuning `verified`:** your gate is whatever shell command you pass as
   `verify`; files matching `*_spec.*` are auto-protected from worker edits
   (extend via `"spec_globs"` in `.qwen-delegate.json`). Put fiddly gates in a
