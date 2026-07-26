@@ -50,6 +50,16 @@ spending your context. Treat its answers as leads to verify, not as truth.
   `self` caveat above.)
 - A gate you have not tested is a hope. Break the thing it watches and confirm it fails
   before trusting a pass.
+- **Tell it where the tests are, once.** Put `"test_dir"` (or the exact
+  `"test_command"`) in `.qwen-delegate.json`. Without it the plugin guesses from
+  packaging files, and a project it can't place gets a gate that can never pass —
+  silently. This is also what makes `trust="self"` work: keep the worker's own
+  tests somewhere separate from the files you protect as specs, or they auto-revert
+  as fast as it writes them.
+- **`STATUS: stopped` means a live limit ended the run — not a worker fault and
+  not a code fault.** Nothing was verified and the work on disk is partial. Either
+  split the task or raise `burn_budget` / `decode_tps`. Re-running it unchanged
+  hits the same wall.
 - **`STATUS: compaction_refused` means the task was too big to hold, not that it
   failed.** The worker's history was about to be summarised, so the run was stopped and
   nothing from it is trusted. Do not re-delegate it unchanged — split it into smaller
