@@ -42,9 +42,11 @@ STUB = r"""#!/usr/bin/env python3
 import json, os, sys
 out = os.environ["STUB_OUT"]
 open(os.path.join(out, "argv.json"), "w").write(json.dumps(sys.argv))
+n = int(os.environ.get("STUB_BODY_CHARS", "0"))
+body = ("A" * n) if n else "THE ANSWER BODY"
 sys.stdout.write(json.dumps([
   {"type": "assistant", "message": {"usage": {"input_tokens": 15000}}},
-  {"type": "result", "result": "THE ANSWER BODY", "session_id": "q-sess",
+  {"type": "result", "result": body, "session_id": "q-sess",
    "permission_denials": [],
    "stats": {"tools": {"totalCalls": 3, "totalFail": 0, "byName": {}},
              "models": {}}}]))
@@ -131,6 +133,39 @@ class Basics(Fixture):
         self.assertIn("SETUP:", out)
         self.assertIn("read-only", out)
         self.assertIn("THE ANSWER BODY", out)     # proceeded anyway
+
+
+class ResultCap(Fixture):
+    """The cap is the thing that silently ate real answers -- pin it.
+
+    Nothing asserted on truncation before, so a 4500-char effective cap cut four
+    of six measured queries mid-sentence and no spec noticed. A truncated answer
+    is indistinguishable from a complete one to the caller, which is exactly the
+    silent-failure class this repo exists to catch.
+    """
+
+    def body(self, out):
+        """The answer block's retained body, minus the truncation marker."""
+        section = out.split("--- answer ---\n", 1)[1]
+        return section.split("\n... [truncated", 1)[0]
+
+    def test_large_answer_is_not_truncated(self):
+        os.environ["STUB_BODY_CHARS"] = "40000"
+        out = self.q()
+        self.assertNotIn("[truncated", out)
+        self.assertEqual(len(self.body(out)), 40000)
+
+    def test_cap_is_result_cap_with_no_hidden_slack(self):
+        # The call site used RESULT_CAP + 1500, so the constant did not describe
+        # the behavior. Whatever RESULT_CAP says is what the caller gets.
+        os.environ["STUB_BODY_CHARS"] = str(queries.RESULT_CAP + 5000)
+        out = self.q()
+        self.assertIn("[truncated 5000 chars]", out)
+        self.assertEqual(len(self.body(out)), queries.RESULT_CAP)
+
+    def test_cap_is_generous_enough_for_a_map(self):
+        # A `map` of any real repo runs to tens of thousands of chars.
+        self.assertGreaterEqual(queries.RESULT_CAP, 50000)
 
 
 class Errors(Fixture):

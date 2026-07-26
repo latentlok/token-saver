@@ -12,7 +12,15 @@ import qd.runlog
 
 DEFAULT_TIMEOUT = 900
 MAX_TIMEOUT = 7200
-RESULT_CAP = 3000
+
+# The answer IS the deliverable here, unlike a delegate receipt where the diff is
+# the deliverable and the text is commentary -- so this cap is generous and exists
+# only to stop a runaway. It was 3000 (+1500 at the call site, so 4500 effective),
+# which silently cut four of six measured queries mid-sentence: a `map` of any real
+# repo, or any answer with more than a handful of findings, does not fit in 4500
+# chars. A truncated answer reads as a complete one -- the caller sees a fluent
+# paragraph and no reason to doubt it.
+RESULT_CAP = 50000
 
 # Freeform read-only answer -- the default query format. Grounded (cite file:symbol),
 # with a VERIFY section, because Qwen's conclusions are often plausibly wrong.
@@ -153,7 +161,7 @@ def run_query(args):
         lines.append(f"READS: {st['tools']} tool call(s), {st.get('ms', 0) / 1000:.0f}s")
 
     label = "map" if fmt == "map" else "answer"
-    lines.append(f"--- {label} ---\n{qd.invoke.truncate(text, RESULT_CAP + 1500)}")
+    lines.append(f"--- {label} ---\n{qd.invoke.truncate(text, RESULT_CAP)}")
     verdict = "\n".join(lines)
     _log_query("ok", verdict)
     return verdict
