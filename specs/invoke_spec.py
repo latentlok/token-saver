@@ -414,6 +414,41 @@ class Streaming(Fixture):
         self.assertEqual(len(got), 2)
         self.assertEqual(invoke.parse_qwen_json(blob)[0], "ok")
 
+    def test_stall_watchdog_stops_a_silent_run(self):
+        # A callback cannot see this: silence produces no lines, so nothing
+        # on_line could ever fire. Hence a watchdog thread.
+        prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "20",
+                                 "STUB_STDOUT": RESULT_JSON})
+        t0 = time.time()
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=60,
+                                           stall_after=1)
+        self.assertLess(time.time() - t0, 15, "watchdog never fired")
+        self.assertIsNone(text)
+        self.assertIn("run stopped", err)
+        self.assertIn("no output", err)
+
+    def test_a_run_that_keeps_talking_is_not_stalled(self):
+        # The failure mode that matters: killing a long run that is working.
+        records = [{"type": "assistant", "n": i} for i in range(6)]
+        records.append({"type": "result", "result": "done", "session_id": "s"})
+        prof = self.stream_profile(records, env={"STUB_GAP": "0.2"})
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=60,
+                                           stall_after=2, on_line=lambda r: None)
+        self.assertIsNone(err, "killed a run that was emitting steadily")
+        self.assertEqual(text, "done")
+
+    def test_no_stall_limit_means_no_watchdog(self):
+        prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "1",
+                                 "STUB_STDOUT": RESULT_JSON})
+        _, _, _, err, _ = self.run_exec(profile=prof, timeout=30)
+        self.assertIsNone(err)
+
+    def test_the_default_stall_window_is_generous(self):
+        # Guards the reasoning, not the number: a record arrives per MESSAGE,
+        # so one long generation is minutes of legitimate silence. A short
+        # default would kill exactly the runs this protects.
+        self.assertGreaterEqual(invoke.STALL_SECONDS, 900)
+
     def test_timeout_still_reports_as_a_timeout(self):
         prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "5",
                                  "STUB_STDOUT": RESULT_JSON})

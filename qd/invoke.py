@@ -8,6 +8,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 
 # ---------- compaction markers ----------
 COMPACT_DIR = os.environ.get("QCOMPACT_DIR") or os.path.expanduser(
@@ -108,7 +109,16 @@ def _terminate(proc):
         pass
 
 
-def _stream_process(argv, cwd, env, timeout, on_line=None):
+# Seconds of COMPLETE silence before a run is called wedged. Deliberately
+# generous: without --include-partial-messages a record arrives per MESSAGE,
+# not per token, so one long assistant turn is a single record emitted at the
+# end. At ~70 tok/s decode a 128k-token generation is ~30 minutes of silence
+# that is working perfectly. The obvious-looking "two minutes quiet means
+# stuck" would kill exactly the long runs this exists to protect.
+STALL_SECONDS = 1800
+
+
+def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
     """Run argv, draining both pipes concurrently. Never raises.
 
     Returns (stdout, stderr, returncode, err, aborted_reason).
@@ -121,12 +131,15 @@ def _stream_process(argv, cwd, env, timeout, on_line=None):
     nothing about it.
 
     `on_line` sees each parsed record as it arrives and may return a string to
-    stop the run early; that string comes back as `aborted_reason`. Nothing
-    passes one yet -- this is the seam the token-budget, stall and compaction
-    limits attach to.
+    stop the run early; that string comes back as `aborted_reason`.
+
+    `stall_after` is a watchdog, NOT a callback: silence produces no lines, so
+    nothing on_line can observe absence. A separate thread compares the clock
+    against the last line seen.
     """
     out, err = [], []
     abort = {"reason": None}
+    last_line = [None]                # monotonic stamp of the most recent line
 
     try:
         proc = subprocess.Popen(
@@ -140,6 +153,7 @@ def _stream_process(argv, cwd, env, timeout, on_line=None):
         try:
             for line in proc.stdout:
                 out.append(line)
+                last_line[0] = time.monotonic()
                 if on_line is None:
                     continue
                 probe = line.strip()
@@ -166,8 +180,25 @@ def _stream_process(argv, cwd, env, timeout, on_line=None):
         except Exception:
             pass
 
+    def watchdog():
+        # Silence is measured from the last line OR from launch, so a run that
+        # never emits anything is caught too -- that is the wedged-at-startup
+        # case, and waiting out timeout_sec for it is the whole complaint.
+        started = time.monotonic()
+        while proc.poll() is None:
+            quiet = time.monotonic() - (last_line[0] or started)
+            if quiet >= stall_after:
+                if abort["reason"] is None:
+                    abort["reason"] = (
+                        f"no output for {int(quiet)}s (stall limit {stall_after}s)")
+                    _terminate(proc)
+                return
+            time.sleep(min(5.0, max(0.05, stall_after / 20.0)))
+
     threads = [threading.Thread(target=pump_out, daemon=True),
                threading.Thread(target=pump_err, daemon=True)]
+    if stall_after:
+        threads.append(threading.Thread(target=watchdog, daemon=True))
     for t in threads:
         t.start()
 
@@ -196,7 +227,7 @@ def _stream_process(argv, cwd, env, timeout, on_line=None):
 
 def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
                  verify=None, shell_allow=None, suffix="", compaction_policy=None,
-                 on_line=None):
+                 on_line=None, stall_after=None):
     """Invoke the Qwen Code executor and parse the result.
 
     Return (text, denials, session_id, err, meta).
@@ -266,7 +297,7 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
 
     # Run subprocess
     stdout, stderr, rc, run_err, aborted = _stream_process(
-        argv, cwd, env, timeout, on_line)
+        argv, cwd, env, timeout, on_line, stall_after)
 
     blocked = _read_denylog(denylog) if denylog else []
     _cleanup(td)
