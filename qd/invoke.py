@@ -185,6 +185,7 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
     out, err = [], []
     abort = {"reason": None}
     last_line = [None]                # monotonic stamp of the most recent line
+    finished = threading.Event()      # set the moment the child is reaped
 
     try:
         proc = subprocess.Popen(
@@ -229,8 +230,14 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
         # Silence is measured from the last line OR from launch, so a run that
         # never emits anything is caught too -- that is the wedged-at-startup
         # case, and waiting out timeout_sec for it is the whole complaint.
+        #
+        # Waits on the finished Event rather than sleeping between poll()s: a
+        # sleeping watchdog delays teardown by up to its interval on EVERY run,
+        # which on a stall budget measured in hours is a multi-second tax on
+        # work that never went near the limit.
         started = time.monotonic()
-        while proc.poll() is None:
+        interval = min(5.0, max(0.05, stall_after / 20.0))
+        while not finished.wait(interval):
             quiet = time.monotonic() - (last_line[0] or started)
             if quiet >= stall_after:
                 if abort["reason"] is None:
@@ -238,14 +245,13 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
                         f"no output for {int(quiet)}s (stall limit {stall_after}s)")
                     _terminate(proc)
                 return
-            time.sleep(min(5.0, max(0.05, stall_after / 20.0)))
 
     threads = [threading.Thread(target=pump_out, daemon=True),
                threading.Thread(target=pump_err, daemon=True)]
-    if stall_after:
-        threads.append(threading.Thread(target=watchdog, daemon=True))
     for t in threads:
         t.start()
+    if stall_after:
+        threading.Thread(target=watchdog, daemon=True).start()
 
     timed_out = False
     try:
@@ -253,6 +259,8 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate(proc)
+
+    finished.set()                       # release the watchdog immediately
 
     # Bounded join: a reader blocked on a pipe that never closes must not hang
     # the server. Whatever it had already appended is still in `out`/`err`.
@@ -288,6 +296,12 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
     # paying it to gain mid-run intervention is the trade this exists for.
     if on_line is not None and profile.get("stream", True):
         argv = stream_argv(argv)
+    # A limit can only act on records it receives, and records only arrive
+    # incrementally in streaming mode. If a caller attached one and the argv
+    # could not be switched, the limit is INERT -- it will never fire, and
+    # nothing about the run would say so. Report it rather than let a guard
+    # that is doing nothing read as a guard that found nothing.
+    limits_inert = on_line is not None and not any("stream-json" in a for a in argv)
 
     # Build temp settings
     td = tempfile.mkdtemp()
@@ -355,7 +369,7 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
     # one-object-per-line shape, so nothing downstream changes.
     text, denials, sid = parse_qwen_json(stdout)
     meta = {"peak": peak_context(stdout), "stats": parse_stats(stdout),
-            "blocked": blocked}
+            "blocked": blocked, "limits_inert": limits_inert}
 
     # A run WE stopped reports why, ahead of whatever the partial output looks
     # like -- the executor did not fail, we cut it short, and a receipt that

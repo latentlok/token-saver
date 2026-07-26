@@ -15,7 +15,7 @@ from qd.profiles import resolve, cost_usd
 from qd.invoke import (
     run_executor, accum_stats, cum_zero,
     was_compacted_since_ack, ack_compaction, compaction_counts,
-    truncate,
+    truncate, stall_seconds as invoke_stall_seconds,
 )
 from qd.gittree import (
     git, is_git_repo,
@@ -28,6 +28,7 @@ from qd.bootstrap import (
     nongit_refusal, detect_test_cmd, test_dir as detect_test_dir,
 )
 from qd import doctor
+from qd import limits
 from qd import worktrees
 from qd.verdict import render, HANDOFF_SUFFIX, VERIFY_CAP
 from qd import refs
@@ -35,6 +36,16 @@ from qd import graph
 
 _DEFAULT_MAX_ITER = 3
 _DEFAULT_TIMEOUT = 900
+
+# Cumulative input tokens a single delegation may spend before it is stopped.
+# Set deliberately high: a limit that fires on legitimate work is worse than no
+# limit, because the first false positive is the one that gets it switched off.
+# For scale, measured in this repo: a real delegation that wrote a module and
+# its tests cost ~560k, while the runaway this exists to catch reached 19M. So
+# this sits an order of magnitude above known-good work and still ends the
+# runaway less than halfway. Tune down with `burn_budget` once a project knows
+# where its own normal sits; 0 or null disables it.
+_DEFAULT_BURN_BUDGET = 10_000_000
 
 _SELF_GATE_PATH = os.path.join(".qwen-delegate", "selfgate.sh")
 
@@ -381,6 +392,25 @@ def delegate(args):
         "trust": trust,
     }
 
+    # --- Live limits (config: project > machine > builtin) ---
+    # Both are ceilings on how wrong a run may go before we stop paying for it,
+    # and both are off the gate's critical path: neither can turn a failing run
+    # green, only end one early.
+    cfg = dict(_global_config())
+    cfg.update(_project_config(cwd))
+    budget = cfg.get("burn_budget", _DEFAULT_BURN_BUDGET)
+    try:
+        budget = int(budget or 0)
+    except (TypeError, ValueError):
+        budget = _DEFAULT_BURN_BUDGET
+    # One meter for the whole delegation, not one per attempt: three attempts
+    # under a per-attempt budget could spend three times the ceiling, and what
+    # a caller means by "this delegation cost X" is the total.
+    burn = limits.BurnLimit(budget) if budget else None
+    stall_after = invoke_stall_seconds(cwd, cfg)
+    ctx["burn_budget"] = budget
+    ctx["stall_after"] = stall_after
+
     trail = []
     result_text = ""
     denials = []
@@ -400,6 +430,8 @@ def delegate(args):
             shell_allow=args.get("shell_allow"),
             suffix=suffix,
             compaction_policy=on_compaction,
+            on_line=burn,
+            stall_after=stall_after,
         )
 
         ctx["meta"] = meta or {}
@@ -599,6 +631,8 @@ def delegate(args):
         status = "error"
     elif trail[-1].endswith(": VERIFY PASS"):
         status = "success"
+    elif "run stopped:" in trail[-1]:
+        status = "stopped"
     elif "COMPACTION" in trail[-1].upper():
         status = "compaction_refused"
     elif "SPEC VIOLATION" in trail[-1].upper():

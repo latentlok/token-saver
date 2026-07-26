@@ -85,8 +85,15 @@ if step.get("compact"):
     st.setdefault("pending" if step["compact"] == "pre" else "events", []).append(
         {"ts": "stub"})
     json.dump(st, open(mp, "w"))
-sys.stdout.write(json.dumps([
-    {"type": "assistant", "message": {"usage": {"input_tokens": 25000}}}, result]))
+msgs = [{"type": "assistant", "message": {"usage": {"input_tokens": 25000}}}, result]
+# Honour the output flag: a stub that always batches makes every streaming
+# assertion vacuous, and a live limit that never sees a record looks passing.
+if "stream-json" in sys.argv:
+    for m in msgs:
+        sys.stdout.write(json.dumps(m) + "\n")
+        sys.stdout.flush()
+else:
+    sys.stdout.write(json.dumps(msgs))
 """
 
 PYTEST_STUB = """#!/bin/sh
@@ -412,6 +419,82 @@ class MutationHardening(Fixture):
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         r = self.delegate(on_compaction="carry-on")
         self.assertEqual(r["ctx"]["on_compaction"], "refuse")
+
+
+class LiveLimits(Fixture):
+    """The burn budget and the stall watchdog, now switched on by default.
+
+    The risk they carry is the opposite of the one they guard: a limit that
+    fires on legitimate work gets switched off after the first false positive,
+    and then guards nothing. So the claims are that the defaults are generous
+    enough not to touch ordinary runs, that a real overrun is still caught,
+    and that a stopped run never reads as the worker's fault."""
+
+    def test_an_ordinary_run_is_untouched(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+
+    def test_the_default_budget_clears_real_work_by_an_order_of_magnitude(self):
+        # Measured in this repo: a delegation that wrote a module and its tests
+        # cost ~560k input tokens. A default that could fire on that is useless.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertGreaterEqual(r["ctx"]["burn_budget"], 5_000_000)
+
+    def test_the_stall_budget_outlasts_a_full_generation(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertGreaterEqual(r["ctx"]["stall_after"], 1800)
+
+    def test_a_project_can_lower_the_budget_and_it_binds(self):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump({"burn_budget": 1000}, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "budget"],
+                       check=True)
+        # The stub reports 25,000 input tokens on its assistant record.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "stopped")
+        self.assertIn("run stopped", r["trail"][-1])
+
+    def test_zero_disables_the_budget(self):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump({"burn_budget": 0}, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "nobudget"],
+                       check=True)
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["burn_budget"], 0)
+
+    def test_a_stopped_run_does_not_retry(self):
+        # Re-running into the same ceiling just spends the budget twice.
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump({"burn_budget": 1000}, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "budget"],
+                       check=True)
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(len(r["trail"]), 1)
+
+    def test_the_receipt_blames_the_limit_not_the_worker(self):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump({"burn_budget": 1000}, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "budget"],
+                       check=True)
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        receipt = engine.run({
+            "task": "t", "cwd": self.cwd, "verify": "grep -q MARKER out.py",
+            "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("STATUS: stopped", receipt)
+        self.assertIn("not a defect in the worker", receipt)
+        self.assertIn("burn_budget", receipt)
 
 
 class CompactionRefusal(Fixture):

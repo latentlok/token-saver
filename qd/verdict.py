@@ -100,6 +100,20 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # Say what to do about it, because "retry" is the wrong instinct here -- the same
     # task will reach the same wall, and the worker's post-compaction output is the
     # exact thing that must not be trusted or graded.
+    # A run WE ended. Not a failure of the work and not a failure of the gate --
+    # no gate ran at all -- so say so, or the natural reading is "the worker
+    # broke" and the natural response is to retry the same thing.
+    if status == "stopped":
+        body.append(
+            "STOPPED: this run hit a live limit and was ended before it "
+            "finished, so nothing here has been verified and any work on disk "
+            "is partial. It is not a defect in the worker or in your code. "
+            "Either the task is too big for one delegation -- split it -- or "
+            "the limit is too tight for this project: raise `burn_budget` / "
+            "`decode_tps` in .qwen-delegate.json. Re-running it unchanged will "
+            "hit the same wall."
+        )
+
     if status == "compaction_refused":
         blocked = ctx.get("compaction_blocked")
         body.append(
