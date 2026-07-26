@@ -29,7 +29,7 @@ import time
 from qd import profiles
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "qwen-delegate", "version": "0.3.0"}
+SERVER_INFO = {"name": "qwen-delegate", "version": "0.4.0"}
 DRAIN_SECONDS = 10.0
 SLOT_POLL_SECONDS = 0.5
 

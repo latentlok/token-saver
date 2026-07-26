@@ -28,6 +28,81 @@ local worker is slow; your tokens are the scarce thing, its time is not.
 3. **Different/bigger worker model?** Add a profile in
    `~/.qwen-delegate/executors.json` (C7) and pass `executor=` per call — nothing
    else changes.
+4. **Let it check the machine.** The first session after an install or an update
+   runs `qd.doctor` once and reports only what will actually bite. Run it yourself
+   with `/token-saver:doctor`, or `python3 -m qd.doctor` from the plugin directory.
+   `--fix` writes the one setting it can determine safely (after a `.bak`);
+   `--verified <N>` records the context window you read off the endpoint, so the
+   "declared but unverified" finding stops firing until one of the two changes.
+
+### Working from a clone instead (plugin development)
+
+To edit the plugin itself, skip the marketplace and point Claude Code at a checkout:
+
+    git clone https://github.com/latentlok/token-saver.git ~/projects/token-saver
+    claude --plugin-dir ~/projects/token-saver
+
+Changes apply with `/reload-plugins` in the same session; `git pull` is the update.
+Don't do both — a marketplace install and a `--plugin-dir` clone load the plugin twice.
+
+## Settings reference (`.qwen-delegate.json`)
+
+Per project, all optional. Machine-wide defaults for the same keys go in
+`~/.qwen-delegate/config.json`; the project file wins.
+
+| key | default | what it does |
+|---|---|---|
+| `test_command` | detected | The exact command that runs your tests. Beats every detector — use it when your layout isn't one the detectors guess (they key off `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`, a venv `pytest`, `pyproject.toml`/`setup.py`). |
+| `test_dir` | `tests`/`test`/`spec`/`specs` if present | The folder holding your tests, for the discovery fallback. |
+| `trust` | `self` | `self` = the worker writes and grades its own suite; `verified` = your `verify` command is the gate; `auto` = refuse a bare call so the orchestrator picks per task. |
+| `min_tests` | 5 | Floor for the non-vacuous guard under `trust="self"`. Ratchets automatically against an existing green suite. |
+| `spec_globs` | `specs/*`, `*_spec.*`, … | Files the worker may never edit. Its edits to them auto-revert. |
+| `dispatch` | unset (already serial) | `serial` pins every endpoint to one in-flight request whatever its `parallel_max` says; `parallel` honours the declared capacity. |
+| `burn_budget` | 10,000,000 | Cumulative input tokens one delegation may spend before it is stopped. `0` disables. |
+| `decode_tps` | 15 | Your model's decode rate. The silence budget is derived from it and the declared max output — state the rate, not the seconds. |
+| `stall_seconds` | derived | Absolute override for the silence budget, if you'd rather state the answer directly. |
+| `compaction_threshold` | 1.0 | Fraction of the window at which the executor may auto-compact. Rarely the binding term — see below. |
+| `compaction_at` | unset | Absolute token target for the same thing. Resolves against the reserve rather than silently configuring an unreachable number. |
+
+### Where the tests live, and why it matters
+
+If the plugin can't work out how to run your tests, `trust="self"` gets a gate that
+can never pass, and nothing says so. `test_command` or `test_dir` fixes it in one line.
+
+`trust="self"` also needs the worker's own tests to land somewhere your `spec_globs`
+don't protect — otherwise they auto-revert as fast as it writes them. The convention
+is `*_qwen.*` for worker-written tests, kept clear of the files that define correct.
+They are never the gate; once the work is accepted they are ordinary regression cover.
+
+### Live limits
+
+Every delegation now carries two ceilings. Both only ever end a run early — neither
+can turn a failing run green.
+
+- **Spend.** Cumulative input tokens across the whole delegation (not per attempt).
+  Default 10M against ~560k for a real measured delegation, so it clears ordinary work
+  by an order of magnitude. Lower it once you know where your own normal sits.
+- **Silence.** Time since the last record, or since launch. Derived from `decode_tps`
+  because a record arrives per *message*, not per token: one long generation is
+  legitimately silent for `max output ÷ decode rate`. At 70 tok/s a 128k generation is
+  ~1,830s; at 17 tok/s it is ~7,530s. A fixed seconds default cannot serve both.
+
+A run either one stops gets `STATUS: stopped` and a receipt saying **we** ended it —
+nothing verified, work on disk partial, not a defect in the worker or your code. It
+does not retry: the same task into the same ceiling just spends it twice.
+
+One caveat worth knowing: a limit can only act on records it receives, which only
+arrive incrementally in streaming mode. If an executor profile's argv can't be
+switched to the streaming output format, the limit is inert — the receipt says so
+rather than letting a guard that never watched read as a guard that found nothing.
+
+### Compaction is refused, not survived
+
+The worker's session compacting is the documented fabrication trigger, so the default
+is to STOP rather than build on a summarised history — full detail under the trust
+dial below. It cannot be disabled outright: a hardcoded reserve of 33,000 tokens is
+subtracted from the window before any threshold applies, so the latest a compaction
+can fire is `window − 33,000`. On a 262,144 window that is 229,144 tokens (87.4%).
 
 ## Per project (new or existing) — near zero
 

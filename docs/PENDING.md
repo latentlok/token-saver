@@ -69,3 +69,30 @@ Still open: `compaction_threshold` on a profile is unset by default. Lowering it
 buys an earlier stop with more headroom, but ONLY if the block is honoured —
 otherwise it just compacts more often. Measure the block on a real run before
 setting it.
+
+## Open after 0.4.0
+
+Carried from the release notes so they stay visible:
+
+- **Streaming loses tool and line counts.** The streaming adapter's result record
+  omits `stats` entirely. Tokens are recovered from the top-level `usage`, but
+  `tools` and `lines_added`/`lines_removed` read 0 in stream mode with no way to
+  tell that from a measured zero — the exact ambiguity this release spent the day
+  removing elsewhere.
+- **The `usage` fallback has never run for real.** Spec-covered only; it gets its
+  first live exercise the moment a delegation attaches a limit and streams.
+- **dispatch_spec is excluded from CI.** Its assertions are wall-clock based and
+  flake under load, so the cross-process endpoint locking added in 0.4.0 is not
+  covered by the automated suite. Either make the assertions load-independent or
+  split the timing tests out from the protocol ones.
+- **`workers` (best-of-N) is advertised and not implemented.** It is in the tool
+  schema and documented in the delegation skill; `qd/engine.py` never reads it.
+  Either build it or remove the claim — an advertised parameter that silently does
+  nothing is the same class of defect as a metric that reads 0 without measuring.
+- **Per-token records would replace the decode-rate knob.** Requesting partial
+  messages gives sub-second stall granularity instead of hours, making
+  `decode_tps` unnecessary. Cost: they must be filtered out of both the on_line
+  callback and the accumulated buffer, or they become noise and memory.
+- **`detect_test_cmd` still cannot place this repo.** 0.4.0 added `test_command` /
+  `test_dir` so any project can say where its tests are, but the detectors
+  themselves gained nothing for a `specs/*_spec.py` layout.
