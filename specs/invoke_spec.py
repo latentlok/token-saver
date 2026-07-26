@@ -282,13 +282,45 @@ class Streaming(Fixture):
         argv = ["qwen", "-p", "T"]
         self.assertEqual(invoke.stream_argv(argv), argv)
 
-    def test_run_executor_asks_for_the_streaming_format(self):
+    def test_batches_when_nobody_is_watching(self):
+        # Streaming costs the tool and line counts (the streaming adapter's
+        # result record carries no `stats` at all). A caller with no on_line
+        # buys nothing with that, so it must not pay it.
         self.run_exec()
+        self.assertNotIn("stream-json", self.recorded("argv.json"))
+
+    def test_streams_when_a_callback_is_attached(self):
+        self.run_exec(on_line=lambda r: None)
         self.assertIn("stream-json", self.recorded("argv.json"))
 
     def test_a_profile_can_opt_out(self):
-        self.run_exec(profile=self.profile(stream=False))
+        self.run_exec(profile=self.profile(stream=False), on_line=lambda r: None)
         self.assertNotIn("stream-json", self.recorded("argv.json"))
+
+    def test_streamed_tokens_fall_back_to_the_result_usage(self):
+        # Measured against a real -o stream-json run: the result record has
+        # duration_ms / num_turns / usage / permission_denials / result and NO
+        # stats. Without this fallback a streamed run reports 0 tokens, which
+        # silently voids BURN, COST, and any budget built on them.
+        streamed = json.dumps({
+            "type": "result", "result": "done", "session_id": "s-1",
+            "duration_ms": 48995, "num_turns": 7,
+            "usage": {"input_tokens": 1_200_000, "output_tokens": 3_400},
+        })
+        st = invoke.parse_stats(streamed)
+        self.assertEqual(st["tokens"]["prompt"], 1_200_000)
+        self.assertEqual(st["tokens"]["completion"], 3_400)
+        self.assertEqual(st["ms"], 48995)
+        self.assertEqual(st["turns"], 7)
+        # Provenance is recorded, so "no tools" is never mistaken for measured.
+        self.assertEqual(st["token_source"], "usage")
+
+    def test_the_stats_split_still_wins_when_present(self):
+        # Batch runs keep the richer bySource split; the fallback must not
+        # shadow it.
+        st = invoke.parse_stats(RESULT_JSON)
+        self.assertEqual(st["token_source"], "bySource")
+        self.assertEqual(st["tokens"]["prompt"], 29421)
 
     def test_streamed_records_parse_to_the_same_result(self):
         # Case 2: the whole point of phase 1 -- nothing downstream changes.

@@ -205,7 +205,12 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
 
     real_mode = "yolo" if mode == "scoped" else mode
     argv = render_argv(profile, task + suffix, real_mode, session_id)
-    if profile.get("stream", True):
+    # Stream only when someone is watching. Measured: the streaming adapter's
+    # result record carries NO `stats` field -- the batch adapter attaches it,
+    # the stream one does not -- so streaming costs the tool and line counts.
+    # Paying that unconditionally buys nothing for a caller with no on_line;
+    # paying it to gain mid-run intervention is the trade this exists for.
+    if on_line is not None and profile.get("stream", True):
         argv = stream_argv(argv)
 
     # Build temp settings
@@ -464,6 +469,26 @@ def parse_stats(stdout):
         f = st.get("files") or {}
         out["lines_added"] = f.get("totalLinesAdded") or 0
         out["lines_removed"] = f.get("totalLinesRemoved") or 0
+        if not st:
+            # Streaming result records carry no `stats` (measured against
+            # -o stream-json: keys are duration_ms, num_turns, usage,
+            # permission_denials, result -- no stats at all). The top-level
+            # `usage` survives, and it is the SUM across every API call in the
+            # run: the wrong number for peak context, the right one for total
+            # prefill work. Recorded as its own source so a reader can tell it
+            # from a bySource split -- tools/lines are simply unavailable here,
+            # not measured as zero.
+            u = m.get("usage") or {}
+            tok = {"prompt": int(u.get("input_tokens") or 0),
+                   "completion": int(u.get("output_tokens") or 0),
+                   "total": 0, "cached": 0, "thoughts": 0}
+            if tok["prompt"] or tok["completion"]:
+                tok["total"] = tok["prompt"] + tok["completion"]
+                out["token_source"] = "usage"
+                tok_add(out["tokens"], tok)
+                tok_add(out["tokens_main"], tok)
+            break
+
         for mid, mv in (st.get("models") or {}).items():
             out["api_errors"] += ((mv.get("api") or {}).get("totalErrors") or 0)
             out["models"].append(mid)
