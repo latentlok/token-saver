@@ -29,7 +29,13 @@ json.dump(
 PY
 
 fail=0
-for f in specs/*_spec.py; do
+
+# Worker-written tests (*_qwen.py) run here too. They are never a delegation
+# GATE -- that stays the Claude-authored spec -- but once their work is
+# accepted they are regression coverage like any other, and a test file that
+# ran once and is never run again protects nothing.
+for f in specs/*_spec.py qd/*_qwen.py; do
+  [ -e "$f" ] || continue
   case "$f" in
     */dispatch_spec.py) echo "skip (flaky): $f"; continue ;;
   esac
