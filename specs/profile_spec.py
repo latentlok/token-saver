@@ -217,6 +217,77 @@ class Endpoints(Fixture):
                          {"workers": 1, "max_iterations": 3, "timeout": 900})
 
 
+class Dispatch(Fixture):
+    """Case 6: the serial policy. One local endpoint is one GPU -- concurrent
+    requests share its context budget, and a request given less context than it
+    was promised is a request that gets truncated mid tool-call. `dispatch`
+    pins that, and it is enforced in resolve() so no call site can route
+    around it."""
+
+    def cfg(self, where, mode):
+        path = (os.path.join(self.cwd, ".qwen-delegate.json") if where == "project"
+                else os.path.join(os.path.dirname(self.machine), "config.json"))
+        write(path, {"dispatch": mode})
+        if where != "project":
+            os.environ["QWEN_DELEGATE_CONFIG"] = path
+
+    def test_unset_is_serial_out_of_the_box(self):
+        # No endpoints section => one slot each, so nothing to configure.
+        p = profiles.resolve(self.cwd, None)
+        self.assertIsNone(profiles.dispatch_mode(self.cwd))
+        self.assertEqual(p["endpoint_cfg"]["parallel_max"], 1)
+        self.assertEqual(p["dispatch"], "serial")
+
+    def test_serial_pins_a_multi_slot_endpoint_to_one(self):
+        self.machine_cfg(endpoints={"gpu": {"parallel_max": 4},
+                                    "api": {"parallel_max": 1}})
+        self.assertEqual(profiles.resolve(self.cwd, "fast")
+                         ["endpoint_cfg"]["parallel_max"], 4)
+        self.cfg("project", "serial")
+        p = profiles.resolve(self.cwd, "fast")
+        self.assertEqual(p["endpoint_cfg"]["parallel_max"], 1)
+        self.assertEqual(p["dispatch"], "serial")
+
+    def test_parallel_leaves_an_explicit_capacity_alone(self):
+        self.machine_cfg(endpoints={"gpu": {"parallel_max": 4},
+                                    "api": {"parallel_max": 1}})
+        self.cfg("project", "parallel")
+        p = profiles.resolve(self.cwd, "fast")
+        self.assertEqual(p["endpoint_cfg"]["parallel_max"], 4)
+        self.assertEqual(p["dispatch"], "parallel")
+
+    def test_project_beats_machine(self):
+        self.machine_cfg(endpoints={"gpu": {"parallel_max": 4},
+                                    "api": {"parallel_max": 1}})
+        self.cfg("machine", "parallel")
+        self.cfg("project", "serial")
+        self.assertEqual(profiles.dispatch_mode(self.cwd), "serial")
+        self.assertEqual(profiles.resolve(self.cwd, "fast")
+                         ["endpoint_cfg"]["parallel_max"], 1)
+
+    def test_machine_default_applies_with_no_project_file(self):
+        self.machine_cfg(endpoints={"gpu": {"parallel_max": 4},
+                                    "api": {"parallel_max": 1}})
+        self.cfg("machine", "serial")
+        self.assertEqual(profiles.dispatch_mode(self.cwd), "serial")
+        self.assertEqual(profiles.resolve(self.cwd, "fast")
+                         ["endpoint_cfg"]["parallel_max"], 1)
+
+    def test_typo_reads_as_serial_never_turns_concurrency_on(self):
+        self.machine_cfg(endpoints={"gpu": {"parallel_max": 4},
+                                    "api": {"parallel_max": 1}})
+        self.cfg("project", "Parallell")
+        self.assertEqual(profiles.dispatch_mode(self.cwd), "serial")
+        self.assertEqual(profiles.resolve(self.cwd, "fast")
+                         ["endpoint_cfg"]["parallel_max"], 1)
+
+    def test_corrupt_config_is_not_an_error(self):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            f.write("{not json")
+        self.assertIsNone(profiles.dispatch_mode(self.cwd))
+        self.assertEqual(profiles.resolve(self.cwd, None)["dispatch"], "serial")
+
+
 class Cost(Fixture):
     """Case 5: recorded, exact, and 0.0 means priced-at-zero."""
 

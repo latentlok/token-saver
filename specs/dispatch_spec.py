@@ -162,8 +162,14 @@ class Fixture(unittest.TestCase):
                     "p3":  {"argv": ["x", "-p", "{task}"], "endpoint": "e3"},
                 }}, f)
         os.environ["QWEN_DELEGATE_EXECUTORS"] = machine
-        self.srv = Server(self.sdir,
-                          env_extra={"QWEN_DELEGATE_EXECUTORS": machine})
+        # Temp lock dir + a config path that cannot exist: the real machine
+        # files must never decide whether these concurrency assertions pass.
+        self.locks = os.path.join(self.sdir, "locks")
+        self.env_extra = {"QWEN_DELEGATE_EXECUTORS": machine,
+                          "QWEN_DELEGATE_LOCKS": self.locks,
+                          "QWEN_DELEGATE_CONFIG": os.path.join(self.sdir, "none.json")}
+        os.environ.update(self.env_extra)
+        self.srv = Server(self.sdir, env_extra=self.env_extra)
         self.repo_a = tempfile.mkdtemp()
         self.repo_b = tempfile.mkdtemp()
 
@@ -191,6 +197,20 @@ class Fixture(unittest.TestCase):
         (sa, ea), (sb, eb) = self._iv(tag_a), self._iv(tag_b)
         self.assertLess(max(sa, sb), min(ea, eb) + 0.001,
                         f"{tag_a}/{tag_b} did not overlap")
+
+    def assert_some_overlap(self, tags):
+        """SOME pair of these ran concurrently -- which pair is scheduling luck.
+
+        Naming the pair (assert_overlap("bp0","bp1")) assumes the first two
+        submitted are the two that win the slots, which no lock promises; it
+        flaked here the moment slot acquisition grew a poll loop. The claim worth
+        gating is that the batch parallelized at all."""
+        for i, a in enumerate(tags):
+            for b in tags[i + 1:]:
+                (sa, ea), (sb, eb) = self._iv(a), self._iv(b)
+                if max(sa, sb) < min(ea, eb) + 0.001:
+                    return
+        self.fail(f"no two of {tags} overlapped -- batch ran serially")
 
     def assert_serialized(self, tag_a, tag_b):
         (sa, ea), (sb, eb) = self._iv(tag_a), self._iv(tag_b)
@@ -347,7 +367,64 @@ class Batch(Fixture):
         self.srv.wait(81, timeout=20)
         wall = time.time() - t0
         self.assertLess(wall, 3.5, f"batch of 4x1s took {wall:.1f}s -- serial?")
-        self.assert_overlap("bp0", "bp1")
+        self.assert_some_overlap([f"bp{i}" for i in range(4)])
+
+
+class Serial(Fixture):
+    """The serial policy (C7 addendum). Two claims:
+
+      1. The endpoint slot holds across PROCESSES. Every Claude session runs
+         its own MCP server, so an in-process semaphore alone let N sessions
+         fire at one GPU at once -- each turn then gets a fraction of the
+         context it was promised, which is how a run comes back truncated.
+      2. `dispatch: "serial"` makes a batch run its items in order rather than
+         racing them for a one-slot endpoint.
+    """
+
+    def serial_repo(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+            json.dump({"dispatch": "serial"}, f)
+        return d
+
+    def test_endpoint_slot_holds_across_server_processes(self):
+        srv2 = Server(self.sdir, env_extra=self.env_extra)
+        try:
+            self.srv.call(90, "qwen_delegate",
+                          {"tag": "xp1", "sleep": 1.5, "cwd": self.repo_a,
+                           "executor": "p1a"})
+            srv2.call(91, "qwen_delegate",
+                      {"tag": "xp2", "sleep": 1.5, "cwd": self.repo_b,
+                       "executor": "p1b"})
+            self.srv.wait(90, timeout=25)
+            srv2.wait(91, timeout=25)
+        finally:
+            try:
+                srv2.proc.kill()
+            except Exception:
+                pass
+        self.assert_serialized("xp1", "xp2")
+
+    def test_serial_config_overrules_a_multi_slot_endpoint(self):
+        # e2 declares parallel_max 2; the policy says one at a time anyway.
+        a, b = self.serial_repo(), self.serial_repo()
+        self.srv.call(92, "qwen_delegate",
+                      {"tag": "sc1", "sleep": 1.0, "cwd": a, "executor": "p2a"})
+        self.srv.call(93, "qwen_delegate",
+                      {"tag": "sc2", "sleep": 1.0, "cwd": b, "executor": "p2b"})
+        self.srv.wait(92, timeout=25)
+        self.srv.wait(93, timeout=25)
+        self.assert_serialized("sc1", "sc2")
+
+    def test_serial_batch_runs_items_in_order_not_racing(self):
+        items = [{"tag": f"sb{i}", "sleep": 0.6, "cwd": self.serial_repo(),
+                  "executor": "p2a"} for i in range(3)]
+        self.srv.call(94, "batchrun", {"batch": items})
+        text = self.srv.wait(94, timeout=30)["result"]["content"][0]["text"]
+        for i in range(3):
+            self.assertIn(f"done sb{i}", text)     # every item still runs
+        self.assert_serialized("sb0", "sb1")
+        self.assert_serialized("sb1", "sb2")
 
 
 class Drain(Fixture):

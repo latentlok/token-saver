@@ -24,18 +24,110 @@ import json
 import os
 import sys
 import threading
+import time
 
 from qd import profiles
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "qwen-delegate", "version": "0.3.0"}
 DRAIN_SECONDS = 10.0
+SLOT_POLL_SECONDS = 0.5
 
 _write_lock = threading.Lock()
 _repo_locks = {}
 _repo_locks_guard = threading.Lock()
 _endpoint_sems = {}
 _endpoint_guard = threading.Lock()
+
+
+def lock_dir():
+    return os.environ.get("QWEN_DELEGATE_LOCKS") or os.path.expanduser(
+        "~/.qwen-delegate/locks")
+
+
+class FileSlots:
+    """`slots` flock files under lock_dir(), held for the length of a call.
+
+    The endpoint semaphore is per PROCESS, and every Claude session runs its
+    own MCP server process -- so two sessions pointed at one local endpoint
+    both saw a free slot and fired concurrently, which is exactly the
+    parallelism the serial policy exists to prevent. These files are the
+    machine-wide half of the same slot count.
+
+    Degrades to a no-op if flock or the directory is unavailable (Windows, a
+    read-only home): the in-process semaphore still holds, and a lock that
+    cannot be taken must never fail a delegation.
+    """
+
+    def __init__(self, name, slots):
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(name))
+        self.paths = [os.path.join(lock_dir(), f"{safe}.{i}.lock")
+                      for i in range(max(1, slots))]
+        self._local = threading.local()
+
+    def _stack(self):
+        if not hasattr(self._local, "fds"):
+            self._local.fds = []
+        return self._local.fds
+
+    def _try(self, path):
+        import fcntl
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return None
+        return fd
+
+    def acquire(self):
+        try:
+            os.makedirs(lock_dir(), exist_ok=True)
+            while True:
+                for path in self.paths:
+                    fd = self._try(path)
+                    if fd is not None:
+                        self._stack().append(fd)
+                        return
+                # Every slot busy. Inference runs in minutes; polling at this
+                # rate is free next to it, and avoids blocking on one slot
+                # while a different one frees up.
+                time.sleep(SLOT_POLL_SECONDS)
+        except Exception as e:
+            log(f"cross-process lock unavailable ({e!r}); in-process only")
+            self._stack().append(None)
+
+    def release(self):
+        stack = self._stack()
+        fd = stack.pop() if stack else None
+        if fd is not None:
+            try:
+                os.close(fd)          # closing drops the flock
+            except Exception:
+                pass
+
+
+class EndpointGuard:
+    """Endpoint slot: in-process semaphore first, then the cross-process file
+    slot. Both or neither -- a failure to take the second releases the first."""
+
+    def __init__(self, name, slots):
+        self.sem = threading.BoundedSemaphore(slots)
+        self.files = FileSlots(name, slots)
+
+    def acquire(self):
+        self.sem.acquire()
+        try:
+            self.files.acquire()
+        except BaseException:
+            self.sem.release()
+            raise
+
+    def release(self):
+        try:
+            self.files.release()
+        finally:
+            self.sem.release()
 
 
 def log(msg):
@@ -70,7 +162,7 @@ def _endpoint_sem(cwd, executor):
     with _endpoint_guard:
         sem = _endpoint_sems.get(cfg["name"])
         if sem is None:
-            sem = threading.BoundedSemaphore(cfg["parallel_max"])
+            sem = EndpointGuard(cfg["name"], cfg["parallel_max"])
             _endpoint_sems[cfg["name"]] = sem
     return sem
 
@@ -145,12 +237,30 @@ def run_batch(items, handler):
             for g in reversed(acquired):
                 g.release()
 
-    threads = [threading.Thread(target=one, args=(i, a), daemon=True)
-               for i, a in enumerate(items)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # Under the serial policy the items would queue on a one-slot endpoint
+    # anyway; running them in order instead of racing for that slot keeps N
+    # worktrees from being cut for work that executes one at a time, and makes
+    # the receipt order the submitted order.
+    serial = True
+    try:
+        if items:
+            first = items[0] or {}
+            serial = profiles.resolve(
+                first.get("cwd") or ".",
+                first.get("executor"))["dispatch"] == "serial"
+    except Exception:
+        serial = True
+
+    if serial:
+        for i, a in enumerate(items):
+            one(i, a)
+    else:
+        threads = [threading.Thread(target=one, args=(i, a), daemon=True)
+                   for i, a in enumerate(items)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
     return "\n\n=== batch item ===\n".join(
         r if r is not None else "STATUS: error\n(no result)" for r in results)
 
