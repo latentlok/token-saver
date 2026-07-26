@@ -443,11 +443,35 @@ class Streaming(Fixture):
         _, _, _, err, _ = self.run_exec(profile=prof, timeout=30)
         self.assertIsNone(err)
 
-    def test_the_default_stall_window_is_generous(self):
-        # Guards the reasoning, not the number: a record arrives per MESSAGE,
-        # so one long generation is minutes of legitimate silence. A short
-        # default would kill exactly the runs this protects.
-        self.assertGreaterEqual(invoke.STALL_SECONDS, 900)
+    def test_the_silence_budget_covers_a_full_generation(self):
+        # The load-bearing property, at BOTH ends of the hardware range: the
+        # budget must exceed max_output_tokens / decode_rate, or the watchdog
+        # kills a generation that is working. A 27B at ~70 tok/s needs ~1,830s
+        # for 128k; a 120B at ~17 tok/s needs ~7,530s for the same output. A
+        # single fixed number cannot serve both -- which is why the knob is the
+        # rate. (A previous fixed 1800s default was already under the fast case.)
+        saved, invoke.max_output_tokens = invoke.max_output_tokens, lambda: 128_000
+        try:
+            for tps, need in ((70, 128_000 / 70), (17, 128_000 / 17)):
+                budget = invoke.stall_seconds(config={"decode_tps": tps})
+                self.assertGreater(budget, need,
+                                   f"at {tps} tok/s a full generation is "
+                                   f"{need:.0f}s but the budget is {budget}s")
+            # Unconfigured falls back to the slow floor, never the fast one.
+            self.assertGreater(invoke.stall_seconds(config={}), 128_000 / 17)
+        finally:
+            invoke.max_output_tokens = saved
+
+    def test_an_explicit_seconds_override_wins(self):
+        self.assertEqual(invoke.stall_seconds(config={"stall_seconds": 600}), 600)
+        self.assertEqual(
+            invoke.stall_seconds(config={"stall_seconds": 600, "decode_tps": 70}),
+            600)
+
+    def test_a_nonsense_rate_falls_back_rather_than_dividing_by_zero(self):
+        for bad in (0, -5, "fast", None):
+            self.assertGreaterEqual(
+                invoke.stall_seconds(config={"decode_tps": bad}), 30)
 
     def test_timeout_still_reports_as_a_timeout(self):
         prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "5",

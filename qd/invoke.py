@@ -109,13 +109,58 @@ def _terminate(proc):
         pass
 
 
-# Seconds of COMPLETE silence before a run is called wedged. Deliberately
-# generous: without --include-partial-messages a record arrives per MESSAGE,
-# not per token, so one long assistant turn is a single record emitted at the
-# end. At ~70 tok/s decode a 128k-token generation is ~30 minutes of silence
-# that is working perfectly. The obvious-looking "two minutes quiet means
-# stuck" would kill exactly the long runs this exists to protect.
-STALL_SECONDS = 1800
+# How long COMPLETE silence may last before a run is called wedged.
+#
+# Without --include-partial-messages a record arrives per MESSAGE, not per
+# token, so a single long assistant turn is one record emitted at the very end.
+# The silence that implies is therefore `max output tokens / decode rate` --
+# entirely legitimate, and the thing a naive threshold kills.
+#
+# So the knob is DECODE RATE, not seconds: it is the number that actually
+# changes between setups, and the one an operator knows. A 27B at ~70 tok/s
+# needs ~1,830s of headroom for a 128k generation; the same generation on a
+# 120B at ~17 tok/s needs ~7,530s. A fixed seconds default cannot serve both,
+# and the conservative floor below is deliberately slow so an unconfigured
+# machine never kills working work.
+DECODE_TPS_FLOOR = 15
+STALL_MARGIN = 1.5
+STALL_FALLBACK_OUTPUT = 32_000     # when maxTokens is not declared anywhere
+
+
+def max_output_tokens():
+    """Configured max output tokens for the active model, or None."""
+    try:
+        s = json.load(open(os.path.expanduser("~/.qwen/settings.json")))
+        model = (s.get("model") or {}).get("name")
+        for provs in (s.get("modelProviders") or {}).values():
+            for p in provs if isinstance(provs, list) else []:
+                if p.get("id") == model or p.get("name") == model:
+                    mt = (p.get("generationConfig") or {}).get("maxTokens")
+                    if mt:
+                        return int(mt)
+    except Exception:
+        pass
+    return None
+
+
+def stall_seconds(cwd=None, config=None):
+    """Silence budget in seconds: explicit override, else derived from rate.
+
+    Precedence: `stall_seconds` in config (an absolute answer, for anyone who
+    would rather state it directly) > `decode_tps` in config, applied to the
+    declared maxTokens > DECODE_TPS_FLOOR.
+    """
+    cfg = config or {}
+    explicit = cfg.get("stall_seconds")
+    if explicit:
+        return max(30, int(explicit))
+    tps = cfg.get("decode_tps") or DECODE_TPS_FLOOR
+    try:
+        tps = max(1.0, float(tps))
+    except (TypeError, ValueError):
+        tps = DECODE_TPS_FLOOR
+    out = max_output_tokens() or STALL_FALLBACK_OUTPUT
+    return max(30, int(out / tps * STALL_MARGIN))
 
 
 def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
