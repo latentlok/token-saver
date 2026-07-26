@@ -39,6 +39,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -54,7 +55,21 @@ if sp and os.path.isfile(sp):
     shutil.copy(sp, os.path.join(out, "settings.json"))
 if os.environ.get("STUB_SLEEP"):
     time.sleep(float(os.environ["STUB_SLEEP"]))
-sys.stdout.write(os.environ.get("STUB_STDOUT", "[]"))
+# Streaming mode: one record per line, flushed, with a beat between them, so a
+# reader that only sees output at exit is distinguishable from one that does not.
+if os.environ.get("STUB_STREAM"):
+    for line in json.loads(os.environ["STUB_STREAM"]):
+        sys.stdout.write(json.dumps(line) + "\n")
+        sys.stdout.flush()
+        time.sleep(float(os.environ.get("STUB_GAP", "0.05")))
+# Fill stderr NOBODY drains in the naive implementation. Well past a 64KB pipe
+# buffer: with a single-pipe reader the child blocks here forever and the test
+# hangs. This is the case a small stub would never reach.
+if os.environ.get("STUB_STDERR_BYTES"):
+    sys.stderr.write("x" * int(os.environ["STUB_STDERR_BYTES"]))
+    sys.stderr.flush()
+if not os.environ.get("STUB_STREAM"):
+    sys.stdout.write(os.environ.get("STUB_STDOUT", "[]"))
 """
 
 RESULT_JSON = json.dumps([
@@ -229,6 +244,150 @@ class Failures(Fixture):
         text, _, _, err, _ = self.run_exec(profile=p)
         self.assertIsNone(text)
         self.assertIn("unparseable", err)
+
+
+class Streaming(Fixture):
+    """Phase 1 of streamed execution: records are read AS THEY ARRIVE, and the
+    reader can stop the run. Load-bearing claims, worst-first:
+
+      1. Both pipes are drained concurrently. A child that writes more to
+         stderr than a pipe buffer holds deadlocks against a single-pipe
+         reader -- and only at volume, so the small-output tests all pass
+         while a real 19M-token run hangs.
+      2. Streaming changes WHEN we read, not WHAT: the accumulated output
+         parses to the same result the batch format produced, so every parser
+         and every receipt downstream is untouched.
+      3. Lines reach the callback before the process exits (otherwise this is
+         a refactor with no observable behavior, and nothing to gate).
+      4. A callback may stop the run, and the receipt says WE stopped it --
+         blaming the executor for our decision sends someone debugging it.
+      5. An unrecognised argv degrades to batch rather than refusing to run.
+    """
+
+    def stream_profile(self, records, **over):
+        env = {"STUB_OUT": self.out, "STUB_STREAM": json.dumps(records)}
+        env.update(over.pop("env", {}))
+        return self.profile(env=env, **over)
+
+    def test_argv_switches_to_the_streaming_format(self):
+        argv = invoke.stream_argv(["qwen", "-p", "T", "-o", "json", "-r", "s"])
+        self.assertEqual(argv[4], "stream-json")
+        # ...and the long spelling
+        self.assertEqual(
+            invoke.stream_argv(["qwen", "--output-format", "json"])[2],
+            "stream-json")
+
+    def test_unrecognised_argv_is_left_alone(self):
+        # Degrade to batch; never refuse to run over an output flag.
+        argv = ["qwen", "-p", "T"]
+        self.assertEqual(invoke.stream_argv(argv), argv)
+
+    def test_run_executor_asks_for_the_streaming_format(self):
+        self.run_exec()
+        self.assertIn("stream-json", self.recorded("argv.json"))
+
+    def test_a_profile_can_opt_out(self):
+        self.run_exec(profile=self.profile(stream=False))
+        self.assertNotIn("stream-json", self.recorded("argv.json"))
+
+    def test_streamed_records_parse_to_the_same_result(self):
+        # Case 2: the whole point of phase 1 -- nothing downstream changes.
+        records = json.loads(RESULT_JSON)
+        text, denials, sid, err, meta = self.run_exec(
+            profile=self.stream_profile(records))
+        self.assertIsNone(err)
+        self.assertEqual(text, "done text")
+        self.assertEqual(sid, "sess-9")
+        self.assertEqual(meta["peak"], 20285)              # parsed from the stream
+        self.assertEqual(meta["stats"]["tools"], 5)
+
+    def test_lines_arrive_before_the_process_exits(self):
+        # Case 3. Four records with a gap each; the first must be seen well
+        # before the last one is written.
+        records = [{"type": "assistant", "n": i} for i in range(4)]
+        seen = []
+        t0 = time.time()
+        self.run_exec(
+            profile=self.stream_profile(records, env={"STUB_GAP": "0.3"}),
+            on_line=lambda r: seen.append((r.get("n"), time.time() - t0)))
+        self.assertEqual([n for n, _ in seen], [0, 1, 2, 3])
+        first, last = seen[0][1], seen[-1][1]
+        self.assertLess(first, last - 0.5,
+                        f"all records arrived together ({first:.2f}..{last:.2f}s)"
+                        " -- output was batched, not streamed")
+
+    def test_callback_can_stop_the_run(self):
+        records = [{"type": "assistant", "n": i} for i in range(50)]
+        seen = []
+
+        def stop_at_two(record):
+            seen.append(record)
+            return "budget exceeded" if len(seen) >= 2 else None
+
+        t0 = time.time()
+        text, _, _, err, _ = self.run_exec(
+            profile=self.stream_profile(records, env={"STUB_GAP": "0.1"}),
+            on_line=stop_at_two)
+        self.assertLess(time.time() - t0, 3.0, "did not stop early")
+        self.assertLess(len(seen), 50)
+        self.assertIsNone(text)                       # nothing to grade
+        self.assertIn("run stopped", err)             # case 4: OUR decision...
+        self.assertIn("budget exceeded", err)         # ...and the reason
+
+    def test_a_raising_callback_does_not_kill_the_run(self):
+        # An observer must not take down the thing it observes.
+        records = json.loads(RESULT_JSON)
+
+        def boom(record):
+            raise RuntimeError("observer blew up")
+
+        text, _, _, err, _ = self.run_exec(
+            profile=self.stream_profile(records), on_line=boom)
+        self.assertIsNone(err)
+        self.assertEqual(text, "done text")
+
+    def test_a_stderr_flood_does_not_deadlock(self):
+        # Case 1, the one a small stub never reaches. 512KB is comfortably past
+        # any pipe buffer; a single-pipe reader hangs here until the timeout.
+        records = json.loads(RESULT_JSON)
+        prof = self.stream_profile(records, env={"STUB_STDERR_BYTES": "524288"})
+        t0 = time.time()
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=20)
+        self.assertLess(time.time() - t0, 15, "deadlocked on the undrained pipe")
+        self.assertIsNone(err)
+        self.assertEqual(text, "done text")
+
+    def test_every_parser_reads_both_formats(self):
+        # The divergence this replaced: parse_qwen_json had a JSONL path and
+        # peak_context/parse_stats did not, so a streamed run parsed to the
+        # right answer with ZEROED telemetry -- no error, just a receipt
+        # quietly reporting 0 context and 0 tokens. Pin all of them together.
+        batched = RESULT_JSON
+        streamed = "\n".join(json.dumps(r) for r in json.loads(RESULT_JSON))
+        for name, blob in (("batched", batched), ("streamed", streamed)):
+            self.assertEqual(invoke.peak_context(blob), 20285, name)
+            st = invoke.parse_stats(blob)
+            self.assertEqual(st["tools"], 5, name)
+            self.assertEqual(st["tokens"]["prompt"], 29421, name)
+            self.assertEqual(invoke.parse_qwen_json(blob)[0], "done text", name)
+            self.assertIsNone(invoke.result_error(blob), name)
+
+    def test_records_tolerates_junk_between_records(self):
+        # A warning line or a partial write must not cost us the run.
+        blob = "\n".join(["not json at all",
+                          json.dumps({"type": "assistant", "n": 1}),
+                          "",
+                          json.dumps({"type": "result", "result": "ok"})])
+        got = invoke.records(blob)
+        self.assertEqual(len(got), 2)
+        self.assertEqual(invoke.parse_qwen_json(blob)[0], "ok")
+
+    def test_timeout_still_reports_as_a_timeout(self):
+        prof = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "5",
+                                 "STUB_STDOUT": RESULT_JSON})
+        text, _, _, err, _ = self.run_exec(profile=prof, timeout=1)
+        self.assertIsNone(text)
+        self.assertIn("timed out after 1s", err)
 
 
 class CompactionHook(unittest.TestCase):

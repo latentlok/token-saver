@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 
 # ---------- compaction markers ----------
 COMPACT_DIR = os.environ.get("QCOMPACT_DIR") or os.path.expanduser(
@@ -69,8 +70,133 @@ def _cleanup(td):
             pass
 
 
+def stream_argv(argv):
+    """Switch the executor's output format to the streaming one.
+
+    `-o json` batches every record and prints them at exit, so a run is opaque
+    until it ends -- which is why a runaway loop could only ever be reported
+    afterwards. `-o stream-json` emits the SAME records (qwen's
+    StreamJsonOutputAdapter writes one JSON.stringify(message) per line, built
+    by the same buildResultMessage as the batch adapter), just as they happen.
+
+    Deliberately NOT --include-partial-messages: that adds per-token
+    `stream_event` records we would only have to filter back out.
+
+    An argv we do not recognise is returned unchanged -- the run then behaves
+    exactly as before, batched. Losing incremental delivery is a degradation;
+    refusing to run is not an option.
+    """
+    argv = list(argv)
+    for i, a in enumerate(argv[:-1]):
+        if a in ("-o", "--output-format") and argv[i + 1] == "json":
+            argv[i + 1] = "stream-json"
+            break
+    return argv
+
+
+def _terminate(proc):
+    """Stop the executor: ask, then insist. Never raises."""
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _stream_process(argv, cwd, env, timeout, on_line=None):
+    """Run argv, draining both pipes concurrently. Never raises.
+
+    Returns (stdout, stderr, returncode, err, aborted_reason).
+
+    BOTH pipes get their own thread on purpose. Reading stdout to completion
+    while stderr fills its buffer deadlocks the child -- the classic Popen
+    mistake, and the reason this is not a one-line swap for subprocess.run.
+    The deadlock is load-dependent (it needs ~64KB to accumulate in the pipe
+    nobody is reading), so a stub that emits a few hundred bytes proves
+    nothing about it.
+
+    `on_line` sees each parsed record as it arrives and may return a string to
+    stop the run early; that string comes back as `aborted_reason`. Nothing
+    passes one yet -- this is the seam the token-budget, stall and compaction
+    limits attach to.
+    """
+    out, err = [], []
+    abort = {"reason": None}
+
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
+        )
+    except FileNotFoundError:
+        return None, "", None, f"binary not found ({argv[0]})", None
+
+    def pump_out():
+        try:
+            for line in proc.stdout:
+                out.append(line)
+                if on_line is None:
+                    continue
+                probe = line.strip()
+                if not probe.startswith("{"):
+                    continue
+                try:
+                    record = json.loads(probe)
+                except json.JSONDecodeError:
+                    continue          # a partial or non-record line, not fatal
+                try:
+                    reason = on_line(record)
+                except Exception:
+                    reason = None     # an observer must not kill the run it observes
+                if reason and abort["reason"] is None:
+                    abort["reason"] = str(reason)
+                    _terminate(proc)
+        except Exception:
+            pass
+
+    def pump_err():
+        try:
+            for line in proc.stderr:
+                err.append(line)
+        except Exception:
+            pass
+
+    threads = [threading.Thread(target=pump_out, daemon=True),
+               threading.Thread(target=pump_err, daemon=True)]
+    for t in threads:
+        t.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate(proc)
+
+    # Bounded join: a reader blocked on a pipe that never closes must not hang
+    # the server. Whatever it had already appended is still in `out`/`err`.
+    for t in threads:
+        t.join(timeout=10)
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+    if timed_out:
+        return "".join(out), "".join(err), proc.returncode, \
+            f"timed out after {timeout}s", abort["reason"]
+    return "".join(out), "".join(err), proc.returncode, None, abort["reason"]
+
+
 def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
-                 verify=None, shell_allow=None, suffix="", compaction_policy=None):
+                 verify=None, shell_allow=None, suffix="", compaction_policy=None,
+                 on_line=None):
     """Invoke the Qwen Code executor and parse the result.
 
     Return (text, denials, session_id, err, meta).
@@ -79,6 +205,8 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
 
     real_mode = "yolo" if mode == "scoped" else mode
     argv = render_argv(profile, task + suffix, real_mode, session_id)
+    if profile.get("stream", True):
+        argv = stream_argv(argv)
 
     # Build temp settings
     td = tempfile.mkdtemp()
@@ -132,29 +260,35 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
         timeout = profile["defaults"]["timeout"]
 
     # Run subprocess
-    try:
-        proc = subprocess.run(
-            argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        _cleanup(td)
-        return None, [], None, f"timed out after {timeout}s", {}
-    except FileNotFoundError:
-        _cleanup(td)
-        return None, [], None, f"binary not found ({argv[0]})", {}
+    stdout, stderr, rc, run_err, aborted = _stream_process(
+        argv, cwd, env, timeout, on_line)
 
     blocked = _read_denylog(denylog) if denylog else []
     _cleanup(td)
 
-    text, denials, sid = parse_qwen_json(proc.stdout)
-    meta = {"peak": peak_context(proc.stdout), "stats": parse_stats(proc.stdout),
+    if stdout is None:                       # never started
+        return None, [], None, run_err, {}
+
+    # Parsed from the accumulated stream, which carries the same records the
+    # batch format emitted -- parse_qwen_json's JSONL path already handles the
+    # one-object-per-line shape, so nothing downstream changes.
+    text, denials, sid = parse_qwen_json(stdout)
+    meta = {"peak": peak_context(stdout), "stats": parse_stats(stdout),
             "blocked": blocked}
-    failure = result_error(proc.stdout)
+
+    # A run WE stopped reports why, ahead of whatever the partial output looks
+    # like -- the executor did not fail, we cut it short, and a receipt that
+    # blamed the worker for our decision would send someone debugging it.
+    if aborted:
+        return None, denials, sid, f"run stopped: {aborted}", meta
+    if run_err:
+        return None, denials, sid, run_err, meta
+    failure = result_error(stdout)
     if failure:
         return None, denials, sid, failure, meta
     if text is None:
-        tail = (proc.stderr or proc.stdout or "").strip()[-800:]
-        return None, [], sid, f"unparseable output (exit {proc.returncode}): {tail}", meta
+        tail = (stderr or stdout or "").strip()[-800:]
+        return None, [], sid, f"unparseable output (exit {rc}): {tail}", meta
     return text, denials, sid, None, meta
 
 
@@ -231,12 +365,7 @@ def peak_context(stdout):
     while true peak context was 20,285 -- a 50% overstatement.
     """
     best = 0
-    try:
-        parsed = json.loads((stdout or "").strip())
-        msgs = parsed if isinstance(parsed, list) else [parsed]
-    except Exception:
-        return 0
-    for m in msgs:
+    for m in records(stdout):
         if not isinstance(m, dict) or m.get("type") != "assistant":
             continue
         u = (m.get("message") or {}).get("usage") or {}
@@ -322,12 +451,7 @@ def parse_stats(stdout):
            "api_errors": 0, "lines_added": 0, "lines_removed": 0,
            "tokens": tok_zero(), "tokens_main": tok_zero(),
            "tokens_overhead": tok_zero(), "models": [], "token_source": "none"}
-    try:
-        parsed = json.loads((stdout or "").strip())
-        msgs = parsed if isinstance(parsed, list) else [parsed]
-    except Exception:
-        return out
-    for m in reversed(msgs):
+    for m in reversed(records(stdout)):
         if not isinstance(m, dict) or m.get("type") != "result":
             continue
         out["ms"] = m.get("duration_ms") or 0
@@ -417,24 +541,10 @@ def ack_compaction(session_id):
 
 
 def parse_qwen_json(stdout):
-    """Return (result_text, denials, session_id) from qwen's -o json output."""
-    stdout = (stdout or "").strip()
-    if not stdout:
+    """Return (result_text, denials, session_id) from a run's output."""
+    msgs = records(stdout)
+    if not msgs:
         return None, [], None
-
-    try:
-        parsed = json.loads(stdout)
-        msgs = parsed if isinstance(parsed, list) else [parsed]
-    except json.JSONDecodeError:
-        msgs = []
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msgs.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
 
     for m in reversed(msgs):
         if isinstance(m, dict) and m.get("type") == "result":
@@ -490,25 +600,40 @@ def result_error(stdout):
     return None
 
 
-def _result_records(stdout):
-    """Every `type: "result"` record in a run's stdout, in order."""
+def records(stdout):
+    """Every record in a run's stdout, whichever output format produced it.
+
+    THE one parse path. `-o json` emits a single array at exit; `-o stream-json`
+    emits the same records one JSON object per line. Every reader goes through
+    here, because the alternative is what this replaced: parse_qwen_json had a
+    JSONL fallback and peak_context/parse_stats did not, so a streamed run
+    parsed to a correct answer with zeroed telemetry -- no error, just a receipt
+    quietly reporting 0 context and 0 tokens.
+    """
     stdout = (stdout or "").strip()
     if not stdout:
         return []
     try:
         parsed = json.loads(stdout)
-        msgs = parsed if isinstance(parsed, list) else [parsed]
+        return parsed if isinstance(parsed, list) else [parsed]
     except json.JSONDecodeError:
-        msgs = []
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msgs.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return [m for m in msgs if isinstance(m, dict) and m.get("type") == "result"]
+        pass
+    out = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _result_records(stdout):
+    """Every `type: "result"` record in a run's stdout, in order."""
+    return [m for m in records(stdout)
+            if isinstance(m, dict) and m.get("type") == "result"]
 
 
 def truncate(s, cap):
