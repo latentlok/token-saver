@@ -420,6 +420,13 @@ def run_delegate_batch(args, on_partial=None):
     refusal = _shape_refusal(args)
     if refusal:
         return refusal
+    # U6: a `chain: true` playbook becomes `chain` items here; anything else
+    # comes back untouched (the single path resolves its own brief inside the
+    # run -- that keeps the amendment on exactly one code path). Idempotent,
+    # so the submit path having already expanded costs nothing.
+    args, refusal = engine.expand_playbook(args)
+    if refusal:
+        return engine.refusal_receipt(refusal)
     if args.get("chain"):
         return run_chain(args["chain"], engine.run, on_partial=on_partial)
     if args.get("batch"):
@@ -548,6 +555,14 @@ def submit_delegate(args):
     refusal = _shape_refusal(args)
     if refusal:
         return refusal
+
+    # U6: expand a `chain: true` playbook BEFORE routing -- the submission
+    # must know it is a chain (per-link guards, partial receipts, no single
+    # precheck). Refusals here are argument-shaped: answered now, nothing
+    # spawned, no receipt file for a run that never existed.
+    args, refusal = engine.expand_playbook(args)
+    if refusal:
+        return engine.refusal_receipt(refusal)
 
     items = args.get("chain") or args.get("batch")
     single = not items

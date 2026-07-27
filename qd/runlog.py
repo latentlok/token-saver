@@ -157,6 +157,45 @@ def ledger_summary(cwd):
         return None
 
 
+def brief_summary(cwd, path):
+    """Aggregate of the completed runs briefed by one document (U6).
+
+    A second helper beside ledger_summary rather than a filter argument on
+    it: ledger_summary's return shape is already fixed by its spec and its
+    callers. Same skip-`running` rule; ok = the two green statuses, red =
+    every other completed one (a stopped run still spent the document's
+    credibility). Returns {"n", "ok", "red"} or None when no prior run
+    recorded this path. Tolerant line-by-line parse; never raises.
+    """
+    try:
+        log_path = os.path.join(cwd, RUNLOG_DIR, RUNLOG_FILE)
+        if not os.path.isfile(log_path):
+            return None
+        n = ok = 0
+        with open(log_path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue  # a corrupt line must not hide the rest
+                if not isinstance(rec, dict) or rec.get("tool") != "qwen_delegate":
+                    continue
+                if rec.get("status") == "running":
+                    continue
+                brief = rec.get("brief")
+                if not isinstance(brief, dict) or brief.get("path") != path:
+                    continue
+                n += 1
+                if rec.get("status") in ("success",
+                                         "success_but_preflight_passed"):
+                    ok += 1
+        if n == 0:
+            return None
+        return {"n": n, "ok": ok, "red": n - ok}
+    except Exception:
+        return None
+
+
 def briefs_dir(cwd):
     """Where this project's stored briefs live (created)."""
     d = os.path.join(runlog_dir(cwd), BRIEFS_DIR)

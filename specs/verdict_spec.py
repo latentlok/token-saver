@@ -764,5 +764,59 @@ class LogSeam(Fixture):
         self.assertEqual(rec["cost_usd"], 0.0)
 
 
+class BriefLines(LogSeam):
+    """U6: the receipt names the document version that briefed the run, the
+    log records it (path + digest only -- digest() policy), and the LEDGER
+    grows a per-document tally once the document has history."""
+
+    BRIEF = {"path": "pb.md", "sha256": "ab" * 8, "amended": False,
+             "chars": 400, "amendments": 0}
+
+    def brief(self, **over):
+        return dict(self.BRIEF, **over)
+
+    def test_brief_line_names_path_digest_and_size(self):
+        out = self.v2(brief=self.brief())
+        self.assertIn(f"BRIEF: pb.md @ {'ab' * 8} · ~100 tokens", out)
+        self.assertNotIn("(amended)", out)
+        self.assertNotIn("consolidate", out)
+
+    def test_amended_and_the_consolidate_nudge(self):
+        out = self.v2(brief=self.brief(amended=True, amendments=6))
+        self.assertIn("(amended)", out)
+        self.assertIn("(6 amendments — consolidate)", out)
+        # Five or fewer is a document being maintained, not sprawl.
+        self.assertNotIn("consolidate",
+                         self.v2(brief=self.brief(amendments=5)))
+
+    def test_no_brief_no_line(self):
+        self.assertNotIn("BRIEF:", self.v2())
+
+    def test_the_brief_line_survives_on_a_green_receipt_under_the_diet(self):
+        # Non-droppable body weight against the N1 cap (R2 pin re-measured):
+        # the compact green stays small with the line present.
+        out = self.v2(brief=self.brief())
+        self.assertIn("STATUS: success", out)
+        self.assertLess(len(out), 1000)
+
+    def test_the_log_records_path_and_digest_only(self):
+        self.v2(brief=self.brief(addendum="secret text", chars=99))
+        rec = self.read_log()[-1]
+        self.assertEqual(rec["brief"], {"path": "pb.md", "sha256": "ab" * 8})
+
+    def test_ledger_gains_this_brief_only_with_prior_history(self):
+        first = self.v2(brief=self.brief())
+        self.assertNotIn("this brief:", first)     # no prior run used it
+        second = self.v2(brief=self.brief())
+        self.assertIn("this brief: 1 ok / 0 red", second)
+        other = self.v2(brief=self.brief(path="other.md"))
+        self.assertNotIn("this brief:", other)
+
+    def v2(self, **ctx_over):
+        return verdict.render("success", "s-1", ["attempt 1: VERIFY PASS"],
+                              RESULT_TEXT, [], 3,
+                              self.ctx(self.full_sha, **ctx_over), None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

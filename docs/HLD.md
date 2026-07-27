@@ -120,6 +120,9 @@ lines (fixed position, before the droppable C2 region), each only when applicabl
                                             # every receipt, green included; a part is
                                             # omitted when it would read zero/unknown
     RETRY OF: <session_id>                  # this run is a cold re-run of that session
+    BRIEF: <path> @ <sha16> [(amended)] · ~<n> tokens [(<n> amendments — consolidate)]
+                                            # U6: the document version that briefed the
+                                            # run; the nudge appears past 5 amendments
     TEST DODGE: <path> adds <marks> -- ...  # rendered on GREEN too, never droppable
     GATE SLOW: preflight took <s>s of a <b>s verify budget -- ...     # green too
     PREFLIGHT: green pre-run, declared expected (revision gate).      # expect="green"
@@ -298,6 +301,36 @@ deliverable and arrives in a minute or two. Additive-optional params added this 
     verify_timeout_sec: int        # arg > project/machine config > 300, clamped 10..3600
     preflight_expect: "red"|"green"|"any"   # unrecognised falls back to "any"
     advisory_gates: [{name, cmd}]  # never touch STATUS, never reach the worker
+
+*Amended by v0.5 phase 6 (2026-07-28): playbooks — briefs live in the repo, versioned
+by git, sent by name.* Additive-optional params, each spec-proven inert when absent:
+
+    brief_file: str   # repo-relative markdown document, realpath-confined to cwd: body
+                      # = the task (the call's `task` rides as an addendum), `---` front
+                      # matter supplies verify/touch_scope/shell_allow/approval_mode/
+                      # timeouts/preflight_expect/advisory_gates/max_iterations where
+                      # the call is silent (args > front matter > project > machine);
+                      # unknown keys, wrong-shaped values, unclosed fences refuse by
+                      # name. `chain: true` compiles `## Step <n>` sections into chain
+                      # links (preamble + own step each; leading verify:/touch_scope:
+                      # lines are per-step overrides) at the server seam
+                      # (`engine.expand_playbook`). trust/executor/worktree are
+                      # deliberately NOT front-matter keys — the caller's decisions.
+    vars: object      # fills {{slot}}s across the WHOLE file before parsing; unfilled
+                      # slots and keys matching no slot both refuse by name
+    amend_brief: bool # with retry_of: retry_message appends to the document as a dated
+                      # `## Amendments` line INSTEAD of the CORRECTION task append; the
+                      # write lands BEFORE the pre-run snapshot (pre-existing dirt,
+                      # never worker change) and only after the preconditions pass
+
+The worker editing the document is a `PLAYBOOK EDITED` trail line classified to the
+existing `spec_violation` status; protection is by CONTENT (sha captured post-amendment,
+restored via the T0 byte snapshot), never by base-diff — a base-diff would convict the
+amendment as a worker edit on every attempt. The stored brief (U5.5) keeps `brief_file`
++ `vars` + the caller's ADDENDUM — never the composed document (double-inline trap) and
+never front-matter-derived values (the document is the source of truth on retry). An
+oversized composed brief (>25% of the worker window, when known) refuses at precheck:
+`BRIEF TOO BIG`.
     chain: [item]                  # dependent, serial, halts on the first non-green;
                                    # mutually exclusive with `batch` (refused by name)
     report_dont_fix: bool          # one attempt, one gate run, status "reported"
@@ -344,10 +377,11 @@ Callers poll the file; no MCP surface changes. Two conditions are load-bearing: 
 wired ONLY alongside a burn budget (`limits.compose(burn, progress)`; any `on_line`
 switches the executor to stream-json, and the streaming adapter emits no `stats`, so a
 heartbeat on a `burn_budget: 0` run would silently cost it the tool counts), and it is
-written into the tree the run USES (`work_cwd`), behind `runlog_dir`'s self-ignoring
-`.gitignore`, while a submit response names the submit cwd's path — the two differ on a
-worktree run. `finish()` writes the terminal snapshot, or a poller cannot tell an ended
-run from a wedged one.
+written to the SUBMIT cwd — the path the submit response advertises — behind
+`runlog_dir`'s self-ignoring `.gitignore`. *(Amended by v0.5 phase 6: it was written
+into `work_cwd`, so a worktree run's pulse landed inside its container while the poller
+watched the advertised path — a heartbeat nobody could see.)* `finish()` writes the
+terminal snapshot, or a poller cannot tell an ended run from a wedged one.
 
 ## 6. Concurrency model
 

@@ -5,7 +5,9 @@ from qd.gittree import (
     head_sha, snapshot,
 )
 from qd.invoke import context_window, compaction_thresholds, cum_zero, compaction_state, truncate
-from qd.runlog import write_runlog, leverage_record, digest, ledger_summary
+from qd.runlog import (
+    write_runlog, leverage_record, digest, ledger_summary, brief_summary,
+)
 from qd import refs
 
 
@@ -167,6 +169,25 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # corrects can be found.
     if ctx.get("retry_of"):
         body.append(f"RETRY OF: {ctx['retry_of']}")
+
+    # U6: which document version briefed this run. On every receipt, green
+    # included -- the path @ digest is what lets a caller pair a result with
+    # the exact git-versioned brief that produced it. The size estimate and
+    # the consolidate nudge are the cheap half of brief-size discipline: an
+    # append-only amendment list that contradicts itself is session confusion
+    # in document form.
+    brief = ctx.get("brief")
+    if isinstance(brief, dict) and brief.get("path"):
+        line = f"BRIEF: {brief['path']} @ {brief.get('sha256')}"
+        if brief.get("amended"):
+            line += " (amended)"
+        chars = int(brief.get("chars") or 0)
+        if chars:
+            line += f" · ~{max(1, chars // 4):,} tokens"
+        n_amend = int(brief.get("amendments") or 0)
+        if n_amend > 5:
+            line += f" ({n_amend} amendments — consolidate)"
+        body.append(line)
 
     if not clean:
         for t in trail:
@@ -699,10 +720,19 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         _lw = context_window()
         pk = ledger["peak"]
         pk_txt = f"{100.0 * pk / _lw:.0f}%" if pk and _lw else f"{pk:,}"
-        c2_blocks.append((
+        ledger_txt = (
             f"LEDGER: run #{ledger['n'] + 1} · lifetime {ledger['ok']} ok / "
             f"{ledger['red']} red / {ledger['stopped']} stopped · "
-            f"peak-ctx record {pk_txt}", True, 6))
+            f"peak-ctx record {pk_txt}")
+        # U6: the same document's own record, only when prior runs used it --
+        # "this brief has cried red twice" is what tells a caller to amend the
+        # document rather than re-roll the worker.
+        if isinstance(ctx.get("brief"), dict) and ctx["brief"].get("path"):
+            bsum = brief_summary(cwd, ctx["brief"]["path"])
+            if bsum:
+                ledger_txt += (f" · this brief: {bsum['ok']} ok / "
+                               f"{bsum['red']} red")
+        c2_blocks.append((ledger_txt, True, 6))
 
     # RESUME: the affordance is cheaper than the education -- session resume
     # existed for 45 field delegations and went unused because nothing said so.
@@ -811,6 +841,11 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         extra["run_id"] = ctx["run_id"]
     if ctx.get("retry_of"):
         extra["retry_of"] = ctx["retry_of"]
+    # U6: path + digest only -- enough for brief_summary to group runs by
+    # document without the log accumulating brief text (digest() policy).
+    if isinstance(ctx.get("brief"), dict) and ctx["brief"].get("path"):
+        extra["brief"] = {"path": ctx["brief"]["path"],
+                          "sha256": ctx["brief"].get("sha256")}
     # C5, non-defaults only: one line per run is read whole by ledger_summary
     # and by people, and a key that says "300"/"any" in every record is noise
     # that hides the runs where somebody actually turned a knob.

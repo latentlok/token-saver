@@ -19,10 +19,10 @@ from qd.profiles import resolve, cost_usd
 from qd.invoke import (
     run_executor, accum_stats, cum_zero,
     was_compacted_since_ack, ack_compaction, compaction_counts,
-    truncate, stall_seconds as invoke_stall_seconds,
+    truncate, stall_seconds as invoke_stall_seconds, context_window,
 )
 from qd.gittree import (
-    git, is_git_repo,
+    git, is_git_repo, file_sha,
     snapshot, violated_specs, revert_specs, untracked_files,
     snapshot_contents, restore_paths, dodge_markers,
     committed_during_run, head_sha, new_public_symbols, numstat_map,
@@ -35,6 +35,7 @@ from qd.bootstrap import (
 )
 from qd.runlog import runlog_dir, save_brief, load_brief, BRIEFS_DIR
 from qd import doctor
+from qd import playbook
 from qd import jsonschema
 from qd import limits
 from qd import worktrees
@@ -399,6 +400,10 @@ BRIEF_KEYS = (
     "verify_timeout_sec", "preflight_expect", "worktree", "executor",
     "report_dont_fix", "fixture_provenance", "advisory_gates",
     "result_schema", "on_compaction", "workers",
+    # U6: a retry replays the same DOCUMENT, not a frozen copy of its text.
+    # `amend_brief` is deliberately NOT here: stored, it would re-amend the
+    # document on every later retry of that session.
+    "brief_file", "vars",
 )
 
 _CORRECTION = ("\n\nCORRECTION (from the caller, after reviewing your "
@@ -444,9 +449,81 @@ def _resolve_retry(args):
         merged[key] = value
     merged.pop("session_id", None)
     message = (args.get("retry_message") or "").strip()
-    if message:
+    # U6: `amend_brief` REPLACES the correction append -- the amendment IS the
+    # correction channel, and appending here too would send the same sentence
+    # twice, once as prose and once as a line of the document.
+    if message and not args.get("amend_brief"):
         merged["task"] = (merged.get("task") or "") + _CORRECTION + message
     return merged, None
+
+
+def resolve_call(args, amend=False):
+    """Resolve a call to its runnable form (U5.5 + U6): the retry brief first
+    (it is what carries `brief_file` on a retry), then the amendment, then the
+    playbook. Returns (args, refusal|None).
+
+    `precheck` runs this with amend=False and `_delegate` with amend=True, so
+    the amendment is written exactly once per run -- and `_delegate` runs its
+    preconditions BEFORE the amend pass, so a refused run never edits the
+    caller's document.
+    """
+    args, refusal = _resolve_retry(args)
+    if refusal:
+        return args, refusal
+    amended = False
+    if args.get("amend_brief"):
+        # Shape refusals fire on BOTH passes (so the submit answers them
+        # synchronously); only the amend=True pass writes.
+        if not args.get("retry_of"):
+            return args, (
+                "amend_brief without retry_of: the amendment is the "
+                "correction channel for a STORED brief -- pass "
+                "retry_of=<session> with a retry_message, or drop amend_brief.")
+        if not args.get("brief_file"):
+            return args, (
+                "amend_brief: the stored brief for that session has no "
+                "brief_file -- there is no document to amend. Use "
+                "retry_message alone.")
+        message = (args.get("retry_message") or "").strip()
+        if not message:
+            return args, (
+                "amend_brief with no retry_message: an amendment is a dated "
+                "correction line, and there is nothing to write.")
+        if amend:
+            refusal = playbook.amend(args.get("cwd") or ".",
+                                     args["brief_file"], message,
+                                     time.strftime("%Y-%m-%d"))
+            if refusal:
+                return args, refusal
+            amended = True
+    return playbook.resolve(args, amended=amended)
+
+
+def expand_playbook(args):
+    """The server seam (U6): compile a `chain: true` playbook into `chain`
+    items BEFORE the submit routes the call. Returns (args, refusal|None).
+
+    Args come back UNCHANGED unless the playbook compiled to a chain (then
+    `chain` is set and `brief_file`/`vars` are consumed) -- the single path
+    resolves its own brief inside the run, which is what keeps the amendment
+    on exactly one code path.
+    """
+    if not args.get("brief_file"):
+        return args, None
+    if args.get("chain") or args.get("batch"):
+        return args, (
+            "`brief_file` describes ONE delegation (or compiles to its own "
+            "chain) -- it cannot ride beside `chain`/`batch`. Put brief_file "
+            "on the items instead.")
+    resolved, refusal = playbook.resolve(dict(args))
+    if refusal:
+        return args, refusal
+    if resolved.get("chain"):
+        out = dict(resolved)
+        out.pop("brief_file", None)
+        out.pop("vars", None)
+        return out, None
+    return args, None
 
 
 def _refusal(text, max_iter=_DEFAULT_MAX_ITER):
@@ -501,9 +578,29 @@ def _preconditions(args):
     a second pass would find the file already in place and the receipt would
     silently lose the line saying it had just been made.
     """
-    args, retry_refusal = _resolve_retry(args)
-    if retry_refusal:
-        return {"refusal": retry_refusal, "bootstrap_note": None}
+    # U6: resolved BEFORE the trust/gate-expectation checks below, because the
+    # front matter can supply `verify` -- and verify's presence is what decides
+    # the preflight_expect="green" + trust="self" contradiction refusal.
+    args, refusal = resolve_call(args, amend=False)
+    if refusal:
+        return {"refusal": refusal, "bootstrap_note": None}
+
+    # U6 size guard: a huge brief costs the caller a filename, but the worker
+    # pays it as peak context -- and under the refuse policy that converts to
+    # compaction_refused deaths. Refused at submit, where the fix is cheap.
+    brief_meta = args.get("_brief")
+    if isinstance(brief_meta, dict):
+        win = context_window()
+        est = int(brief_meta.get("chars") or 0) // 4
+        if win and est > win * 0.25:
+            return {"refusal": (
+                f"BRIEF TOO BIG: {brief_meta.get('path')} composes to "
+                f"~{est:,} tokens -- over a quarter of the worker's "
+                f"{win:,}-token window before it reads a single file. Split "
+                f"the document into `## Step` sections with `chain: true`, "
+                f"or consolidate its amendments into the body."
+            ), "bootstrap_note": None}
+
     cwd = args["cwd"]
     verify = args.get("verify")
     # Config-aware for the same reason the engine is (U5.6): a project that
@@ -609,12 +706,34 @@ def delegate(args):
 
 
 def _delegate(args, t0_dir):
-    # U5.5: a `retry_of` call is the stored brief plus this call's overrides,
-    # resolved before anything reads an argument. Idempotent with the server's
-    # own pass (see precheck) -- both compute it from the caller's args.
-    args, retry_refusal = _resolve_retry(args)
-    if retry_refusal:
-        return _refusal(retry_refusal)
+    # --- Preconditions (U5.2: also runnable pre-spawn, see precheck) ---
+    # Run FIRST when the server has not already run them: resolve_call's
+    # amend=True pass below WRITES the amendment, and a run any precondition
+    # refuses must not have edited the caller's document. When the server did
+    # precheck, the result rides in on PRECHECK_ARG and is NOT recomputed --
+    # the bootstrap step writes a file, and running it twice would drop the
+    # notice that says so.
+    pre = args.get(PRECHECK_ARG)
+    if not isinstance(pre, dict) or pre.get("token") != _PRECHECK_TOKEN:
+        pre = precheck(args)
+    if pre.get("refusal"):
+        return _refusal(pre["refusal"])
+    bootstrap_note = pre.get("bootstrap_note")
+
+    # U5.5 + U6: the stored brief, then the amendment (written exactly once,
+    # here), then the playbook -- resolved before anything reads an argument.
+    # Idempotent with the server's precheck pass, which resolves its own copy.
+    args, refusal = resolve_call(args, amend=True)
+    if refusal:
+        return _refusal(refusal)
+    if args.get("chain") and args.get("_brief"):
+        # A single-run path cannot execute links. Reachable only when a stored
+        # or directly-passed brief compiles to a chain outside the server seam
+        # (e.g. retry_of a document later edited to chain: true).
+        return _refusal(
+            "this brief compiles to a chain (`chain: true`) -- submit it as "
+            "its own qwen_delegate call so the server runs the links; "
+            "retry_of replays one link, never a document.")
     task = args["task"]
     cwd = args["cwd"]
     verify = args.get("verify")
@@ -683,19 +802,8 @@ def _delegate(args, t0_dir):
     if not isinstance(result_schema, dict):
         result_schema = None
 
-    # --- Preconditions (U5.2: also runnable pre-spawn, see precheck) ---
-    # The server prechecks a submitted run so its refusals come back in the
-    # tool response; when it did, the result rides in on PRECHECK_ARG and is
-    # NOT recomputed -- the bootstrap step writes a file, and running it twice
-    # would drop the notice that says so.
-    pre = args.get(PRECHECK_ARG)
-    if not isinstance(pre, dict) or pre.get("token") != _PRECHECK_TOKEN:
-        pre = precheck(args)
-    if pre.get("refusal"):
-        return _refusal(pre["refusal"], max_iter)
-    bootstrap_note = pre.get("bootstrap_note")
-    # Past the precheck this is a fact, not a question: a non-repo cwd was
-    # refused above.
+    # Past the precheck (top of this function) this is a fact, not a
+    # question: a non-repo cwd was refused there.
     guard_on = True
     trust = (args.get("trust")
              or _project_config(cwd).get("trust")
@@ -762,6 +870,16 @@ def _delegate(args, t0_dir):
     rc_t, out_t = git(work_cwd, "ls-tree", "-r", "--name-only",
                       pre_sha_full or "HEAD")
     pre_tracked = set(out_t.splitlines()) if rc_t == 0 and out_t else set()
+
+    # U6: the brief document is protected by CONTENT, not by the spec guard's
+    # base diff -- the amendment dirties it before the run, and a diff against
+    # the pre-run sha would convict the amendment as a worker edit on every
+    # attempt. Captured right after the T0 snapshot so a revert restores the
+    # AMENDED bytes (dirty path) or the HEAD content (clean worktree copy).
+    brief_meta = args.get("_brief") if isinstance(args.get("_brief"), dict) \
+        else None
+    brief_rel = (brief_meta or {}).get("path")
+    brief_sha0 = file_sha(work_cwd, brief_rel) if brief_rel else None
 
     # --- Pre-flight verify ---
     preflight = None
@@ -887,6 +1005,9 @@ def _delegate(args, t0_dir):
         "gate_slow": bool(verify) and gate_ms > verify_timeout * 500,
         # U5.5: this run is a corrected re-run of another session, started cold.
         "retry_of": args.get("retry_of"),
+        # U6: which document briefed this run -- the receipt names it and the
+        # ledger groups by it. None whenever no brief_file was involved.
+        "brief": brief_meta,
         # C3 features (U4.1/U4.2/U4.3): every one of these renders nothing when
         # its param was never passed.
         "report": report,
@@ -929,13 +1050,15 @@ def _delegate(args, t0_dir):
     # run_executor switches to stream-json for any on_line, and the streaming
     # adapter emits no `stats` -- so a heartbeat attached to a burn_budget=0 run
     # would silently cost it the tool counts and the bySource token split that
-    # batch mode is kept for. The sidecar lives in the tree the run uses, behind
-    # runlog_dir's self-ignoring .gitignore, or the guards below would read the
-    # heartbeat as the worker's work.
+    # batch mode is kept for. The sidecar lands in the SUBMIT cwd, not the
+    # work tree: the poller was handed <cwd>/.qwen-delegate/progress.json at
+    # submit time, and a worktree run's pulse written inside its container is
+    # a heartbeat nobody is watching. runlog_dir's self-ignoring .gitignore
+    # keeps it out of the guards' view of the caller's tree.
     progress = None
     if burn:
-        runlog_dir(work_cwd)
-        progress = limits.Progress(work_cwd, session_id=session_id)
+        runlog_dir(cwd)
+        progress = limits.Progress(cwd, session_id=session_id)
     on_line = limits.compose(burn, progress) if burn else None
 
     # U1.4, ships dark (config-only, default off until probe P1): run auto-edit
@@ -1142,6 +1265,52 @@ def _delegate(args, t0_dir):
                     )
                 continue
             break
+
+        # --- Brief protection (U6) ---
+        # Compared by CONTENT against the post-amendment capture, with the
+        # spec guard's C10 attribution split: an unattributed change is a
+        # caller's edit on the same tree -- reported, never reverted.
+        if brief_rel:
+            brief_edited = file_sha(work_cwd, brief_rel) != brief_sha0
+            if brief_edited and hooked \
+                    and brief_rel not in (ctx.get("writes") or []):
+                if brief_rel not in ctx["spec_unattributed"]:
+                    ctx["spec_unattributed"].append(brief_rel)
+                    trail.append(
+                        f"attempt {attempt}: PLAYBOOK CHANGED (unattributed) "
+                        f"-- {brief_rel} differs from its pre-run content "
+                        f"with no logged worker write; NOT reverted")
+                brief_edited = False
+            if brief_edited:
+                restore_paths(work_cwd, [brief_rel], base=pre_sha_full,
+                              t0=t0_saved)
+                trail.append(f"attempt {attempt}: PLAYBOOK EDITED -- "
+                             f"{brief_rel} (auto-reverted)")
+                if attempt < max_iter:
+                    prompt = (
+                        f"You edited the brief document ({brief_rel}). That "
+                        f"file defines the task you were given and has been "
+                        f"reverted. Never modify the brief: do the work it "
+                        f"describes, and if you believe the brief is wrong, "
+                        f"stop and say so instead of editing it."
+                    )
+                    if was_compacted_since_ack(session_id):
+                        ack_compaction(session_id)
+                        send_suffix = True
+                        if on_compaction == "discard":
+                            ctx["discards"] += 1
+                            session_id = None
+                        else:
+                            ctx["reinjects"] += 1
+                        prompt += (
+                            f"\n\nYour conversation history was summarised "
+                            f"(compacted), so you may have lost the original "
+                            f"instructions and any summary of your earlier "
+                            f"work may be inaccurate. Re-read the files; do "
+                            f"not reconstruct it.\n\nOriginal task:\n{task}"
+                        )
+                    continue
+                break
 
         # --- Post snapshot (shared by touch scope + C8 prefilter) ---
         post_snap = snapshot(work_cwd)
@@ -1353,6 +1522,10 @@ def _delegate(args, t0_dir):
         status = "compaction_refused"
     elif "SPEC VIOLATION" in trail[-1].upper():
         status = "spec_violation"
+    elif "PLAYBOOK EDITED" in trail[-1]:
+        # U6: same offence class as a spec edit -- the worker rewrote the
+        # document that defines its own task -- so C3 gains no new status.
+        status = "spec_violation"
     elif "TOUCH SCOPE VIOLATION" in trail[-1]:
         status = "scope_violation"
     elif "IDENTICAL to preflight" in trail[-1]:
@@ -1467,9 +1640,21 @@ def _delegate(args, t0_dir):
     # caller sent (corrections included, the project's task_suffix not), so
     # retries accumulate the corrections and never a stack of suffixes.
     if session_id and cfg.get("store_briefs", True) is not False:
+        skip = {"task"}
+        used_doc = bool(args.get("brief_file")) and brief_meta is not None
+        if used_doc:
+            # U6: front-matter-supplied values are NOT frozen into the stored
+            # brief -- the document is the source of truth and a retry re-reads
+            # it; a stored copy would beat an edited document on every retry.
+            skip.update(brief_meta.get("filled") or ())
         brief = {k: args[k] for k in BRIEF_KEYS
-                 if args.get(k) is not None and k != "task"}
-        brief["task"] = base_task
+                 if args.get(k) is not None and k not in skip}
+        # U6 (the quiet trap): with a brief_file the composed task IS the
+        # document -- storing it would make a retry inline the document twice
+        # (once re-read, once as the stored addendum). Store the caller's
+        # ORIGINAL task instead. A compiled chain link has no brief_file, so
+        # it stores its composed link task and retries as a plain run.
+        brief["task"] = brief_meta.get("addendum", "") if used_doc else base_task
         brief["trust"] = trust
         save_brief(cwd, session_id, brief)
 

@@ -180,3 +180,44 @@ form). Four layers, first two are cheap units of THIS phase:
 Discipline rule for USAGE: the playbook carries the DELEGATION (task, gate,
 scope), never the design doc — background stays in stable repo docs the worker
 reads on demand.
+
+## Build log — playbooks
+
+2026-07-28, built inline (no agent, user-directed). Suite 706 → **775 tests,
+exit 0**. All nine build-order items landed as designed; the traps above held
+on contact. Deliberate deviations, each spec-pinned:
+
+- `_delegate` runs its PRECONDITIONS before the amend pass (precheck first,
+  then `resolve_call(amend=True)`), so "never amend a refused run" holds for
+  direct engine calls too, not just the server path. Refusals therefore carry
+  the default max_iter — nothing pinned the old value.
+- `playbook.amend(cwd, rel, message, date)` — cwd-first signature so path
+  confinement lives entirely in qd/playbook.read; the design's `amend(path,…)`
+  had the engine doing its own confinement.
+- Front matter validates value SHAPES by name (list/int/bool/str per key) on
+  top of the json-else-string rule: a bare-string `touch_scope` would have
+  bound as substring matching — silently wrong in the engine. Consequence:
+  `verify: true` (the shell no-op) must be quoted `"true"`.
+- Stored briefs exclude front-matter-supplied values (`_brief.filled`): the
+  document is the source of truth, so a value edited between run and retry
+  binds on the retry. Stored task = the caller's ADDENDUM when a document was
+  used (the double-inline trap, closed); a compiled link stores its composed
+  link task and retries as a plain run.
+- `amend_brief` with no `retry_message`, `brief_file` beside `chain`/`batch`,
+  and a `chain: true` document reaching the single-run path (retry_of of a
+  later-chained document) are all refused by name.
+- Unattributed brief changes reuse `ctx["spec_unattributed"]` + a
+  `PLAYBOOK CHANGED (unattributed)` trail line (C10 split, no new ctx key).
+- Size discipline layers 1–2 shipped: BRIEF: line carries `~N tokens` always
+  and `(N amendments — consolidate)` past 5; precheck refuses `BRIEF TOO BIG`
+  over 25% of `context_window()` (per LINK for compiled chains, since each
+  link carries its own `_brief.chars`).
+- `runlog.brief_summary(cwd, path)` → `{n, ok, red}`; red includes stopped
+  (the document's credibility was spent either way).
+
+Docs: HLD C9 dated amendment (brief_file/vars/amend_brief), C2 `BRIEF:` line,
+C11 rewritten to the submit-cwd rule (engine_spec heartbeat worktree test
+inverted accordingly). SKILL.md gained the Playbooks section + ask-list line;
+CLAUDE-snippet gained one capability line. README/USAGE untouched (task #2).
+New: qd/playbook.py, specs/playbook_spec.py (39 tests); amended: engine,
+server, verdict, runlog, schemas + engine/async/verdict/runlog specs.

@@ -230,6 +230,43 @@ class LedgerSummary(unittest.TestCase):
                          {"n": 1, "ok": 1, "red": 0, "stopped": 0, "peak": 10})
 
 
+class BriefSummary(LedgerSummary):
+    """U6: the ledger's per-document reader. A second helper beside
+    ledger_summary rather than a filter argument on it -- ledger_summary's
+    return shape is already fixed by this spec and its callers."""
+
+    def rec(self, status, path="pb.md", **over):
+        r = {"tool": "qwen_delegate", "status": status,
+             "brief": {"path": path, "sha256": "ab" * 8}}
+        r.update(over)
+        return r
+
+    def test_none_when_no_run_recorded_the_path(self):
+        self.assertIsNone(runlog.brief_summary(self.cwd, "pb.md"))
+        self.seed([self.rec("success", path="other.md"),
+                   {"tool": "qwen_delegate", "status": "success"}])
+        self.assertIsNone(runlog.brief_summary(self.cwd, "pb.md"))
+
+    def test_ok_is_the_two_greens_red_is_every_other_completed(self):
+        self.seed([self.rec("success"),
+                   self.rec("success_but_preflight_passed"),
+                   self.rec("verify_failed"),
+                   # A stopped run still spent the document's credibility.
+                   self.rec("stopped")])
+        self.assertEqual(runlog.brief_summary(self.cwd, "pb.md"),
+                         {"n": 4, "ok": 2, "red": 2})
+
+    def test_a_running_submission_is_not_counted(self):
+        self.seed([self.rec("running", run_id="rabc123"),
+                   self.rec("success")])
+        self.assertEqual(runlog.brief_summary(self.cwd, "pb.md"),
+                         {"n": 1, "ok": 1, "red": 0})
+
+    def test_corrupt_lines_must_not_hide_the_rest(self):
+        self.seed([self.rec("success")], corrupt=True)
+        self.assertEqual(runlog.brief_summary(self.cwd, "pb.md")["n"], 1)
+
+
 class RunsInFlight(LedgerSummary):
     """U5.2: which submitted runs have not come back, and which died trying.
 

@@ -603,5 +603,37 @@ class Inertness(Fixture):
         self.assertEqual(out, GREEN)
 
 
+class PlaybookSubmission(Fixture):
+    """U6 at the submit seam: a `chain: true` playbook must expand BEFORE
+    routing -- the submission has to know it is a chain (per-link guards,
+    PARTIAL receipts, no single-run precheck)."""
+
+    CHAIN_DOC = ("---\nchain: true\nverify: bash gate.sh\n---\n"
+                 "Shared context.\n\n## Step 1\nFirst.\n\n## Step 2\nSecond.\n")
+
+    def test_a_chain_playbook_submits_as_a_chain_with_a_partial(self):
+        self.patch_engine(run=self.recorder())
+        with open(os.path.join(self.cwd, "ch.md"), "w") as f:
+            f.write(self.CHAIN_DOC)
+        out = self.submit(task="", brief_file="ch.md")
+        self.assertIn("PARTIAL:", out)
+        self.drain()
+        self.assertEqual(len(self.seen), 2)
+        for args in self.seen:
+            self.assertNotIn("brief_file", args)
+            self.assertEqual(args["_brief"]["path"], "ch.md")
+            self.assertEqual(args["_run_id"], self.field(out, "RUN"))
+
+    def test_a_single_playbook_still_submits_as_a_single(self):
+        self.patch_engine(run=self.recorder())
+        with open(os.path.join(self.cwd, "pb.md"), "w") as f:
+            f.write("Build it.\n")
+        out = self.submit(task="", brief_file="pb.md")
+        self.assertNotIn("PARTIAL:", out)
+        self.drain()
+        self.assertEqual(len(self.seen), 1)
+        self.assertEqual(self.seen[0]["brief_file"], "pb.md")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

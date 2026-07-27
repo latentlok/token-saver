@@ -83,6 +83,10 @@ spending your context. Treat its answers as leads to verify, not as truth.
   it replays the stored brief COLD with your correction, no retyping. And when you need
   a value back rather than prose, `result_schema` (on `qwen_delegate` and `qwen_query`)
   makes the worker end with a JSON block the server validates for you.
+- A recurring brief belongs in the repo: `brief_file: "playbooks/x.md"` sends a
+  markdown document by name (body = task, front matter = gate/scope, `{{slot}}`s from
+  `vars`, `chain: true` steps → chain); `amend_brief` on a retry folds the correction
+  into the document, versioned by git.
 - Prefer `auto-edit`. `scoped` grants a shell and is not a sandbox.
 - Bound the blast radius when you know the target: pass `touch_scope=["a.py","b.py"]` and
   any edit to another *existing* file auto-reverts (new files stay allowed). Worth it under

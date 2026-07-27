@@ -206,8 +206,26 @@ make the criticality call on every delegation.
 **Hygiene:** re-read any file Qwen touched before editing it yourself (your cached copy
 is stale); parallel delegations need separate worktrees — `batch` handles that for you.
 
+## Playbooks (briefs as repo files)
+
+A recurring or heavyweight brief belongs in the repo, not retyped per call:
+`brief_file: "playbooks/x.md"` sends the document by name — its body is the task (your
+`task` rides along as an addendum), `---` front matter carries verify/touch_scope/
+timeouts where the call is silent (your args always win), and `{{slot}}`s fill from
+`vars` (both directions refused by name on a mismatch). The receipt pins
+`BRIEF: path @ digest`, the ledger tallies per document, and the worker editing the
+document reverts like a spec edit. On a retry, `amend_brief: true` folds your
+`retry_message` into the document as a dated `## Amendments` line — git versions the
+correction, so the next reader inherits it. Big document? `chain: true` compiles
+`## Step <n>` sections into a chain (each link gets the preamble + its own step, so
+per-link context stays flat); past ~5 amendments the receipt says consolidate. Keep the
+document to the DELEGATION (task, gate, scope) — background belongs in stable repo docs
+the worker reads on demand.
+
 ## Ask for these when they fit
 
+- **`brief_file` (+ `vars`, `amend_brief`)** — the brief as a versioned repo document;
+  see Playbooks above.
 - **`preflight_expect`** — `"red"` (greenfield) refuses a gate that already passes;
   `"green"` (revision) stops the preflight alarm on a suite that was green by premise.
 - **`verify_timeout_sec`** — kill time for ONE gate run (default 300); a pre-flight that

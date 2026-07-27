@@ -146,6 +146,18 @@ TOOL = json.loads(r'''
         "type": "object",
         "description": "The SHAPE you need back. The worker is told to end its reply with a fenced ```json block conforming to this (subset: type, required, properties, items, enum); the server validates it, feeds every violation back by path like a failed gate, and ends the run 'result_invalid' if the attempts run out. The receipt carries the block verbatim -- you parse a value instead of prose."
       },
+      "brief_file": {
+        "type": "string",
+        "description": "Repo-relative markdown playbook to use as the brief: its body becomes the task (your `task` rides along as an addendum), `---` front matter supplies verify/touch_scope/approval_mode/timeouts where the call does not, and {{slot}}s fill from `vars`. Front matter `chain: true` compiles `## Step <n>` sections into a chain. The receipt pins `BRIEF: path @ digest`; the worker editing the document is reverted like a spec edit. Versioned by git -- send the name, not the text."
+      },
+      "vars": {
+        "type": "object",
+        "description": "Values for the {{slot}} placeholders in brief_file. An unfilled slot and a key matching no slot are both refused by name."
+      },
+      "amend_brief": {
+        "type": "boolean",
+        "description": "With retry_of: append retry_message to the playbook itself as a dated `## Amendments` line (git versions the correction) INSTEAD of a CORRECTION on the task text. The amendment lands before the run's snapshot, so it reads as pre-existing dirt, never worker change."
+      },
       "retry_of": {
         "type": "string",
         "description": "session_id of an earlier delegation in this cwd: re-run its STORED brief (task, gate, scope, mode, trust) with `retry_message` appended, COLD -- no session resume, because a session that failed argues with the correction. Pass `task: \"\"` to reuse the stored task; any argument you do pass beats the stored one. Briefs live in .qwen-delegate/briefs/ (project key `store_briefs: false` opts out)."

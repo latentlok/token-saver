@@ -1376,11 +1376,14 @@ class Heartbeat(Fixture):
         self.assertEqual(r["status"], "success")
         self.assertEqual(r["ctx"]["tree_facts"]["changed"], ["out.py"])
 
-    def test_a_worktree_run_beats_inside_its_container(self):
+    def test_a_worktree_run_beats_in_the_submit_cwd(self):
+        # C11 fix (U6 round): the poller was handed
+        # <cwd>/.qwen-delegate/progress.json at submit time, so a pulse
+        # written inside the container was a heartbeat nobody was watching.
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         r = self.delegate(worktree="auto")
-        self.assertIsNone(limits.read_progress(self.cwd))
-        self.assertIsNotNone(
+        self.assertIsNotNone(limits.read_progress(self.cwd))
+        self.assertIsNone(
             limits.read_progress(r["ctx"]["worktree"]["path"]))
 
 
@@ -2268,6 +2271,193 @@ class AsyncEndToEnd(Fixture):
         self.assertTrue(submission.startswith("STATUS: submitted"))
         receipt = self.wait_receipt(self.receipt_path(submission))
         self.assertIn("GATE VACUOUS", receipt)
+
+
+class Playbooks(Fixture):
+    """U6: the brief is a repo file sent by name. What the ENGINE owes it:
+    the document briefs the run and its front matter binds where the call is
+    silent; a worker edit to it is reverted like a spec edit (by CONTENT, not
+    base-diff -- the amendment dirties the file before T0); the amendment is
+    the correction channel and lands BEFORE the pre-run snapshot; the stored
+    brief holds the caller's addendum, never the composed document (the
+    double-inline trap); and every new param is inert when absent."""
+
+    DOC = ("---\nverify: grep -q MARKER out.py\n---\n"
+           "UNIQUEBODYLINE: build out.py containing MARKER.\n")
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(self.cwd, "pb.md"), "w") as f:
+            f.write(self.DOC)
+        subprocess.run(["git", "-C", self.cwd, "add", "pb.md"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "playbook"],
+                       check=True)
+
+    def brief_args(self, **over):
+        args = {"task": "", "cwd": self.cwd, "brief_file": "pb.md",
+                "approval_mode": "auto-edit", "executor": "stub"}
+        args.update(over)
+        return args
+
+    def pb(self):
+        with open(os.path.join(self.cwd, "pb.md")) as f:
+            return f.read()
+
+    def reset_out(self):
+        """Make the gate red again before a retry -- the first run's out.py
+        would otherwise turn every retry into a demoted preflight-pass."""
+        os.remove(os.path.join(self.cwd, "out.py"))
+
+    def test_the_document_briefs_the_run_and_its_gate_binds(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = engine.delegate(self.brief_args(task="Focus on utf-8."))
+        self.assertEqual(r["status"], "success")
+        self.assertIn("UNIQUEBODYLINE", self.task_seen(1))
+        self.assertIn("Focus on utf-8.", self.task_seen(1))
+        self.assertEqual(r["ctx"]["verify"], "grep -q MARKER out.py")
+        self.assertEqual(r["ctx"]["brief"]["path"], "pb.md")
+        self.assertEqual(len(r["ctx"]["brief"]["sha256"]), 16)
+
+    def test_a_worker_edit_to_the_document_is_reverted_and_classified(self):
+        self.steps([{"write": {"pb.md": "HIJACKED\n"}}])
+        r = engine.delegate(self.brief_args(max_iterations=1))
+        self.assertEqual(r["status"], "spec_violation")
+        self.assertIn("PLAYBOOK EDITED", r["trail"][0])
+        self.assertEqual(self.pb(), self.DOC)     # tracked-clean: from HEAD
+
+    def test_the_revert_feeds_back_and_the_worker_recovers(self):
+        self.steps([{"write": {"pb.md": "HIJACKED\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = engine.delegate(self.brief_args())
+        self.assertEqual(r["status"], "success")
+        self.assertIn("brief document", self.task_seen(2))
+        self.assertEqual(self.pb(), self.DOC)
+
+    def test_an_untracked_document_is_restored_from_t0_bytes(self):
+        # New playbook, never committed: dirty at T0, so the byte snapshot --
+        # not HEAD, which has no copy -- is what the revert restores from.
+        with open(os.path.join(self.cwd, "new.md"), "w") as f:
+            f.write(self.DOC)
+        self.steps([{"write": {"new.md": "HIJACKED\n"}}])
+        r = engine.delegate(self.brief_args(brief_file="new.md",
+                                            max_iterations=1))
+        self.assertEqual(r["status"], "spec_violation")
+        with open(os.path.join(self.cwd, "new.md")) as f:
+            self.assertEqual(f.read(), self.DOC)
+
+    def test_an_unattributed_document_change_is_warned_not_reverted(self):
+        self.steps([{"write": {"pb.md": "CALLER REWROTE\n",
+                               "out.py": "MARKER\n"},
+                     "write_log": [os.path.join(self.cwd, "out.py")]}])
+        r = engine.delegate(self.brief_args(approval_mode="scoped"))
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(self.pb(), "CALLER REWROTE\n")   # a caller's edit stands
+        self.assertEqual(r["ctx"]["spec_unattributed"], ["pb.md"])
+        self.assertIn("PLAYBOOK CHANGED (unattributed)", r["trail"][0])
+        self.assertNotIn("PLAYBOOK EDITED", " ".join(r["trail"]))
+
+    def test_the_amendment_lands_before_the_snapshot_and_survives(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r1 = engine.delegate(self.brief_args())
+        self.assertEqual(r1["status"], "success")
+        self.reset_out()
+        r2 = engine.delegate(self.brief_args(
+            retry_of=r1["session_id"], amend_brief=True,
+            retry_message="also check bytes input"))
+        self.assertEqual(r2["status"], "success")
+        # The document gained the dated line, the run read it as task text,
+        # and no guard called the amendment the worker's edit or reverted it.
+        self.assertIn("## Amendments", self.pb())
+        self.assertIn("also check bytes input", self.pb())
+        self.assertIn("also check bytes input", self.task_seen(2))
+        self.assertNotIn("CORRECTION", self.task_seen(2))
+        self.assertNotIn("PLAYBOOK EDITED", " ".join(r2["trail"]))
+        self.assertTrue(r2["ctx"]["brief"]["amended"])
+        # Amending before the snapshot makes the tree dirty at T0 -- the
+        # stated point (pre-existing dirt, never worker change). Honest.
+        self.assertFalse(r2["ctx"]["pre_clean"])
+
+    def test_amend_brief_is_not_replayed_by_a_later_retry(self):
+        # Stored, it would re-amend the document on every retry of that
+        # session; the BRIEF_KEYS allowlist excludes it deliberately.
+        self.steps([{"write": {"out.py": "MARKER\n"}}] * 3)
+        r1 = engine.delegate(self.brief_args())
+        self.reset_out()
+        r2 = engine.delegate(self.brief_args(
+            retry_of=r1["session_id"], amend_brief=True,
+            retry_message="amended once"))
+        from qd.runlog import load_brief
+        stored = load_brief(self.cwd, r2["session_id"])["args"]
+        self.assertNotIn("amend_brief", stored)
+        self.reset_out()
+        r3 = engine.delegate(self.brief_args(
+            retry_of=r2["session_id"], retry_message="plain correction"))
+        self.assertEqual(r3["status"], "success")
+        from qd import playbook
+        self.assertEqual(playbook.amendment_count(self.pb()), 1)
+        self.assertIn("CORRECTION", self.task_seen(3))
+
+    def test_amend_brief_without_retry_of_is_refused_by_name(self):
+        r = engine.delegate(self.brief_args(amend_brief=True,
+                                            retry_message="m"))
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("retry_of", r["result_text"])
+
+    def test_the_stored_brief_holds_the_addendum_not_the_document(self):
+        # The quiet trap: storing the composed text makes a retry inline the
+        # document twice -- once re-read, once as the stored task.
+        self.steps([{"write": {"out.py": "MARKER\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r1 = engine.delegate(self.brief_args(task="Focus on utf-8."))
+        from qd.runlog import load_brief
+        stored = load_brief(self.cwd, r1["session_id"])["args"]
+        self.assertEqual(stored["task"], "Focus on utf-8.")
+        self.assertEqual(stored["brief_file"], "pb.md")
+        # Front-matter values are NOT frozen in: the document is the source
+        # of truth and the retry re-reads it.
+        self.assertNotIn("verify", stored)
+        self.reset_out()
+        r2 = engine.delegate(self.brief_args(retry_of=r1["session_id"]))
+        self.assertEqual(r2["status"], "success")
+        self.assertEqual(self.task_seen(2).count("UNIQUEBODYLINE"), 1)
+
+    def test_a_chain_document_cannot_run_as_a_single(self):
+        with open(os.path.join(self.cwd, "ch.md"), "w") as f:
+            f.write("---\nchain: true\nverify: grep -q MARKER out.py\n---\n"
+                    "## Step 1\nDo it.\n")
+        r = engine.delegate(self.brief_args(brief_file="ch.md"))
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("compiles to a chain", r["result_text"])
+
+    def test_an_oversized_brief_is_refused_at_precheck(self):
+        real = engine.context_window
+        engine.context_window = lambda: 4000
+        self.addCleanup(setattr, engine, "context_window", real)
+        with open(os.path.join(self.cwd, "big.md"), "w") as f:
+            f.write(self.DOC + "x" * 8000)
+        pre = engine.precheck(self.brief_args(brief_file="big.md"))
+        self.assertIn("BRIEF TOO BIG", pre["refusal"])
+        self.assertIn("chain: true", pre["refusal"])
+
+    def test_front_matter_verify_satisfies_the_gate_expectation_check(self):
+        # Ordering pin: resolve_call runs before the trust checks, so a
+        # document-supplied gate defuses the preflight_expect="green" +
+        # trust="self" contradiction refusal.
+        with open(os.path.join(self.cwd, "rev.md"), "w") as f:
+            f.write("---\nverify: grep -q ORIGINAL other.py\n---\n"
+                    "Revision work on a green suite.\n")
+        self.steps([{}])
+        r = engine.delegate(self.brief_args(brief_file="rev.md",
+                                            preflight_expect="green",
+                                            trust="self"))
+        self.assertEqual(r["status"], "success")
+
+    def test_absent_the_params_the_same_run_is_untouched(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertIsNone(r["ctx"]["brief"])
 
 
 if __name__ == "__main__":
