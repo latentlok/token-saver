@@ -218,6 +218,77 @@ class LedgerSummary(unittest.TestCase):
                     "peak_context": 5}], corrupt=True)
         self.assertEqual(runlog.ledger_summary(self.cwd)["n"], 1)
 
+    def test_an_in_flight_submission_is_not_a_run_yet(self):
+        # U5.2: `running` is a submission marker. Counted, it would inflate the
+        # lifetime total and file every live run in the red bucket -- the
+        # ledger would read worse the busier the project got.
+        self.seed([{"tool": "qwen_delegate", "status": "running",
+                    "run_id": "rabc123", "pid": os.getpid()},
+                   {"tool": "qwen_delegate", "status": "success",
+                    "run_id": "rabc123", "peak_context": 10}])
+        self.assertEqual(runlog.ledger_summary(self.cwd),
+                         {"n": 1, "ok": 1, "red": 0, "stopped": 0, "peak": 10})
+
+
+class RunsInFlight(LedgerSummary):
+    """U5.2: which submitted runs have not come back, and which died trying.
+
+    The log is append-only -- nothing rewrites the `running` line -- so the
+    pairing is done at READ time by run_id, and a run whose owning process is
+    gone is reported as dead rather than dropped: "it died with your session"
+    is exactly what the caller polling for a receipt needs to hear.
+    """
+
+    def dead_pid(self):
+        """A pid that has certainly exited (reaped, so it is not a zombie)."""
+        p = subprocess.Popen([sys.executable, "-c", ""])
+        p.wait()
+        return p.pid
+
+    def test_no_log_is_no_runs(self):
+        self.assertEqual(runlog.runs_in_flight(self.cwd), [])
+
+    def test_an_unpaired_running_record_is_in_flight(self):
+        self.seed([{"tool": "qwen_delegate", "status": "running",
+                    "run_id": "r000001", "pid": os.getpid(), "ts": "T"}])
+        self.assertEqual(runlog.runs_in_flight(self.cwd),
+                         [{"run_id": "r000001", "pid": os.getpid(),
+                           "ts": "T", "dead": False}])
+
+    def test_a_completion_record_closes_it(self):
+        self.seed([{"tool": "qwen_delegate", "status": "running",
+                    "run_id": "r000001", "pid": os.getpid()},
+                   {"tool": "qwen_delegate", "status": "verify_failed",
+                    "run_id": "r000001"}])
+        self.assertEqual(runlog.runs_in_flight(self.cwd), [])
+
+    def test_a_dead_owner_is_reported_as_dead_not_dropped(self):
+        self.seed([{"tool": "qwen_delegate", "status": "running",
+                    "run_id": "r000002", "pid": self.dead_pid()}])
+        flight = runlog.runs_in_flight(self.cwd)
+        self.assertEqual(len(flight), 1)
+        self.assertTrue(flight[0]["dead"])
+
+    def test_records_without_a_run_id_are_none_of_its_business(self):
+        self.seed([{"tool": "qwen_delegate", "status": "success"},
+                   {"tool": "qwen_query", "status": "ok"}])
+        self.assertEqual(runlog.runs_in_flight(self.cwd), [])
+
+    def test_a_corrupt_line_does_not_hide_the_rest(self):
+        self.seed([{"tool": "qwen_delegate", "status": "running",
+                    "run_id": "r000003", "pid": os.getpid()}], corrupt=True)
+        self.assertEqual([f["run_id"] for f in runlog.runs_in_flight(self.cwd)],
+                         ["r000003"])
+
+
+class RunIds(unittest.TestCase):
+    def test_the_c6_shape(self):
+        for _ in range(20):
+            self.assertRegex(runlog.new_run_id(), r"^r[0-9a-f]{6}$")
+
+    def test_ids_are_not_a_counter(self):
+        self.assertGreater(len({runlog.new_run_id() for _ in range(50)}), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

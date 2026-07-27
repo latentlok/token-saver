@@ -9,13 +9,28 @@ every record always carries executor (str) and cost_usd (float).
 import hashlib
 import json
 import os
+import random
 import threading
 import time
 
 RUNLOG_DIR = ".qwen-delegate"
 RUNLOG_FILE = "runs.jsonl"
+BRIEFS_DIR = "briefs"
 
 _WRITE_LOCK = threading.Lock()
+
+
+def new_run_id():
+    """A run id in the C6 shape: "r" + 6 lowercase hex.
+
+    Minted once per SUBMITTED delegation (U5.2) and carried by both halves of
+    its run-log pair, so a reader can match the `running` record to the
+    completion record that closes it. qd/worktrees.py mints its own id in the
+    same shape for branch names: deliberately not shared, because that one
+    names a container and this one names a run, and most runs have no
+    container at all.
+    """
+    return "r" + "".join(random.choice("0123456789abcdef") for _ in range(6))
 
 
 def registry_path():
@@ -117,8 +132,14 @@ def ledger_summary(cwd):
                     continue  # a corrupt line must not hide the rest
                 if not isinstance(rec, dict) or rec.get("tool") != "qwen_delegate":
                     continue
-                n += 1
                 status = rec.get("status") or ""
+                # A `running` record is a SUBMISSION marker (U5.2), not a run
+                # that finished. Counting it would inflate the lifetime total
+                # and file every in-flight run in the red bucket -- the ledger
+                # would read worse the busier the project is.
+                if status == "running":
+                    continue
+                n += 1
                 if status in ("success", "success_but_preflight_passed"):
                     ok += 1
                 elif status in ("stopped", "compaction_refused"):
@@ -134,6 +155,125 @@ def ledger_summary(cwd):
         return {"n": n, "ok": ok, "red": red, "stopped": stopped, "peak": peak}
     except Exception:
         return None
+
+
+def briefs_dir(cwd):
+    """Where this project's stored briefs live (created)."""
+    d = os.path.join(runlog_dir(cwd), BRIEFS_DIR)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def brief_path(cwd, session_id):
+    """One session's brief. The id is reduced to safe characters: it arrives
+    from the executor on one side and from a caller's `retry_of` on the other,
+    and neither should be able to name a path outside this directory."""
+    safe = "".join(c for c in str(session_id or "")
+                   if c.isalnum() or c in "-_") or "unnamed"
+    return os.path.join(cwd, RUNLOG_DIR, BRIEFS_DIR, f"{safe}.json")
+
+
+def save_brief(cwd, session_id, brief):
+    """Store the resolved call behind `session_id`, so a retry costs a sentence.
+
+    A deliberate tension with digest(), which keeps only a head and a hash of
+    every prompt precisely so whole prompts -- which embed real source -- do
+    not accumulate in a permanent log. A brief is the opposite kind of object:
+    a working file for ONE session, written beside the source it quotes, under
+    the self-ignoring .qwen-delegate/, never committed, and switchable off
+    with `store_briefs: false`. The log stays a log.
+
+    Best-effort by contract: a brief that cannot be written costs a future
+    retry its retyping, which must never be worth failing a finished run over.
+    """
+    try:
+        briefs_dir(cwd)
+        path = brief_path(cwd, session_id)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"session": session_id, "ts": now_iso(),
+                       "args": brief}, f, sort_keys=True)
+        os.replace(tmp, path)
+        return path
+    except Exception:
+        return None
+
+
+def load_brief(cwd, session_id):
+    """The stored brief for a session, or None. Never raises."""
+    try:
+        with open(brief_path(cwd, session_id)) as f:
+            brief = json.load(f)
+        return brief if isinstance(brief, dict) else None
+    except Exception:
+        return None
+
+
+def _pid_alive(pid):
+    """Whether a pid is still running. Unknowable => alive.
+
+    Signal 0 is the standard liveness probe. A pid owned by another user
+    answers EPERM, which is proof it EXISTS -- reading that as death would
+    report every run of a second session on the machine as dead.
+    """
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    except (TypeError, ValueError):
+        return True
+    return True
+
+
+def runs_in_flight(cwd):
+    """Submitted delegations with no completion record yet (U5.2).
+
+    A submit appends `{"status": "running", "run_id", "pid"}` and the verdict's
+    ordinary record -- carrying the same `run_id` -- closes it LOGICALLY. The
+    first line is never rewritten: an append-only log a reader can trust is
+    worth more than a tidy one, and a crashed run cannot rewrite anything
+    anyway.
+
+    Which is the staleness rule: the delegation runs on a daemon thread of the
+    MCP server process, so a session that ends takes its in-flight runs with
+    it, leaving a `running` record whose pid is gone. Those are returned with
+    `dead: True` rather than dropped -- "it died with your session" is the
+    answer the caller polling for a receipt is looking for.
+
+    Returns [{"run_id", "pid", "ts", "dead"}] in log order; never raises.
+    """
+    out = []
+    try:
+        path = os.path.join(cwd, RUNLOG_DIR, RUNLOG_FILE)
+        if not os.path.isfile(path):
+            return []
+        running, closed = [], set()
+        with open(path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue  # a corrupt line must not hide the rest
+                if not isinstance(rec, dict):
+                    continue
+                rid = rec.get("run_id")
+                if not rid:
+                    continue
+                if rec.get("status") == "running":
+                    running.append(rec)
+                else:
+                    closed.add(rid)
+        for rec in running:
+            if rec["run_id"] in closed:
+                continue
+            out.append({"run_id": rec["run_id"], "pid": rec.get("pid"),
+                        "ts": rec.get("ts"),
+                        "dead": not _pid_alive(rec.get("pid"))})
+    except Exception:
+        return out
+    return out
 
 
 def _tok_zero():

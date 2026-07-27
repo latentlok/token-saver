@@ -460,6 +460,70 @@ class ReceiptDiet(Fixture):
         self.assertIn("HEAVY", line)           # 3.5M fresh
 
 
+class ResumeHeuristic(Fixture):
+    """U5.4: RESUME is three-way, because the affordance pointed the wrong way
+    on every red receipt. A session that failed carries its confusion forward,
+    and a warm follow-up into it argues with the correction instead of
+    applying it -- except when the worker was BLOCKED, which is a fence rather
+    than confusion, and whose approval loop only works in the same session."""
+
+    def v2(self, status, trail=None, **ctx_over):
+        return verdict.render(status, "s-7",
+                              trail or ["attempt 1: verify failed",
+                                        "attempt 2: verify failed"],
+                              RESULT_TEXT, [], 3,
+                              self.ctx(self.full_sha, **ctx_over), None)
+
+    def test_healthy_statuses_keep_the_warm_line(self):
+        for status, trail in (("success", ["attempt 1: VERIFY PASS"]),
+                              ("success_but_preflight_passed",
+                               ["attempt 1: VERIFY PASS"]),
+                              ("unverified",
+                               ["attempt 1: no verify supplied"]),
+                              ("reported", ["attempt 1: verify failed"])):
+            out = self.v2(status, trail)
+            self.assertIn("RESUME: session_id=s-7", out, status)
+            self.assertNotIn("not recommended", out)
+
+    def test_a_red_run_is_told_to_start_cold(self):
+        out = self.v2("verify_failed")
+        self.assertIn("RESUME: not recommended — 2 failed attempt(s) in this "
+                      "session carry their confusion forward; re-delegate "
+                      "COLD with a corrected brief (or retry_of=s-7).", out)
+        self.assertNotIn("session_id=s-7 --", out)
+
+    def test_every_red_status_gets_the_cold_advice(self):
+        for status in ("verify_failed", "scope_violation", "spec_violation",
+                       "gate_suspect", "fixture_unproven", "result_invalid"):
+            self.assertIn("not recommended", self.v2(status), status)
+
+    def test_a_blocked_worker_keeps_the_warm_line(self):
+        # The approval loop IS the warm session: shell_allow + the same
+        # session_id is how a caller answers SHELL APPROVAL NEEDED.
+        out = self.v2("verify_failed",
+                      meta={"stats": {},
+                            "blocked": ["run_shell_command: pytest  (not on "
+                                        "the shell allowlist)"]})
+        self.assertIn("RESUME: session_id=s-7", out)
+        self.assertNotIn("not recommended", out)
+
+    def test_the_suppressed_statuses_are_still_suppressed(self):
+        for status, trail in (("stopped", ["attempt 1: run stopped: burn"]),
+                              ("compaction_refused",
+                               ["attempt 1: COMPACTION fired"])):
+            self.assertNotIn("RESUME:", self.v2(status, trail), status)
+
+    def test_it_stays_droppable_at_the_same_priority(self):
+        # Priority 7 = first out under the cap, both ways: an affordance is
+        # the cheapest thing to lose when the receipt has to shrink.
+        long_result = "y" * 6000
+        out = verdict.render("verify_failed", "s-7",
+                             ["attempt 1: verify failed"], long_result, [], 3,
+                             self.ctx(self.full_sha), "verify output")
+        self.assertNotIn("RESUME:", out)
+        self.assertLessEqual(len(out), 3000)
+
+
 class HeadMovedAttribution(Fixture):
     """U1.3/C2: the receipt accuses only under positive worker attribution.
 

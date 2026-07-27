@@ -43,7 +43,7 @@ import json, os, sys
 out = os.environ["STUB_OUT"]
 open(os.path.join(out, "argv.json"), "w").write(json.dumps(sys.argv))
 n = int(os.environ.get("STUB_BODY_CHARS", "0"))
-body = ("A" * n) if n else "THE ANSWER BODY"
+body = os.environ.get("STUB_BODY") or (("A" * n) if n else "THE ANSWER BODY")
 sys.stdout.write(json.dumps([
   {"type": "assistant", "message": {"usage": {"input_tokens": 15000}}},
   {"type": "result", "result": body, "session_id": "q-sess",
@@ -190,6 +190,56 @@ class Errors(Fixture):
         self.assertIn("STATUS: error", out)
         recs = self.log_records()
         self.assertEqual(recs[-1]["status"], "error")
+
+
+class ResultSchema(Fixture):
+    """U5.1 on the read-only side. A query has no retry loop to spend on a
+    violation, so the contract is REPORTED, never enforced: the answer is
+    still worth reading, and the caller has to know before it parses it."""
+
+    SCHEMA = {"type": "object", "required": ["files"],
+              "properties": {"files": {"type": "array",
+                                       "items": {"type": "string"}}}}
+
+    def body(self, text):
+        os.environ["STUB_BODY"] = text
+
+    def test_a_conforming_answer_says_so_above_the_answer(self):
+        self.body('prose\n\n```json\n{"files": ["a.py"]}\n```')
+        out = self.q(result_schema=self.SCHEMA)
+        self.assertIn("RESULT: valid (schema)", out)
+        self.assertLess(out.index("RESULT: valid"), out.index("--- answer ---"))
+
+    def test_a_violation_is_reported_with_the_first_error(self):
+        self.body('prose\n\n```json\n{"files": [1]}\n```')
+        out = self.q(result_schema=self.SCHEMA)
+        self.assertIn("RESULT: schema INVALID — $.files[0]: expected string",
+                      out)
+        self.assertIn("--- answer ---", out)      # ...and the answer survives
+        self.assertIn("prose", out)
+
+    def test_a_missing_block_is_reported_not_an_error_receipt(self):
+        self.body("just prose")
+        out = self.q(result_schema=self.SCHEMA)
+        self.assertIn("STATUS: ok", out)
+        self.assertIn("RESULT: schema INVALID", out)
+
+    def test_the_shape_is_asked_for_in_the_prompt(self):
+        self.body('```json\n{"files": []}\n```')
+        self.q(result_schema=self.SCHEMA)
+        task = self.argv()[2]
+        self.assertIn(json.dumps(self.SCHEMA, indent=2), task)
+        self.assertTrue(task.endswith("\n"))
+
+    def test_absent_the_param_nothing_is_added(self):
+        out = self.q()
+        self.assertNotIn("RESULT:", out)
+        self.assertTrue(self.argv()[2].endswith(queries.ANSWER_SUFFIX))
+
+    def test_a_malformed_schema_is_ignored_not_fatal(self):
+        out = self.q(result_schema=["not", "a", "schema"])
+        self.assertIn("STATUS: ok", out)
+        self.assertNotIn("RESULT:", out)
 
 
 class LogSeam(Fixture):

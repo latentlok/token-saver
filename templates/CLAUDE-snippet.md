@@ -6,9 +6,15 @@ with it, the policy is in context every session.
 Ask Claude to add it, or paste the block below yourself — everything between the
 begin / end markers, the markers included. The markers let a re-add detect the block
 and skip it, so it is never duplicated.
+
+Once installed, the block is MANAGED: on the first session after a plugin update the
+setup hook rewrites everything between the markers from this template (the `v:` line
+says which version wrote it) and touches nothing outside them. That is how a new
+capability reaches the agents that would otherwise never hear about it.
 -->
 
 <!-- qwen-delegate:begin (managed block; delete from begin to end to remove) -->
+<!-- v: {version} -->
 
 ## Delegating mechanical work
 
@@ -69,6 +75,14 @@ spending your context. Treat its answers as leads to verify, not as truth.
   setting that fixes it, all of them user-side. Relay it, retry once smaller if it's
   worth it, else do the work inline or hand the line to the user. Reading plugin
   source or probing the endpoint to find out why burns the context this is meant to save.
+- **Delegation is asynchronous.** `qwen_delegate` answers in seconds with a run id and
+  the path its receipt will land at — start it, do something else, then read that file
+  (the response's `WATCH:` line is the wait-for-it one-liner). `wait: true` blocks
+  instead, for when you have nothing else to do.
+- A red receipt is cheapest to correct with `retry_of=<session_id>` + `retry_message`:
+  it replays the stored brief COLD with your correction, no retyping. And when you need
+  a value back rather than prose, `result_schema` (on `qwen_delegate` and `qwen_query`)
+  makes the worker end with a JSON block the server validates for you.
 - Prefer `auto-edit`. `scoped` grants a shell and is not a sandbox.
 - Bound the blast radius when you know the target: pass `touch_scope=["a.py","b.py"]` and
   any edit to another *existing* file auto-reverts (new files stay allowed). Worth it under

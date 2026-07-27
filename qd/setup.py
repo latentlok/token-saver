@@ -29,6 +29,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STAMP_DIR = os.environ.get("QWEN_DELEGATE_SETUP") or os.path.expanduser(
     "~/.qwen-delegate/setup")
 
+# U5.3: the managed block in a project's CLAUDE.md. Everything between these
+# two markers belongs to the plugin; everything outside them belongs to the
+# user and is never touched.
+BEGIN_MARK = "qwen-delegate:begin"
+END_MARK = "qwen-delegate:end"
+
 
 def plugin_version(root=None):
     """Version from .claude-plugin/plugin.json, or "unknown"."""
@@ -61,6 +67,77 @@ def write_stamp(version, findings):
         return False
 
 
+def template_block(version, root=None):
+    """The managed block from templates/CLAUDE-snippet.md, version-stamped.
+
+    Returns the marker line, the block, and the closing marker as one string
+    with no trailing newline -- exactly the span it replaces. None if the
+    template has lost its markers, because writing a block that cannot be
+    found again would make the next update impossible.
+    """
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        with open(os.path.join(root, "templates", "CLAUDE-snippet.md")) as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return None
+    start = stop = None
+    for i, line in enumerate(lines):
+        if start is None and BEGIN_MARK in line:
+            start = i
+        elif start is not None and END_MARK in line:
+            stop = i
+            break
+    if start is None or stop is None:
+        return None
+    return "\n".join(lines[start:stop + 1]).replace("{version}", version)
+
+
+def update_managed_block(cwd=None, version=None, root=None):
+    """Refresh the plugin's block inside <cwd>/CLAUDE.md, if it is installed.
+
+    This block is the only place an AGENT reads about what the plugin can do:
+    a capability that never reaches it goes undiscovered, and the changelog is
+    not an agent surface. So it is MANAGED -- rewritten from the template once
+    per plugin version, in place.
+
+    The contract is what makes that safe to do to somebody's file:
+      - no CLAUDE.md, or no markers in it, is a NO-OP. Not installing the
+        block is a choice, and installing one uninvited is not this hook's to
+        make;
+      - only the span between the markers (inclusive) is rewritten -- every
+        byte outside is preserved exactly, including where the file ends;
+      - identical content is not written at all, so an unchanged version does
+        not touch the file's mtime or a git diff.
+
+    Returns "updated" | "current" | "absent". Never raises.
+    """
+    try:
+        version = version or plugin_version(root)
+        path = os.path.join(cwd or os.getcwd(), "CLAUDE.md")
+        block = template_block(version, root)
+        if block is None or not os.path.isfile(path):
+            return "absent"
+        with open(path) as f:
+            text = f.read()
+        i = text.find(BEGIN_MARK)
+        j = text.find(END_MARK, i + 1) if i >= 0 else -1
+        if i < 0 or j < 0:
+            return "absent"
+        start = text.rfind("\n", 0, i) + 1        # the begin marker's own line
+        stop = text.find("\n", j)
+        stop = len(text) if stop < 0 else stop
+        if text[start:stop] == block:
+            return "current"
+        tmp = path + ".qd-tmp"
+        with open(tmp, "w") as f:
+            f.write(text[:start] + block + text[stop:])
+        os.replace(tmp, path)
+        return "updated"
+    except Exception:
+        return "absent"
+
+
 def build_notice(version, findings):
     """The message for the session, or None when there is nothing worth saying.
 
@@ -91,6 +168,11 @@ def run(force=False):
     version = plugin_version()
     if already_ran(version) and not force:
         return None, False
+    # U5.3: once per version, in the project this session opened. Deliberately
+    # before the doctor check below, which returns early on a machine where
+    # Qwen is not configured yet -- the capability map is worth refreshing
+    # either way, and it is silent, so it costs the session nothing.
+    update_managed_block()
     try:
         from qd import doctor
         findings = doctor.check(doctor.load())

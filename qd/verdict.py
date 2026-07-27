@@ -161,6 +161,13 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         run_parts.append(f"{len(_strays)} strays")
     body.append("RUN: " + " · ".join(run_parts))
 
+    # U5.5: this run is a corrected re-run of an earlier session, started COLD.
+    # Said out loud on every receipt, green included: it otherwise reads as a
+    # first attempt, and the session named here is where the attempt it
+    # corrects can be found.
+    if ctx.get("retry_of"):
+        body.append(f"RETRY OF: {ctx['retry_of']}")
+
     if not clean:
         for t in trail:
             body.append(f"  - {t}")
@@ -400,6 +407,23 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # on a report run this one line is the entire product of the delegation.
     if ctx.get("findings"):
         body.append(f"FINDINGS: {ctx['findings']}")
+
+    # U5.1 result contract. In the BODY, never the droppable region and never
+    # the truncated tail: the caller asked for this payload by schema, so it is
+    # the one part of the receipt that is not commentary on the work -- it IS
+    # a deliverable. Verbatim, as the worker wrote it.
+    if ctx.get("result_json"):
+        body.append("RESULT: valid (schema)")
+        body.append(f"```json\n{ctx['result_json']}\n```")
+    elif status == "result_invalid":
+        errs = ctx.get("result_errors") or []
+        body.append(
+            "RESULT INVALID: the reply's final JSON block does not conform to "
+            "result_schema after every attempt -- "
+            + "; ".join(errs[:4]) + (" ..." if len(errs) > 4 else "")
+            + ". Read STATUS above for the work itself: what failed here is "
+              "the machine-read result, which cannot be consumed as sent."
+        )
 
     # U3.3: a fixture nobody can trace is indistinguishable from an invented
     # one, and a gate written against invented bytes passes forever.
@@ -682,12 +706,28 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     # RESUME: the affordance is cheaper than the education -- session resume
     # existed for 45 field delegations and went unused because nothing said so.
+    # U5.4 makes it three-way, because the affordance was pointing the wrong
+    # way half the time: a session that FAILED carries its confusion forward,
+    # and resuming into it buys an argument with the correction instead of a
+    # fix. Two exceptions keep the warm line on red: a run that was BLOCKED was
+    # fenced rather than confused, and the approval loop (shell_allow +
+    # shell_feedback) only works in the same session.
     if session_id and status not in ("stopped", "compaction_refused",
                                      "error", "refused"):
-        c2_blocks.append((
-            f"RESUME: session_id={session_id} -- a follow-up in this warm "
-            f"session costs a sentence, not a re-brief (same cwd, pass "
-            f"session_id)", True, 7))
+        healthy = status in ("success", "success_but_preflight_passed",
+                             "unverified", "reported")
+        was_blocked = bool(ctx.get("meta", {}).get("blocked"))
+        if healthy or was_blocked:
+            c2_blocks.append((
+                f"RESUME: session_id={session_id} -- a follow-up in this warm "
+                f"session costs a sentence, not a re-brief (same cwd, pass "
+                f"session_id)", True, 7))
+        else:
+            c2_blocks.append((
+                f"RESUME: not recommended — {len(trail)} failed attempt(s) in "
+                f"this session carry their confusion forward; re-delegate COLD "
+                f"with a corrected brief (or retry_of={session_id}).",
+                True, 7))
 
     # Insert C2 blocks before the "--- qwen result ---" line.
     caps = {"result": RESULT_CAP, "verify": VERIFY_CAP}
@@ -764,6 +804,13 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         "caller_changed": len(ctx.get("scope_unattributed") or []),
         "strays": len(strays),
     }
+    # U5.2: the id the submit minted. This record is what CLOSES the `running`
+    # one written at spawn -- without the id here, a reader could not tell an
+    # in-flight run from one that died with its session.
+    if ctx.get("run_id"):
+        extra["run_id"] = ctx["run_id"]
+    if ctx.get("retry_of"):
+        extra["retry_of"] = ctx["retry_of"]
     # C5, non-defaults only: one line per run is read whole by ledger_summary
     # and by people, and a key that says "300"/"any" in every record is noise
     # that hides the runs where somebody actually turned a knob.

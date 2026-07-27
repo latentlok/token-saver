@@ -32,6 +32,7 @@ Run:  python3 specs/engine_spec.py
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -60,6 +61,9 @@ open(os.path.join(sdir, "task_%d.txt" % (n + 1)), "w").write(task)
 # The output format is a decision, not a detail: batch carries stats the
 # streaming adapter drops, so a spec has to be able to see which one ran.
 open(os.path.join(sdir, "argv_%d.txt" % (n + 1)), "w").write(" ".join(sys.argv))
+# The gate env the hook reads: allowlist and mode are decisions too.
+open(os.path.join(sdir, "env_%d.json" % (n + 1)), "w").write(json.dumps(
+    {k: os.environ.get(k) for k in ("QGATE_EXTRA", "QGATE_MODE")}))
 for rel, content in (step.get("write") or {}).items():
     p = os.path.join(os.getcwd(), rel)
     os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(rel) else None
@@ -180,6 +184,10 @@ class Fixture(unittest.TestCase):
     def argv_seen(self, n):
         with open(os.path.join(self.sdir, f"argv_{n}.txt")) as f:
             return f.read()
+
+    def env_seen(self, n):
+        with open(os.path.join(self.sdir, f"env_{n}.json")) as f:
+            return json.load(f)
 
     def commit_cfg(self, cfg):
         with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
@@ -1776,6 +1784,490 @@ class FixtureProvenance(Fixture):
                           max_iterations=1)
         self.assertEqual(r["status"], "success")
         self.assertEqual(r["ctx"]["fixtures_unproven"], [])
+
+
+class ResultSchema(Fixture):
+    """U5.1: `result_schema` makes the reply machine-readable, and a violation
+    is treated like a red gate -- fed back by name, retried, and named in the
+    status when the attempts run out. The value the caller asked for is a
+    deliverable, so it survives into the receipt body verbatim."""
+
+    SCHEMA = {"type": "object", "required": ["name", "count"],
+              "properties": {"name": {"type": "string"},
+                             "count": {"type": "integer"}}}
+
+    def reply(self, payload=None, prose="did it", raw=None):
+        tail = "\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing"
+        if raw is not None:
+            return f"{prose}{tail}\n\n```json\n{raw}\n```"
+        if payload is None:
+            return prose + tail
+        return (f"{prose}{tail}\n\n```json\n{json.dumps(payload)}\n```")
+
+    def test_a_conforming_block_passes_and_is_kept_verbatim(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x", "count": 2})}])
+        r = self.delegate(result_schema=self.SCHEMA)
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["trail"], ["attempt 1: VERIFY PASS"])
+        self.assertEqual(json.loads(r["ctx"]["result_json"]),
+                         {"name": "x", "count": 2})
+        self.assertEqual(r["ctx"]["result_errors"], [])
+
+    def test_the_shape_is_asked_for_in_the_first_prompt(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x", "count": 2})}])
+        self.delegate(result_schema=self.SCHEMA)
+        seen = self.task_seen(1)
+        self.assertIn("```json", seen)
+        self.assertIn('"required"', seen)
+
+    def test_a_missing_block_is_retried_with_the_schema_repeated(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}, "result": self.reply()},
+                    {"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x", "count": 2})}])
+        r = self.delegate(result_schema=self.SCHEMA, max_iterations=2)
+        self.assertEqual(r["status"], "success")
+        feedback = self.task_seen(2)
+        self.assertIn("no ```json block", feedback)
+        self.assertIn('"count"', feedback)
+        self.assertIn("do not change the code", feedback)
+
+    def test_each_violation_reaches_the_worker_by_path(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": 7})},
+                    {"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x", "count": 2})}])
+        r = self.delegate(result_schema=self.SCHEMA, max_iterations=2)
+        feedback = self.task_seen(2)
+        self.assertIn("$.count: required property is missing", feedback)
+        self.assertIn("$.name: expected string, got integer", feedback)
+        self.assertEqual(r["status"], "success")
+
+    def test_the_last_attempt_ends_named_not_green(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x"})}])
+        r = self.delegate(result_schema=self.SCHEMA, max_iterations=2)
+        self.assertEqual(r["status"], "result_invalid")
+        self.assertEqual(len(r["trail"]), 2)
+        self.assertIn("RESULT SCHEMA invalid", r["trail"][-1])
+        self.assertIsNone(r["ctx"]["result_json"])
+
+    def test_an_unverified_run_is_checked_too(self):
+        # No gate to hide behind: the contract is the only thing being kept.
+        self.steps([{"write": {"out.py": "MARKER\n"}, "result": self.reply()}])
+        r = self.delegate(verify=None, trust="verified",
+                          result_schema=self.SCHEMA, max_iterations=1)
+        self.assertEqual(r["status"], "result_invalid")
+
+    def test_a_red_gate_still_owns_the_retry(self):
+        # The gate is the stronger signal: its output must not be replaced by
+        # a complaint about a JSON block.
+        self.steps([{"write": {"out.py": "WRONG\n"}, "result": self.reply()},
+                    {"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x", "count": 2})}])
+        r = self.delegate(result_schema=self.SCHEMA, max_iterations=2)
+        self.assertEqual(r["status"], "success")
+        self.assertIn("The verification command failed", self.task_seen(2))
+        self.assertNotIn("```json block", self.task_seen(2))
+
+    def test_the_receipt_carries_the_block_and_says_it_conforms(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x", "count": 2})}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "result_schema": self.SCHEMA})
+        self.assertIn("RESULT: valid (schema)", out)
+        self.assertIn('{"name": "x", "count": 2}', out)
+
+    def test_the_block_survives_a_reply_long_enough_to_be_truncated(self):
+        # The receipt tail gets cut to fit the cap; the deliverable does not.
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x", "count": 2},
+                                          prose="x" * 6000)}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "result_schema": self.SCHEMA})
+        self.assertIn("truncated", out)
+        self.assertIn('{"name": "x", "count": 2}', out)
+
+    def test_a_key_that_looks_like_a_handoff_line_is_not_stripped(self):
+        payload = {"name": "x", "count": 1, "NEXT": "nothing"}
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply(payload)}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "result_schema": self.SCHEMA})
+        self.assertIn('"NEXT": "nothing"', out)
+
+    def test_the_receipt_explains_an_invalid_result(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x"})}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "max_iterations": 1, "result_schema": self.SCHEMA})
+        self.assertIn("STATUS: result_invalid", out)
+        self.assertIn("$.count: required property is missing", out)
+
+    def test_a_malformed_schema_is_not_a_refusal(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(result_schema="not a schema")
+        self.assertEqual(r["status"], "success")
+
+    def test_absent_the_param_the_same_run_is_untouched(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}, "result": self.reply()}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["trail"], ["attempt 1: VERIFY PASS"])
+        self.assertIsNone(r["ctx"]["result_json"])
+        self.assertNotIn("```json", self.task_seen(1))
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertNotIn("RESULT:", out)
+
+
+class RetryOf(Fixture):
+    """U5.5: a corrected re-run costs a sentence, and starts COLD.
+
+    Two findings meet here. The caller was retyping whole briefs to change one
+    instruction, and a session that failed carries its confusion into every
+    follow-up -- so the BRIEF is what gets replayed, and the session is what
+    gets left behind.
+    """
+
+    def brief_file(self, sid):
+        return os.path.join(self.cwd, ".qwen-delegate", "briefs", f"{sid}.json")
+
+    def first_run(self, **over):
+        self.steps([{"write": {"out.py": "MARKER\n"}, "sid": "s-one"}])
+        r = self.delegate(task="build out.py with MARKER", **over)
+        self.assertEqual(r["status"], "success")
+        return r["session_id"]
+
+    def test_a_run_with_a_session_stores_its_brief(self):
+        sid = self.first_run(touch_scope=["out.py"])
+        with open(self.brief_file(sid)) as f:
+            brief = json.load(f)
+        self.assertEqual(brief["session"], sid)
+        self.assertEqual(brief["args"]["task"], "build out.py with MARKER")
+        self.assertEqual(brief["args"]["verify"], "grep -q MARKER out.py")
+        self.assertEqual(brief["args"]["touch_scope"], ["out.py"])
+        self.assertEqual(brief["args"]["trust"], "self")   # RESOLVED, not blank
+
+    def test_the_brief_is_invisible_to_git(self):
+        # It sits beside the source it quotes: gitignored, never committed.
+        sid = self.first_run()
+        self.assertTrue(os.path.isfile(self.brief_file(sid)))
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=self.cwd,
+                             capture_output=True, text=True).stdout
+        self.assertNotIn(".qwen-delegate", out)
+
+    def test_the_task_comes_back_with_the_correction_appended(self):
+        sid = self.first_run()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(task="", retry_of=sid,
+                          retry_message="MARKER must be uppercase")
+        # Green either way -- the first run left its work on disk, so this
+        # gate was already passing (demoted, U3.2).
+        self.assertIn(r["status"], ("success", "success_but_preflight_passed"))
+        sent = self.task_seen(2)
+        self.assertIn("build out.py with MARKER", sent)
+        self.assertIn("CORRECTION (from the caller, after reviewing your "
+                      "previous attempt):", sent)
+        self.assertIn("MARKER must be uppercase", sent)
+
+    def test_the_retry_runs_cold(self):
+        # The approval loop needs a warm session; a corrected brief does not --
+        # a session that failed argues with the correction.
+        sid = self.first_run()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(task="", retry_of=sid, retry_message="try again",
+                      session_id=sid)
+        argv = self.argv_seen(2)
+        self.assertNotIn("-r", argv.split())
+        self.assertNotIn(sid, argv)
+
+    def test_the_stored_gate_and_scope_bind_without_being_retyped(self):
+        sid = self.first_run(touch_scope=["out.py"])
+        self.steps([{"write": {"other.py": "EDITED\n"}}])
+        r = self.delegate(task="", retry_of=sid, retry_message="x",
+                          verify=None, touch_scope=None, max_iterations=1)
+        # The brief's touch_scope still guards the tree...
+        self.assertEqual(r["status"], "scope_violation")
+        # ...and its verify command is still the gate.
+        self.assertEqual(r["ctx"]["verify"], "grep -q MARKER out.py")
+
+    def test_an_explicit_argument_beats_the_stored_one(self):
+        sid = self.first_run()
+        self.steps([{"write": {"out.py": "WRONG\n"}}])
+        r = self.delegate(task="", retry_of=sid, retry_message="x",
+                          max_iterations=1, verify="grep -q NOPE out.py")
+        self.assertEqual(r["max_iter"], 1)
+        self.assertEqual(r["ctx"]["verify"], "grep -q NOPE out.py")
+
+    def test_a_new_task_beats_the_stored_one(self):
+        sid = self.first_run()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(task="a different job", retry_of=sid,
+                      retry_message="and mind the tests")
+        sent = self.task_seen(2)
+        self.assertIn("a different job", sent)
+        self.assertNotIn("build out.py with MARKER", sent)
+
+    def test_corrections_stack_across_retries(self):
+        sid = self.first_run()
+        self.steps([{"write": {"out.py": "MARKER\n"}, "sid": "s-two"}])
+        r = self.delegate(task="", retry_of=sid, retry_message="first fix")
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(task="", retry_of=r["session_id"],
+                      retry_message="second fix")
+        sent = self.task_seen(3)
+        self.assertIn("first fix", sent)
+        self.assertIn("second fix", sent)
+
+    def test_an_unknown_session_is_refused_by_name_before_anything_runs(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "", "cwd": self.cwd, "executor": "stub",
+                          "retry_of": "s-nope", "retry_message": "x"})
+        self.assertIn("STATUS: refused", out)
+        self.assertIn("no stored brief", out)
+        self.assertIn(os.path.join(".qwen-delegate", "briefs"), out)
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_1.txt")))
+
+    def test_the_refusal_is_available_before_the_run_is_spawned(self):
+        # The server answers it in the submit response (U5.2).
+        pre = engine.precheck({"task": "", "cwd": self.cwd,
+                               "retry_of": "s-nope"})
+        self.assertIn("no stored brief", pre["refusal"])
+
+    def test_a_project_can_switch_brief_storage_off(self):
+        self.commit_cfg({"store_briefs": False})
+        sid = self.first_run()
+        self.assertFalse(os.path.exists(self.brief_file(sid)))
+        out = engine.run({"task": "", "cwd": self.cwd, "executor": "stub",
+                          "retry_of": sid, "retry_message": "x"})
+        self.assertIn("no stored brief", out)
+
+    def test_the_receipt_names_the_session_it_corrects(self):
+        sid = self.first_run()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "", "cwd": self.cwd, "executor": "stub",
+                          "approval_mode": "auto-edit", "retry_of": sid,
+                          "retry_message": "mind the tests"})
+        self.assertIn(f"RETRY OF: {sid}", out)
+
+    def test_an_ordinary_run_says_nothing_about_retries(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertNotIn("RETRY OF:", out)
+
+
+class RecipeDefaults(Fixture):
+    """U5.6: a project states its standing preferences once. Every one of them
+    is a DEFAULT -- the call arg always wins -- and the task suffix rides the
+    task itself, so it reaches every path the task reaches."""
+
+    def test_approval_mode_default_binds_and_yields_to_the_arg(self):
+        self.commit_cfg({"approval_mode": "plan"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(approval_mode=None)
+        self.assertEqual(r["ctx"]["approval_mode"], "plan")
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(approval_mode="auto-edit")
+        self.assertEqual(r["ctx"]["approval_mode"], "auto-edit")
+
+    def test_timeout_default_binds_and_yields_to_the_arg(self):
+        self.commit_cfg({"timeout_sec": 123})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.assertEqual(self.delegate()["ctx"]["timeout"], 123)
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.assertEqual(self.delegate(timeout_sec=456)["ctx"]["timeout"], 456)
+
+    def test_preflight_expect_default_binds_and_yields_to_the_arg(self):
+        self.commit_cfg({"preflight_expect": "green"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["preflight_expect"], "green")
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(preflight_expect="any")
+        self.assertEqual(r["ctx"]["preflight_expect"], "any")
+
+    def test_shell_allow_default_reaches_the_gate_and_yields_to_the_arg(self):
+        self.commit_cfg({"shell_allow": ["^pytest "]})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(approval_mode="scoped")
+        self.assertEqual(self.env_seen(1)["QGATE_EXTRA"], '["^pytest "]')
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(approval_mode="scoped", shell_allow=["^make$"])
+        self.assertEqual(self.env_seen(2)["QGATE_EXTRA"], '["^make$"]')
+
+    def test_the_task_suffix_reaches_the_worker_on_attempt_one(self):
+        self.commit_cfg({"task_suffix": "MANDATORY: run the linter."})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(task="do the thing")
+        sent = self.task_seen(1)
+        self.assertIn("do the thing", sent)
+        self.assertIn("\n\n---\nMANDATORY: run the linter.", sent)
+
+    def test_the_task_suffix_rides_a_compaction_reinjection(self):
+        # The re-injection re-sends the task verbatim; a discipline block that
+        # only made it into the first prompt would be gone exactly when the
+        # worker has lost its history.
+        self.commit_cfg({"task_suffix": "MANDATORY: run the linter."})
+        self.steps([{"write": {"out.py": "WRONG\n"}, "compact": "post",
+                     "sid": "c-1"},
+                    {"write": {"out.py": "MARKER\n"}, "sid": "c-1"}])
+        r = self.delegate(on_compaction="reinject", max_iterations=2)
+        self.assertEqual(r["status"], "success")
+        self.assertIn("MANDATORY: run the linter.", self.task_seen(2))
+
+    def test_the_suffix_is_not_stored_in_the_brief(self):
+        # Or a retry would send it twice, and a retry of that retry, three
+        # times -- the suffix is applied per run, from the project's config.
+        self.commit_cfg({"task_suffix": "MANDATORY: run the linter."})
+        self.steps([{"write": {"out.py": "MARKER\n"}, "sid": "s-one"}])
+        r = self.delegate(task="do the thing")
+        with open(os.path.join(self.cwd, ".qwen-delegate", "briefs",
+                               f"{r['session_id']}.json")) as f:
+            self.assertEqual(json.load(f)["args"]["task"], "do the thing")
+
+    def test_an_empty_config_changes_nothing(self):
+        self.commit_cfg({})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(task="plain")
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["approval_mode"], "auto-edit")
+        self.assertEqual(r["ctx"]["timeout"], 900)
+        self.assertEqual(r["ctx"]["preflight_expect"], "any")
+        # Nothing between the task and the handoff block it always carried.
+        self.assertTrue(self.task_seen(1).startswith(
+            "plain\n\n---\nFinish your reply"), self.task_seen(1)[:120])
+
+
+class AsyncEndToEnd(Fixture):
+    """U5.2 with a real worker: what a SUBMITTED run files is what a blocking
+    run RETURNS. Async is only a delivery change, so any difference between
+    those two texts is a difference the caller pays for -- the shape of the
+    submit path is pinned in specs/async_spec.py; this is the equivalence.
+    """
+
+    def setUp(self):
+        super().setUp()
+        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
+        # No indexer: a real graphify on the developer's PATH would drop a
+        # graphify-out/ into the tree AFTER the first run's receipt, and the
+        # second run would then report the first run's index as a stray. The
+        # refresh wiring itself is pinned in GraphWiring.
+        os.environ["QWEN_DELEGATE_GRAPHIFY"] = os.path.join(
+            tempfile.mkdtemp(), "absent-graphify")
+
+    def args(self, **over):
+        a = {"task": "build out.py with MARKER", "cwd": self.cwd,
+             "verify": "grep -q MARKER out.py", "approval_mode": "auto-edit",
+             "executor": "stub", "max_iterations": 3}
+        a.update(over)
+        return a
+
+    def receipt_path(self, submission):
+        for line in submission.splitlines():
+            if line.startswith("RECEIPT: "):
+                return line[len("RECEIPT: "):].split(" — ")[0]
+        return None
+
+    def wait_receipt(self, path, timeout=30):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if os.path.exists(path):
+                with open(path) as f:
+                    return f.read()
+            time.sleep(0.05)
+        self.fail(f"receipt never landed: {path}")
+
+    def rewind(self):
+        """Put the world back to what run one met: same tree, same stub state,
+        same empty ledger."""
+        subprocess.run(["git", "-C", self.cwd, "checkout", "-q", "."],
+                       check=True)
+        subprocess.run(["git", "-C", self.cwd, "clean", "-qfd"], check=True)
+        os.remove(os.path.join(self.sdir, "attempt"))
+        os.remove(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl"))
+
+    def normalize(self, receipt):
+        """Drop the two lines that legitimately differ between a FIRST and a
+        SECOND run of the same scenario -- LEDGER counts this project's runs
+        and GRAPH reports an index the first run may have kicked -- and the
+        wall-clock seconds. Everything else must match byte for byte."""
+        kept = [ln for ln in receipt.splitlines()
+                if not ln.startswith(("LEDGER:", "GRAPH:"))]
+        return re.sub(r"\b\d+s\b", "<t>s", "\n".join(kept))
+
+    def test_a_filed_receipt_is_the_receipt_a_blocking_call_returns(self):
+        from qd import server
+        # A fixed session id: the stub numbers them per invocation, and the
+        # SESSION/RESUME lines would then differ for a reason async is not.
+        self.steps([{"write": {"out.py": "MARKER\n"}, "sid": "fixed-sess"}])
+        submission = server.submit_delegate(self.args())
+        filed = self.wait_receipt(self.receipt_path(submission))
+        self.rewind()
+        waited = server.submit_delegate(self.args(wait=True))
+        self.assertEqual(self.normalize(waited), self.normalize(filed))
+        self.assertTrue(filed.startswith("STATUS: success"))
+
+    def test_the_submission_answers_before_the_worker_is_done(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        from qd import server
+        t0 = time.time()
+        submission = server.submit_delegate(self.args())
+        submit_ms = time.time() - t0
+        self.assertTrue(submission.startswith("STATUS: submitted"))
+        receipt = self.wait_receipt(self.receipt_path(submission))
+        self.assertIn("STATUS: success", receipt)
+        # The stub is fast, so this is a weak clock claim on purpose: what it
+        # rules out is the submit doing the delegation inline.
+        self.assertLess(submit_ms, 5.0)
+
+    def test_the_run_log_pairs_the_submission_with_its_completion(self):
+        from qd import runlog, server
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        submission = server.submit_delegate(self.args())
+        self.wait_receipt(self.receipt_path(submission))
+        run_id = [ln[len("RUN: "):] for ln in submission.splitlines()
+                  if ln.startswith("RUN: ")][0]
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            recs = [json.loads(line) for line in f.read().splitlines()]
+        self.assertEqual(recs[0]["status"], "running")
+        self.assertEqual(recs[0]["run_id"], run_id)
+        self.assertEqual(recs[-1]["status"], "success")
+        self.assertEqual(recs[-1]["run_id"], run_id)      # the pair closes
+        self.assertEqual(runlog.runs_in_flight(self.cwd), [])
+
+    def test_a_direct_engine_run_logs_no_run_id(self):
+        # Inertness: nothing was left open, so nothing needs closing.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        engine.run(self.args())
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            recs = [json.loads(line) for line in f.read().splitlines()]
+        self.assertNotIn("run_id", recs[-1])
+
+    def test_a_gate_refusal_lands_in_the_receipt_not_in_the_submission(self):
+        from qd import server
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        # The gate already passes, so preflight_expect="red" refuses -- but
+        # only after a gate RUN, which is work and can cost the whole budget.
+        with open(os.path.join(self.cwd, "out.py"), "w") as f:
+            f.write("MARKER\n")
+        submission = server.submit_delegate(
+            self.args(verify="grep -q MARKER out.py", preflight_expect="red"))
+        self.assertTrue(submission.startswith("STATUS: submitted"))
+        receipt = self.wait_receipt(self.receipt_path(submission))
+        self.assertIn("GATE VACUOUS", receipt)
 
 
 if __name__ == "__main__":

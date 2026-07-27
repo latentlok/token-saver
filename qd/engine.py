@@ -9,6 +9,7 @@ two-function surface backed entirely by qd submodules.
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -32,8 +33,9 @@ from qd.bootstrap import (
     bootstrap_notice, bootstrap_failed_refusal,
     nongit_refusal, detect_test_cmd, test_dir as detect_test_dir,
 )
-from qd.runlog import runlog_dir
+from qd.runlog import runlog_dir, save_brief, load_brief, BRIEFS_DIR
 from qd import doctor
+from qd import jsonschema
 from qd import limits
 from qd import worktrees
 from qd.verdict import (
@@ -65,6 +67,20 @@ _DEFAULT_BURN_BUDGET = 10_000_000
 # not a caller-facing param -- it is deliberately absent from the schema, so a
 # hand-written call cannot claim to be link 3 of a chain that never ran.
 CHAIN_ARG = "_chain"
+
+# U5.2, same reserved-arg convention: the submitted run's id, and the result of
+# the preconditions the server already ran. Both are injected by qd/server.py
+# on the way into a background delegation and are absent from the schema -- a
+# caller cannot mint its own run id, nor claim to have passed a check.
+RUN_ID_ARG = "_run_id"
+PRECHECK_ARG = "_precheck"
+
+# Minted per process, never leaving it. The tool schema does not carry
+# PRECHECK_ARG, but nothing stops a client from sending one anyway -- and
+# honoring an unsigned "I already passed the checks" would be a way to walk
+# past the trust and dirty-spec preconditions. A result without this token is
+# not one of ours, so the checks simply run again.
+_PRECHECK_TOKEN = secrets.token_hex(8)
 
 # U3.3 fixture provenance. Directory SEGMENTS, matched per path component: the
 # five names the field report's fixtures actually lived under. Projects override
@@ -372,6 +388,210 @@ def _retry_prompt(session_id, task, verify, v_out, on_compaction, repeated=False
     ), "reinject"
 
 
+# U5.5: what a stored brief remembers -- the half of a call that describes the
+# WORK, so a retry replays it without the caller retyping any of it. Reserved
+# args, the session and the retry fields themselves are deliberately absent: a
+# retry is a new, cold run of the same brief, not a replay of the old run's
+# identity.
+BRIEF_KEYS = (
+    "task", "verify", "touch_scope", "approval_mode", "shell_allow",
+    "shell_feedback", "trust", "max_iterations", "timeout_sec",
+    "verify_timeout_sec", "preflight_expect", "worktree", "executor",
+    "report_dont_fix", "fixture_provenance", "advisory_gates",
+    "result_schema", "on_compaction", "workers",
+)
+
+_CORRECTION = ("\n\nCORRECTION (from the caller, after reviewing your "
+               "previous attempt):\n")
+
+
+def _resolve_retry(args):
+    """Rebuild a call from the brief stored for `retry_of` (U5.5).
+
+    Returns (args, refusal|None). PURE -- one file read and a dict merge -- so
+    the server can run it to answer a bad `retry_of` in the submit response
+    and the engine can run it again without the run coming out differently.
+
+    Merge rule: the stored brief supplies the defaults, an explicit call arg
+    wins. `task: ""` counts as "not passed", which is how a caller re-runs a
+    brief it does not want to retype (the schema requires the field).
+
+    The retry runs COLD: no session is resumed, even if the caller passed one.
+    The field finding this exists for is that a session which failed carries
+    its confusion forward -- resuming into it is how a corrected brief gets
+    argued with rather than followed.
+    """
+    sid = args.get("retry_of")
+    if not sid:
+        return args, None
+    cwd = args.get("cwd") or "."
+    brief = load_brief(cwd, sid)
+    stored = (brief or {}).get("args")
+    if not isinstance(stored, dict) or not stored:
+        return args, (
+            f"retry_of=\"{sid}\": no stored brief for that session. Briefs are "
+            f"written to {os.path.join(cwd, '.qwen-delegate', BRIEFS_DIR)}/ "
+            f"when a delegation comes back with a session id -- a project can "
+            f"switch that off with \"store_briefs\": false. Send the task "
+            f"again, or check that directory for the session you meant."
+        )
+    merged = dict(stored)
+    for key, value in args.items():
+        if value is None:
+            continue
+        if key == "task" and not str(value).strip():
+            continue
+        merged[key] = value
+    merged.pop("session_id", None)
+    message = (args.get("retry_message") or "").strip()
+    if message:
+        merged["task"] = (merged.get("task") or "") + _CORRECTION + message
+    return merged, None
+
+
+def _refusal(text, max_iter=_DEFAULT_MAX_ITER):
+    """A refusal in delegate()'s return shape. ctx is EMPTY by contract: run()
+    routes refusals around the renderer, which needs a populated one."""
+    return {
+        "status": "refused",
+        "session_id": None,
+        "trail": [],
+        "result_text": text,
+        "denials": [],
+        "max_iter": max_iter,
+        "last_verify": None,
+        "ctx": {},
+    }
+
+
+def refusal_receipt(text):
+    """A refusal as the caller reads it -- run()'s formatting, extracted so the
+    server's synchronous submit path (U5.2) answers with the same bytes."""
+    text = text or "refused"
+    return text if text.startswith("STATUS:") else f"STATUS: refused\n\n{text}"
+
+
+def precheck(args):
+    """The refusals cheap enough to answer BEFORE a run is spawned (U5.2).
+
+    Returns {"refusal": text|None, "bootstrap_note": str|None, "token": ...}
+    -- the token is what lets _delegate tell a result this process produced
+    from one a caller made up.
+    """
+    result = _preconditions(args)
+    result["token"] = _PRECHECK_TOKEN
+    return result
+
+
+def _preconditions(args):
+    """The precheck body.
+
+    Returns {"refusal": text|None, "bootstrap_note": str|None}.
+
+    Everything here is config reads, one `git rev-parse` and one `git diff`:
+    milliseconds, so the async submit can answer them in the tool response,
+    where the caller is still looking, instead of filing them as a receipt
+    nobody is waiting on yet. What is deliberately NOT here is the PRE-FLIGHT
+    gate run: `GATE UNUSABLE` / `GATE VACUOUS` cost up to the whole verify
+    budget (an hour at the clamp), which is a run rather than a precondition --
+    they land in the receipt file with every other outcome.
+
+    The bootstrap step WRITES the worker rules file, so its notice is returned
+    here and threaded into the run through PRECHECK_ARG rather than recomputed:
+    a second pass would find the file already in place and the receipt would
+    silently lose the line saying it had just been made.
+    """
+    args, retry_refusal = _resolve_retry(args)
+    if retry_refusal:
+        return {"refusal": retry_refusal, "bootstrap_note": None}
+    cwd = args["cwd"]
+    verify = args.get("verify")
+    # Config-aware for the same reason the engine is (U5.6): a project that
+    # declares its gate expectation in .qwen-delegate.json must hit the same
+    # contradiction check as one that passes it per call.
+    preflight_expect = (args.get("preflight_expect")
+                        or _project_config(cwd).get("preflight_expect")
+                        or _global_config().get("preflight_expect") or "any")
+
+    # --- Precondition: trust (R3: the slider) ---
+    # Position resolves like `executor`: call arg > project .qwen-delegate.json
+    # 'trust' > machine ~/.qwen-delegate/config.json 'trust' > builtin ("self"/L5).
+    # The resolved value is validated below, so a bad config value is refused by
+    # name exactly like a bad call arg.
+    trust = (args.get("trust")
+             or _project_config(cwd).get("trust")
+             or _global_config().get("trust")
+             or "self")
+    if trust == "auto":
+        # "auto" has no gate of its own -- the server cannot judge criticality.
+        # Refuse the bare call so the orchestrator classifies THIS task and passes
+        # a concrete level. A concrete call arg overrides an "auto" default above,
+        # so this only fires when nobody chose.
+        return {"refusal": (
+            "Trust is \"auto\" — pick per task by criticality and pass it "
+            "explicitly. Use trust=\"verified\" for correctness-critical, "
+            "irreversible, outward-facing, or security / data-loss / money / "
+            "auth work; trust=\"self\" (L5) for low-stakes mechanical or "
+            "greenfield work. \"auto\" has no gate of its own (the server "
+            "cannot judge criticality), so the orchestrator decides."
+        ), "bootstrap_note": None}
+    if trust not in ("verified", "self"):
+        return {"refusal": (
+            f"Trust dial \"{trust}\" is unknown — run refused. Accepted: "
+            "\"verified\" (your verify command is the gate) or \"self\" "
+            "(L5 full trust — the delegate's own suite is the gate; "
+            "verify optional). Intermediate levels are a parked design."
+        ), "bootstrap_note": None}
+
+    # --- Precondition: the gate expectation must be satisfiable ---
+    # The self-gate ratchet exists to force the preflight RED (an already-green
+    # suite proves nothing about the delta), so declaring "green" against a gate
+    # generated for that purpose asks for a contradiction -- and would land as a
+    # pass that proves nothing, with the one flag that says so switched off.
+    if preflight_expect == "green" and trust == "self" and not verify:
+        return {"refusal": (
+            "preflight_expect=\"green\" contradicts trust=\"self\" with no "
+            "verify command: the server-generated gate ratchets its test "
+            "count precisely so the preflight comes back RED. Pass your own "
+            "`verify` for revision work, or drop preflight_expect."
+        ), "bootstrap_note": None}
+
+    # --- Precondition: git repo ---
+    if not is_git_repo(cwd):
+        return {"refusal": nongit_refusal(cwd), "bootstrap_note": None}
+
+    # --- Bootstrap rules file ---
+    bootstrap_note = None
+    rules_state, rules_path = worker_rules_status(cwd)
+    if rules_state != "ok":
+        cmd, path = bootstrap_worker_rules(cwd)
+        if not path:
+            return {"refusal": bootstrap_failed_refusal(cwd, "IO error"),
+                    "bootstrap_note": None}
+        bootstrap_note = bootstrap_notice(cmd, path) + " " + graph.bootstrap_line()
+        # First delegation in a repo is also the first on a NEW MACHINE, and the
+        # settings that decide whether a run comes back whole do not travel with
+        # this plugin. Say so once, here, rather than let it surface later as an
+        # unexplained truncation someone debugs the repo over.
+        try:
+            executor_note = doctor.summary_line()
+            if executor_note:
+                bootstrap_note += " " + executor_note
+        except Exception:
+            pass
+
+    # --- Precondition: no dirty protected spec ---
+    pre_dirty = violated_specs(cwd)
+    if pre_dirty:
+        return {"refusal": (
+            f"STATUS: error\nUncommitted changes in protected spec file(s): "
+            f"{', '.join(pre_dirty)}\n\nCommit or stash the spec changes first, "
+            f"then delegate."
+        ), "bootstrap_note": bootstrap_note}
+
+    return {"refusal": None, "bootstrap_note": bootstrap_note}
+
+
 def delegate(args):
     """Single-candidate delegation loop.
 
@@ -389,10 +609,30 @@ def delegate(args):
 
 
 def _delegate(args, t0_dir):
+    # U5.5: a `retry_of` call is the stored brief plus this call's overrides,
+    # resolved before anything reads an argument. Idempotent with the server's
+    # own pass (see precheck) -- both compute it from the caller's args.
+    args, retry_refusal = _resolve_retry(args)
+    if retry_refusal:
+        return _refusal(retry_refusal)
     task = args["task"]
     cwd = args["cwd"]
     verify = args.get("verify")
-    approval_mode = args.get("approval_mode", "auto-edit")
+
+    # --- Config (project > machine) ---
+    # Read FIRST: U5.6 makes it the source of a project's standing defaults,
+    # so every resolution below can consult it. It still lands before the
+    # pre-flight, which is what the verify budget needs.
+    cfg = dict(_global_config())
+    cfg.update(_project_config(cwd))
+
+    # U5.6 recipe defaults: a project states its standing preferences once in
+    # .qwen-delegate.json instead of every call repeating them. Call args
+    # always win -- the config is what a call FALLS BACK to, never what
+    # overrides it.
+    approval_mode = args.get("approval_mode") or cfg.get("approval_mode") \
+        or "auto-edit"
+    shell_allow = args.get("shell_allow") or cfg.get("shell_allow")
     # Default: project config, else 3; clamped 1..10 -- the schema has promised
     # both since v1, and the engine port had silently dropped them.
     max_iter = (args.get("max_iterations")
@@ -409,7 +649,8 @@ def _delegate(args, t0_dir):
     report = bool(args.get("report_dont_fix"))
     if report:
         max_iter = 1
-    timeout = args.get("timeout_sec", _DEFAULT_TIMEOUT)
+    timeout = args.get("timeout_sec") or cfg.get("timeout_sec") \
+        or _DEFAULT_TIMEOUT
     if timeout:
         timeout = max(30, min(7200, int(timeout)))
     else:
@@ -431,139 +672,35 @@ def _delegate(args, t0_dir):
     # green by definition. An unrecognised value falls back to today's behavior
     # rather than refusing -- same policy as on_compaction, and the schema enum
     # is the front line.
-    preflight_expect = args.get("preflight_expect") or "any"
+    preflight_expect = (args.get("preflight_expect")
+                        or cfg.get("preflight_expect") or "any")
     if preflight_expect not in ("red", "green", "any"):
         preflight_expect = "any"
+    # U5.1: the shape the caller needs OUT of the run. A non-object is treated
+    # as absent rather than refused -- the schema belongs to the caller, and a
+    # malformed one must not cost a delegation that would otherwise be fine.
+    result_schema = args.get("result_schema")
+    if not isinstance(result_schema, dict):
+        result_schema = None
 
-    # --- Precondition: trust (R3: the slider) ---
-    # Position resolves like `executor`: call arg > project .qwen-delegate.json
-    # 'trust' > machine ~/.qwen-delegate/config.json 'trust' > builtin ("self"/L5).
-    # The resolved value is validated below, so a bad config value is refused by
-    # name exactly like a bad call arg.
+    # --- Preconditions (U5.2: also runnable pre-spawn, see precheck) ---
+    # The server prechecks a submitted run so its refusals come back in the
+    # tool response; when it did, the result rides in on PRECHECK_ARG and is
+    # NOT recomputed -- the bootstrap step writes a file, and running it twice
+    # would drop the notice that says so.
+    pre = args.get(PRECHECK_ARG)
+    if not isinstance(pre, dict) or pre.get("token") != _PRECHECK_TOKEN:
+        pre = precheck(args)
+    if pre.get("refusal"):
+        return _refusal(pre["refusal"], max_iter)
+    bootstrap_note = pre.get("bootstrap_note")
+    # Past the precheck this is a fact, not a question: a non-repo cwd was
+    # refused above.
+    guard_on = True
     trust = (args.get("trust")
              or _project_config(cwd).get("trust")
              or _global_config().get("trust")
              or "self")
-    if trust == "auto":
-        # "auto" has no gate of its own -- the server cannot judge criticality.
-        # Refuse the bare call so the orchestrator classifies THIS task and passes
-        # a concrete level. A concrete call arg overrides an "auto" default above,
-        # so this only fires when nobody chose.
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": (
-                "Trust is \"auto\" — pick per task by criticality and pass it "
-                "explicitly. Use trust=\"verified\" for correctness-critical, "
-                "irreversible, outward-facing, or security / data-loss / money / "
-                "auth work; trust=\"self\" (L5) for low-stakes mechanical or "
-                "greenfield work. \"auto\" has no gate of its own (the server "
-                "cannot judge criticality), so the orchestrator decides."
-            ),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
-    if trust not in ("verified", "self"):
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": (
-                f"Trust dial \"{trust}\" is unknown — run refused. Accepted: "
-                "\"verified\" (your verify command is the gate) or \"self\" "
-                "(L5 full trust — the delegate's own suite is the gate; "
-                "verify optional). Intermediate levels are a parked design."
-            ),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
-
-    # --- Precondition: the gate expectation must be satisfiable ---
-    # The self-gate ratchet exists to force the preflight RED (an already-green
-    # suite proves nothing about the delta), so declaring "green" against a gate
-    # generated for that purpose asks for a contradiction -- and would land as a
-    # pass that proves nothing, with the one flag that says so switched off.
-    if preflight_expect == "green" and trust == "self" and not verify:
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": (
-                "preflight_expect=\"green\" contradicts trust=\"self\" with no "
-                "verify command: the server-generated gate ratchets its test "
-                "count precisely so the preflight comes back RED. Pass your own "
-                "`verify` for revision work, or drop preflight_expect."
-            ),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
-
-    # --- Precondition: git repo ---
-    guard_on = is_git_repo(cwd)
-    if not guard_on:
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": nongit_refusal(cwd),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
-
-    # --- Bootstrap rules file ---
-    bootstrap_note = None
-    rules_state, rules_path = worker_rules_status(cwd)
-    if rules_state != "ok":
-        cmd, path = bootstrap_worker_rules(cwd)
-        if not path:
-            return {
-                "status": "refused",
-                "session_id": None,
-                "trail": [],
-                "result_text": bootstrap_failed_refusal(cwd, "IO error"),
-                "denials": [],
-                "max_iter": max_iter,
-                "last_verify": None,
-                "ctx": {},
-            }
-        bootstrap_note = bootstrap_notice(cmd, path) + " " + graph.bootstrap_line()
-        # First delegation in a repo is also the first on a NEW MACHINE, and the
-        # settings that decide whether a run comes back whole do not travel with
-        # this plugin. Say so once, here, rather than let it surface later as an
-        # unexplained truncation someone debugs the repo over.
-        try:
-            executor_note = doctor.summary_line()
-            if executor_note:
-                bootstrap_note += " " + executor_note
-        except Exception:
-            pass
-
-    # --- Precondition: no dirty protected spec ---
-    pre_dirty = violated_specs(cwd)
-    if pre_dirty:
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": (
-                f"STATUS: error\nUncommitted changes in protected spec file(s): "
-                f"{', '.join(pre_dirty)}\n\nCommit or stash the spec changes first, "
-                f"then delegate."
-            ),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
 
     # --- Resolve executor profile ---
     profile = resolve(cwd, args.get("executor"))
@@ -584,23 +721,7 @@ def _delegate(args, t0_dir):
         """
         if wt is not None:
             worktrees.release(cwd, wt["path"], wt["branch"])
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": text,
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
-
-    # --- Config (project > machine), read before the gate runs ---
-    # Deliberately earlier than the live limits below: the verify budget decides
-    # whether the pre-flight can finish at all, and the pre-flight is the first
-    # thing that happens.
-    cfg = dict(_global_config())
-    cfg.update(_project_config(cwd))
+        return _refusal(text, max_iter)
 
     # U3.1: arg > config > 300, clamped 10..3600. The floor is what keeps a
     # mistyped budget from turning every gate into a timeout refusal; the
@@ -691,6 +812,17 @@ def _delegate(args, t0_dir):
     # --- Refs snapshot (pre-run) ---
     refs_before = refs.snapshot(cwd)
 
+    # U5.6: the project's standing instruction, appended to the task itself so
+    # it rides every path the task rides -- the first prompt, and the
+    # compaction re-injections that re-send the task verbatim. A briefing
+    # discipline every task in the repo has to repeat is a discipline the
+    # caller pays for on every call; this is where it belongs. Kept out of the
+    # STORED brief (U5.5), which would otherwise stack a copy per retry.
+    base_task = task
+    task_suffix = cfg.get("task_suffix")
+    if isinstance(task_suffix, str) and task_suffix.strip():
+        task = f"{task}\n\n---\n{task_suffix.strip()}"
+
     # --- Shell feedback prefix ---
     feedback = (args.get("shell_feedback") or "").strip()
     prompt = task
@@ -753,6 +885,8 @@ def _delegate(args, t0_dir):
         # A pre-flight past half the budget is paid AGAIN by every attempt: at
         # max_iter 3 the gate alone can outlast the work it is grading.
         "gate_slow": bool(verify) and gate_ms > verify_timeout * 500,
+        # U5.5: this run is a corrected re-run of another session, started cold.
+        "retry_of": args.get("retry_of"),
         # C3 features (U4.1/U4.2/U4.3): every one of these renders nothing when
         # its param was never passed.
         "report": report,
@@ -760,10 +894,19 @@ def _delegate(args, t0_dir):
         "strays": [],
         "dodge": {},
         "fixtures_unproven": [],
+        # U5.1: the conforming result block (verbatim) and, when it did not
+        # conform, what was wrong with it.
+        "result_json": None,
+        "result_errors": [],
     }
     chain = args.get(CHAIN_ARG)
     if isinstance(chain, dict):
         ctx["chain"] = {"pos": chain.get("pos"), "of": chain.get("of")}
+    # U5.2: the submitted run's id, so the completion record can be paired with
+    # the `running` record the submit wrote. Absent for a direct engine call --
+    # then nothing was ever left open to pair with.
+    if args.get(RUN_ID_ARG):
+        ctx["run_id"] = args[RUN_ID_ARG]
 
     # --- Live limits (config: project > machine > builtin) ---
     # Both are ceilings on how wrong a run may go before we stop paying for it,
@@ -814,6 +957,45 @@ def _delegate(args, t0_dir):
     last_verify = None
     prev_v_out = None
 
+    def schema_gate(attempt, note):
+        """U5.1: check the result contract on an attempt that would otherwise
+        END the loop, and record `note` as that attempt's trail line.
+
+        Only on an ending attempt, never beside a red gate: the gate is the
+        stronger signal, and replacing its output with a complaint about a
+        JSON block would spend the retry on the formatting instead of the bug.
+        Returns "ok" | "retry" | "stop".
+        """
+        nonlocal prompt
+        if result_schema is None:
+            trail.append(f"attempt {attempt}: {note}")
+            return "ok"
+        value, raw, err = jsonschema.last_json_block(result_text)
+        errors = [err] if err else jsonschema.validate(value, result_schema)
+        ctx["result_errors"] = errors
+        ctx["result_json"] = None if errors else raw
+        if not errors:
+            trail.append(f"attempt {attempt}: {note}")
+            return "ok"
+        trail.append(f"attempt {attempt}: {note}; RESULT SCHEMA invalid -- "
+                     + "; ".join(errors[:3]))
+        if attempt >= max_iter:
+            return "stop"
+        # Fed back like a red gate, and for the same reason: the worker can
+        # only fix what it is told by name. Every violation is listed with its
+        # path, and the schema is repeated so the reply does not depend on the
+        # worker remembering a suffix from several turns ago.
+        prompt = (
+            "Your reply is missing a usable result block. Each of these must "
+            "be fixed:\n\n"
+            + "\n".join(f"- {e}" for e in errors)
+            + "\n\nThe work itself is not in question here -- do not change "
+              "the code. Re-send your reply ending with a fenced ```json "
+              "block that conforms to this schema:\n\n"
+            + json.dumps(result_schema, indent=2)
+        )
+        return "retry"
+
     for attempt in range(1, max_iter + 1):
         suffix = HANDOFF_SUFFIX if (attempt == 1 or send_suffix) else ""
         if report and suffix:
@@ -821,6 +1003,11 @@ def _delegate(args, t0_dir):
             # findings line is the deliverable, and it rides the same
             # machine-read tail the parser already reads.
             suffix += FINDINGS_SUFFIX
+        if result_schema is not None and suffix:
+            # Rides the same suffix: it is asked for once up front and again
+            # after a compaction, which are exactly the moments the worker has
+            # no other way to learn what shape its answer must take.
+            suffix += jsonschema.schema_suffix(result_schema)
         send_suffix = False
         if progress is not None:
             # Records alone cannot tell a poller attempt 3 of 3 from an attempt
@@ -833,7 +1020,7 @@ def _delegate(args, t0_dir):
             profile, prompt, work_cwd, approval_mode,
             timeout=timeout, session_id=session_id,
             verify=verify,
-            shell_allow=args.get("shell_allow"),
+            shell_allow=shell_allow,
             suffix=suffix,
             compaction_policy=on_compaction,
             on_line=on_line,
@@ -1055,7 +1242,9 @@ def _delegate(args, t0_dir):
 
         # --- No verify: unverified success ---
         if not verify:
-            trail.append(f"attempt {attempt}: no verify supplied")
+            action = schema_gate(attempt, "no verify supplied")
+            if action == "retry":
+                continue
             break
 
         # --- C8 prefilter (advisory) — after executor, before gate ---
@@ -1097,9 +1286,11 @@ def _delegate(args, t0_dir):
             ctx["report_gate_green"] = passed
 
         if passed:
-            trail.append(f"attempt {attempt}: VERIFY PASS")
             if prefilter_failed:
                 ctx["notes"] = "self-tests failing"
+            action = schema_gate(attempt, "VERIFY PASS")
+            if action == "retry":
+                continue
             break
 
         trail.append(f"attempt {attempt}: verify failed")
@@ -1151,6 +1342,11 @@ def _delegate(args, t0_dir):
         status = "error"
     elif trail[-1].endswith(": VERIFY PASS"):
         status = "success"
+    elif "RESULT SCHEMA invalid" in trail[-1]:
+        # U5.1: the work may well be fine -- the gate on that line says so --
+        # but the machine-read result the caller asked for is not consumable,
+        # and a green status would hand back a promise this run did not keep.
+        status = "result_invalid"
     elif "run stopped:" in trail[-1]:
         status = "stopped"
     elif "COMPACTION" in trail[-1].upper():
@@ -1263,6 +1459,19 @@ def _delegate(args, t0_dir):
 
     # --- Refs added ---
     ctx["refs_added"] = refs.added(refs_before, work_cwd)
+
+    # --- Stored brief (U5.5) ---
+    # Written post-run and only when a session exists, because the session id
+    # is the handle the caller is given back: `retry_of=<that id>` is how a
+    # corrected re-run finds this call again. The task stored is the one the
+    # caller sent (corrections included, the project's task_suffix not), so
+    # retries accumulate the corrections and never a stack of suffixes.
+    if session_id and cfg.get("store_briefs", True) is not False:
+        brief = {k: args[k] for k in BRIEF_KEYS
+                 if args.get(k) is not None and k != "task"}
+        brief["task"] = base_task
+        brief["trust"] = trust
+        save_brief(cwd, session_id, brief)
 
     return {
         "status": status,
