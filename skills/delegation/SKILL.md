@@ -11,7 +11,7 @@ One engine, one loop, whether you run it inline or hand it to the qwen-manager s
 
 ## The loop
 
-    map → design/spec (you) → delegate (Qwen) → gate verdict → (repeat) → relay
+    map → design/spec (you) → submit (Qwen) → read the receipt file → (repeat) → relay
 
 You speak at most three times; everything between is free-side and unseen:
 
@@ -19,11 +19,57 @@ You speak at most three times; everything between is free-side and unseen:
    `qwen_query("Is this spec implementable / grounded / contradiction-free?")`. This is
    where your design mistakes surface honestly — a write-capable Qwen games a flawed gate
    to green instead of reporting it.
-2. **Build.** `qwen_delegate(task, cwd, verify=<a real gate>, approval_mode="auto-edit")`.
-   The gate is a shell command exiting 0 only on true success. The server runs it, feeds
-   real failures back, and iterates on free tokens — you are not in that loop.
-3. **Relay.** Read the compact receipt (never the diff). On green, **do not read the
+2. **Submit.** `qwen_delegate(task, cwd, verify=<a real gate>, approval_mode="auto-edit")`
+   **does not block** — it answers in seconds with a claim ticket:
+
+       STATUS: submitted
+       RUN: <id>
+       RECEIPT: <cwd>/.qwen-delegate/receipts/<id>.md — lands on completion
+       HEARTBEAT: <cwd>/.qwen-delegate/progress.json
+       WATCH: until [ -f <receipt> ]; do sleep 5; done; cat <receipt>
+
+   The build runs on a background thread; the receipt file appears only when it is
+   complete (chain/batch also give a `PARTIAL:` path that fills in link by link). So:
+   **go do something else and read the receipt file later**, or paste the `WATCH:`
+   one-liner into Bash when you have nothing else to do. `wait: true` blocks and returns
+   the receipt in the response instead — worth it only for a run short enough that
+   switching costs more than waiting. The gate is a shell command exiting 0 only on true
+   success; the server runs it, feeds real failures back, and iterates on free tokens —
+   you are not in that loop. `qwen_query` is unchanged: synchronous, answer in the
+   response. (Ending your session kills its in-flight runs — they are threads of this
+   MCP server, not detached jobs.)
+3. **Relay.** Read the receipt file (never the diff). On green, **do not read the
    code — the gate already proved it.** Relay the outcome + proof.
+
+## Route first: delegate, resume, or just do it
+
+Overhead is roughly CONSTANT — a brief plus a capped receipt, ~700–3,000 of your tokens
+whether the task is 20 lines or 500. That makes the size of the work the deciding factor,
+not its difficulty:
+
+    ≤20 lines · you already know the file · a fast gate exists  → edit it yourself, then
+                                                                  run that gate
+    aligned follow-up on a run that went green                  → warm resume (session_id)
+    correction that CONTRADICTS what the session believes       → cold, or
+                                                                  retry_of=<sid> + retry_message
+    new unit · tests for existing code · >50 lines · many files → cold delegation, brief
+                                                                  as a POINTER (paths and
+                                                                  end state, not a design)
+    a question about the code                                   → qwen_query, never a delegation
+
+Do NOT go mapping the repo yourself to prepare a small edit: architect-side `graphify`
+shell calls measured **+64% total cost** versus locating through the worker — every call
+is a turn whose output stays in your context. Locate with one `qwen_query`, or from what
+you already know.
+
+**Resume vs cold (the heuristic the receipt now states for you).** Resume for
+follow-ups: the next thing, same task, same cwd, nothing contradicted. Go cold for
+repairs — a session that failed carries its confusion forward and will argue with your
+correction rather than follow it; `retry_of=<session_id>` replays its stored brief cold
+with `retry_message` appended, so you retype nothing. **The exception is the
+shell-approval loop**: a run that came back with `SHELL APPROVAL NEEDED` is fenced, not
+confused, and `shell_allow`/`shell_feedback` only reach the worker in the SAME session —
+resume that one. The receipt's `RESUME:` line already picks a side; follow it.
 
 ## Non-negotiables
 
@@ -39,10 +85,14 @@ You speak at most three times; everything between is free-side and unseen:
 ## Reading the receipt
 
 `STATUS` decides. Then the deterministic lines, which cost no model tokens and catch what
-a green gate can't: `CHANGED` (filesystem truth), `NEW PUBLIC SURFACE` (scope creep —
-review the list, not the diff), `GRAPH` (map freshness), `COST`, `ROLLBACK`. `gate_suspect`
-means YOUR gate is broken (identical output before/after) — fix it, don't iterate.
-`NOTES`/`MISREPORT`/`DENIALS` are leads to check, never trusted.
+a green gate can't: `RUN` (attempts · peak ctx · wall · denials · strays), `CHANGED`
+(filesystem truth), `NEW PUBLIC SURFACE` (scope creep — review the list, not the diff),
+`TEST DODGE` (a skip added in the tests being delivered — the one line worth reading on a
+GREEN receipt), `STRAYS`, `SCOPE` (co-work: changed but not by the worker — reported,
+never reverted), `GRAPH`, `COST`, `ROLLBACK`. `gate_suspect` means YOUR gate is broken
+(identical output before/after) — fix it, don't iterate. `scope_violation`,
+`fixture_unproven`, `result_invalid` and `reported` say exactly which contract ended the
+run. `NOTES`/`MISREPORT`/`DENIALS`/`FINDINGS` are leads to check, never trusted.
 
 ## Existing codebases: read the map, not the code
 
@@ -116,7 +166,8 @@ Estimate, then set ~3× — p90 ran 3× median, and over-setting costs nothing.
 
 **Sessions:** stateless (omit `session_id`) is the default and usually right — a fresh
 session re-reads QWEN.md, which is what makes the rules bind. Resume only for a tight
-follow-up on the SAME task, same cwd.
+follow-up on the SAME task, same cwd; for a correction use `retry_of` instead (see the
+resume heuristic above).
 
 **on_compaction:** compaction is the documented fabrication trigger, so the default is
 **`refuse`** — the run STOPS the moment one is attempted, nothing from it is graded, and
@@ -155,12 +206,39 @@ make the criticality call on every delegation.
 **Hygiene:** re-read any file Qwen touched before editing it yourself (your cached copy
 is stale); parallel delegations need separate worktrees — `batch` handles that for you.
 
+## Ask for these when they fit
+
+- **`preflight_expect`** — `"red"` (greenfield) refuses a gate that already passes;
+  `"green"` (revision) stops the preflight alarm on a suite that was green by premise.
+- **`verify_timeout_sec`** — kill time for ONE gate run (default 300); a pre-flight that
+  times out refuses the run (`GATE UNUSABLE`) instead of blaming the worker.
+- **`advisory_gates=[{name, cmd}]`** — loose conformance/placement/drift checks that glow
+  red in the receipt and never touch `STATUS`, the retry loop, or the worker.
+- **`chain=[...]`** — DEPENDENT steps in one call, serial on the same tree, halting at the
+  first non-green link (`batch` is the independent one; both together is refused).
+- **`report_dont_fix=true`** — diagnose, don't repair: one attempt, status `reported`,
+  a `FINDINGS:` line, and a red gate as the deliverable.
+- **`result_schema={...}`** — a VALUE back instead of prose: the worker ends with a JSON
+  block, violations are fed back by path, the receipt carries it verbatim (also on
+  `qwen_query`, reported once rather than retried).
+- **`retry_of=<session_id>` + `retry_message`** — replay that run's stored brief COLD with
+  your correction (`task: ""` reuses the stored task).
+- **`fixture_provenance=true`** — created fixtures must carry `captured-from:` (a `.src`
+  sidecar for binaries); imagined fixtures pass any gate written against them.
+- **Project `.qwen-delegate.json`** — `task_suffix` appends your standing worker discipline
+  to every task server-side (compaction-safe, unlike QWEN.md); `approval_mode` /
+  `shell_allow` / `timeout_sec` / `preflight_expect` / `verify_timeout_sec` are defaults a
+  call arg still beats.
+- **`.qwen-delegate/progress.json`** — heartbeat: records, input tokens, attempt, state.
+  Answers "is it hung?" for a file read instead of a turn.
+
 ## Inline vs the manager subagent
 
-Run the loop **inline** for interactive work and small counts. Hand it to the
-**qwen-manager** subagent when isolation earns its preamble: a multi-unit build whose
-verdicts would silt up this session, parallel fan-out, or work that should run off to the
-side while you keep talking to the user.
+Run the loop **inline** for interactive work and small counts — and note that "run it off
+to the side while I keep talking" is no longer a reason to spawn anything: a submit
+already does that for free. Hand it to the **qwen-manager** subagent when isolation earns
+its preamble: a multi-unit build whose specs and verdicts would silt up this session, or
+a fan-out with its own iteration to babysit.
 
 ## `STATUS: error` is the executor, not this repo — do not go debugging
 

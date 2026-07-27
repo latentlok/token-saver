@@ -1,5 +1,5 @@
 ---
-description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase (how does X work, where is Y handled, is there already a Z) — those are answered read-only and cheaply. Answers questions directly; builds run the delegation loop INLINE by default (a subagent costs a preamble it rarely earns back — spawn qwen-manager only for a long multi-unit grind, a parallel fan-out, or explicit background work).
+description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase (how does X work, where is Y handled, is there already a Z) — those are answered read-only and cheaply. Answers questions directly; builds run the delegation loop INLINE by default (delegations submit and return at once, so a long build already runs in the background — spawn qwen-manager only for a long multi-unit grind or a fan-out with its own iteration to babysit).
 argument-hint: <a task or question about code; name the repo if it isn't obvious>
 ---
 
@@ -33,10 +33,11 @@ follow-up, reuse the returned `session_id` — it's a warm conversation.
 preamble every time; a bare call does not, so inline is the cheaper default and the
 right one for one or a few delegations.
 → **Spawn the `qwen-manager` subagent (background) only when isolation earns that
-preamble:** a multi-unit build whose spec/verdict churn would silt up this session, a
-parallel fan-out you want running off to the side, or when you want to keep talking to
-the user while it grinds. Then hand it the goal (not the steps) and relay its report on
-the notification.
+preamble:** a multi-unit build whose spec/verdict churn would silt up this session, or a
+fan-out with its own iteration to babysit. "So I can keep talking to the user" is no
+longer one of those reasons — `qwen_delegate` submits and returns immediately, so a long
+build already runs off to the side without a subagent. Then hand it the goal (not the
+steps) and relay its report on the notification.
 
 **Genuinely ambiguous about WHAT to build, or an irreversible / outward-facing call**
 (delete data, change a public API, pick a product direction):
@@ -49,12 +50,14 @@ the notification.
 - **Build (default: INLINE, per §1):** set `trust` by criticality (`"verified"` for
   correctness-critical / irreversible / outward-facing work, else `"self"` — the
   `delegation` skill has the rule), pin the behavior or author the gate, call
-  `qwen_delegate` directly, read the receipt, relay. No subagent — a bare tool call
-  costs nothing extra, and the server runs the iterate loop on free tokens either
-  way. An MCP call that outlives ~2 minutes is auto-backgrounded by the client, so a
-  long build already frees you to keep talking without spawning anything. Do not
-  read the codebase or write the code yourself — that is the token you are here to
-  save.
+  `qwen_delegate` directly. **That call SUBMITS and returns in seconds** with a run id,
+  the path its receipt will land at, a heartbeat file and a `WATCH:` one-liner — the
+  build continues in the background. Keep talking to the user or line up the next unit,
+  then read the receipt FILE and relay it (`wait: true` blocks instead, for short runs).
+  No subagent — a bare tool call costs nothing extra, and the server runs the iterate
+  loop on free tokens either way. Do not read the codebase or write the code yourself —
+  that is the token you are here to save. Never relay a run whose receipt has not
+  landed; if the user asks first, say it is still running.
 - **Build (isolation cases only):** a multi-unit grind whose per-module churn would
   silt this session, or a parallel fan-out — hand the goal to `qwen-manager` in the
   background and relay its report on the notification. **Never invent or predict

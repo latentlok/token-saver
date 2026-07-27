@@ -20,7 +20,7 @@ import json
 TOOL = json.loads(r'''
 {
   "name": "qwen_delegate",
-  "description": "Delegate a coding task to the local Qwen worker on free tokens. It builds in `cwd`; this server runs `verify` after each attempt, feeds failures back, and returns a short receipt. The worker's self-report is never evidence -- the gate decides. Before first use, load the `delegation` skill: it carries the discipline (gates, approval modes, timeouts, fan-out, sessions).",
+  "description": "Delegate a coding task to the local Qwen worker on free tokens. The call SUBMITS and answers in seconds with a run id, the file path its receipt will land at, a heartbeat file and a shell one-liner to wait on it -- do other work, then read that file (`wait: true` blocks and returns the receipt instead). The run builds in `cwd`; this server runs `verify` after each attempt and feeds failures back. The worker's self-report is never evidence -- the gate decides. Before first use, load the `delegation` skill: it carries the discipline (gates, approval modes, timeouts, fan-out, sessions).",
   "inputSchema": {
     "type": "object",
     "properties": {
