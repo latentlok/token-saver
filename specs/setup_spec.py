@@ -273,7 +273,8 @@ class ManagedBlock(Fixture):
         # The U2.7 rule: a capability surfaces here as one line or as a receipt
         # affordance -- never only in long-form docs.
         block = setup.template_block("9.9.9")
-        for capability in ("wait", "retry_of", "result_schema", "WATCH"):
+        for capability in ("wait", "retry_of", "result_schema", "WATCH",
+                           "brief_file", "touch_scope"):
             self.assertIn(capability, block)
 
 

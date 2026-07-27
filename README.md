@@ -21,6 +21,11 @@ thing allowed to say "done." Not the model's opinion of its own work, which is
 [measurably unreliable](docs/OVERVIEW.md#why-its-built-this-way). If the test fails, the
 local model tries again, for free, until it passes. Claude never sees the mess.
 
+And Claude never waits for it either: handing work over takes seconds — the result
+lands in a file when it's done, and Claude reads it there while getting on with
+something else. Recurring jobs can live as *playbooks* — markdown briefs versioned in
+your repo, sent by name instead of retyped.
+
 ## What it actually saves
 
 Measured on real work, not benchmarks:
@@ -82,8 +87,8 @@ plugin name, then `@`, then the marketplace name — and both happen to be `toke
     claude plugin list
     claude plugin details token-saver
 
-You should see version `0.4.0`, status `enabled`, and an inventory of **1 MCP server**
-(`qwen-delegate`), **2 agents**, and **5 skills**.
+You should see status `enabled` and an inventory of **1 MCP server**
+(`qwen-delegate`), **2 agents**, and **4 skills**.
 
 **Step 5 — let it check your machine.** The first Claude Code session after installing
 runs a one-off check of your local model setup and speaks up only if something will
@@ -91,10 +96,11 @@ actually cause trouble. Silence means you're set. To run it yourself at any time
 
     /token-saver:doctor
 
-**Step 6 — on Claude Code older than 2.1.203 only**, add this to
-`~/.claude/settings.json`, or long jobs time out after 30 minutes:
-
-    "env": { "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "7200000" }
+> One legacy note: on Claude Code **older than 2.1.203**, a delegation called with
+> `wait: true` (the blocking mode) can idle out at 30 minutes. Either upgrade, or add
+> `"env": { "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "7200000" }` to
+> `~/.claude/settings.json`. The default calling style is unaffected — a delegation
+> submits and answers in seconds, so there is nothing to time out.
 
 ### Update
 
@@ -129,7 +135,7 @@ see [docs/USAGE.md](docs/USAGE.md).
 
 - **[docs/OVERVIEW.md](docs/OVERVIEW.md)** — how it works, the architecture, and why every
   guard in it exists
-- **[docs/USAGE.md](docs/USAGE.md)** — day-to-day driving, every setting, working from a
-  clone, recipes
+- **[docs/USAGE.md](docs/USAGE.md)** — day-to-day driving, every setting, playbooks,
+  working from a clone, recipes
 - **[docs/CHANGELOG.md](docs/CHANGELOG.md)** — what changed and why
 - **[docs/FINDINGS.md](docs/FINDINGS.md)** — the evidence behind every number above

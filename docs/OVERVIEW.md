@@ -62,8 +62,9 @@ The same flow in one screen of text:
     you ──▶ your Claude session, INLINE (the measured default)
               ├── vague idea?  qwen, plan mode → options, writes nothing
               ├── decides; pins BEHAVIOR (trust="self") or authors a gate (trust="verified")
-              ├── qwen_delegate → the SERVER runs the gate and iterates on free tokens
-              └── reads a ~6-line receipt — never the code, never the diff
+              ├── qwen_delegate SUBMITS (answers in seconds with a run id + receipt path)
+              ├── the SERVER runs the gate and iterates on free tokens, in the background
+              └── reads the ~8-line receipt FILE when it lands — never the code, never the diff
         ◀── "here's what landed, here's the proof"
 
 Inline is the default because it measured cheaper — a subagent costs a preamble that
@@ -120,12 +121,14 @@ is never in this repo. Configure it once per machine:
 
 ### The MCP timeout field
 
-The bundled `.mcp.json` sets a per-server `"timeout": 7200000` (2h). On Claude Code
-**2.1.203+** that one field caps the wall clock *and* floors the stdio idle timeout to
-2h, so no `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` env var is needed. On older versions, add
-it as a fallback (`~/.claude/settings.json` → `"env": { "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "7200000" }`),
-because the server blocks silently in `subprocess.run` for a whole delegation and would
-otherwise idle out at 30 min.
+Mostly historical since the async flip: a delegation SUBMITS and answers in seconds,
+so there is nothing to idle out. The bundled `.mcp.json` still sets a per-server
+`"timeout": 7200000` (2h), which matters only for calls that genuinely block —
+`wait: true` delegations and long `qwen_query` runs. On Claude Code **2.1.203+** that
+one field caps the wall clock *and* floors the stdio idle timeout to 2h. On older
+versions using `wait: true`, add the fallback (`~/.claude/settings.json` →
+`"env": { "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "7200000" }`) or the blocking call
+idles out at 30 min.
 
 ## Optional: the code graph (graphify)
 
@@ -189,9 +192,10 @@ path. `/offload <task or question>` is the explicit fire-and-forget door:
     /offload make the CLI in ./tools usable without PYTHONPATH
 
 Questions are answered read-only and cheap. Builds run the same **inline** loop —
-no subagent, no extra cost; long delegations are auto-backgrounded by the client, so
-you keep working either way. The `qwen-manager` subagent exists only for the rare
-case that earns its preamble: a many-module grind or a parallel fan-out.
+no subagent, no extra cost; a delegation SUBMITS and answers in seconds, so you keep
+working while the receipt file lands in the background. The `qwen-manager` subagent
+exists only for the rare case that earns its preamble: a many-module grind or a
+parallel fan-out.
 
 Or hand a task straight to the subagent the way you'd hand it to an engineer — the goal,
 not the steps:
@@ -214,15 +218,16 @@ Or call the tool directly for something already specified:
 ## Layout
 
     server.py              thin MCP entry (stdio JSON-RPC, zero deps) over qd/
-    qd/                    the engine: gate loop, trust dial, worktrees, graph, run log
-    specs/                 the engine's own gate suite (13 spec files)
+    qd/                    the engine: async submit, gate loop, trust dial, playbooks,
+                           worktrees, graph, run log
+    specs/                 the engine's own gate suite (21 spec files, 775 tests)
     scoped_hook.py         allowlist hook for scoped mode
     agents/                qwen-manager (isolation container) · architect (L5 loop)
     skills/                delegation · architect (L5) · lld-principles · graphify-setup
-    commands/offload.md   the front door — /offload <task or question>
+    commands/              /offload (the front door) · /doctor (machine check)
     templates/             QWEN.md worker rules · CLAUDE-snippet.md policy block
     docs/                  USAGE (day-to-day) · HLD/LLD (design) · FINDINGS (evidence)
-                           · PENDING (the v4 queue) · archive/ (history)
+                           · PENDING (probes + parked designs) · archive/ (history)
     context/               agent-facing reference: SYSTEM.md, TESTING.md
     .claude-plugin/        plugin + marketplace manifests; .mcp.json registers the server
 
@@ -232,23 +237,29 @@ Or call the tool directly for something already specified:
   does X work?", "is there already a Y?", "what breaks if I change Z?") -- it reads and
   answers, cannot write. Multi-turn via `session_id` (warm follow-ups). `format='map'`
   gives a structured codebase map. The answer is a lead to verify, not truth.
-- **`qwen_delegate`** — the build tool. Runs Qwen against a gate and returns a verdict.
+- **`qwen_delegate`** — the build tool. Submits a gated run and answers at once with
+  the receipt path; the verdict lands there when the gate has decided (`wait: true`
+  blocks instead).
 
 ## What the server gives you
 
 | | |
 |---|---|
+| **async submit** | the call answers in seconds; the receipt lands as a file, complete or absent |
 | **verify gate** | a command decides, not Qwen's prose |
 | **iterate loop** | failures fed back as real error text; converges on free compute |
 | **spec guard** | `*_spec.*` / `*.spec.*` (any language) auto-reverted if touched; refuses to run if one is dirty |
+| **playbooks** | the brief as a git-versioned repo file, sent by name; the worker editing it reverts like a spec edit |
 | **blast radius** | content-hashed: what the *filesystem* says changed |
+| **co-work attribution** | changes with no logged worker write are reported, never rolled back over |
 | **pre-flight** | if the gate was already green, says so — the pass proves nothing |
 | **gate_suspect** | identical output before/after ⇒ your gate is broken, not the code |
 | **rollback** | exact command, with a safety judgment from pre-run state |
 | **handoff** | `HANDOFF/FILES/NEXT`, with `FILES` cross-checked against disk |
+| **retry_of** | a red run replays its stored brief cold, with your one-line correction |
 | **context** | peak vs the compaction threshold |
 | **timing** | actual vs budget, so the estimate can be calibrated |
-| **run log** | per-project JSONL: tokens burned vs tokens returned, per call |
+| **run log** | per-project JSONL: tokens burned vs tokens returned, per call; the LEDGER line is its reader |
 
 ## Approval modes (measured, not documented upstream)
 
