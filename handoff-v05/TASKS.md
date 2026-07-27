@@ -1,10 +1,13 @@
-# token-saver v0.5 — pending tasks (handoff, 2026-07-27)
+# token-saver v0.5 — pending tasks (handoff; updated 2026-07-28)
 
 Repo: `/home/dev-vishal/projects/qwen-delegate`, branch `v0.5-field-report`,
-HEAD `0f36f73`, tree CLEAN, suite `bash ci/run-specs.sh` = 706 tests, exit 0.
+tree CLEAN, suite `bash ci/run-specs.sh` = 775 tests, exit 0.
 Commits so far: `26e750b` (phases 0–4), `2f4b729` (phase 5 async round),
-`0f36f73` (docs/contracts). Full build history: `## Build log` sections in
-`/home/dev-vishal/.claude/plans/wobbly-fluttering-ladybug.md`.
+`0f36f73` (docs/contracts), `e030857` (**Task 1 DONE** — phase 6 playbooks),
+`c705f0b` (**Task 2 DONE** — README/USAGE rebuild). Remaining: Tasks 3–4.
+Full build history: `## Build log` sections in
+`/home/dev-vishal/.claude/plans/wobbly-fluttering-ladybug.md` and at the end
+of `ARCHITECTURE-playbooks.md` (this folder).
 
 ## Standing rules (apply to every task)
 
