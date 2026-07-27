@@ -28,7 +28,9 @@ class ProgressSnapshot(unittest.TestCase):
     def test_all_keys_present(self):
         self.p(assistant(500))
         snap = limits.read_progress(self.tmpdir)
-        for key in ("session", "records", "input_tokens", "last_type", "updated"):
+        # attempt/state joined the snapshot with the C11 wiring (U4.4).
+        for key in ("session", "records", "input_tokens", "last_type",
+                    "updated", "attempt", "state"):
             self.assertIn(key, snap, f"missing key {key!r}")
 
     def test_session_id(self):

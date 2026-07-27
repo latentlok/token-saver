@@ -44,7 +44,10 @@ def compact_hooks():
     return {"PreCompact": entry, "PostCompact": entry}
 
 
-def _read_denylog(path):
+def _read_log(path):
+    """Order-preserving, deduped lines from one QGATE_* log, or []. Shared by
+    the deny log and C10's allow-side pair -- three readers that differ only in
+    which file they open is three places to fix a bug in."""
     if not path or not os.path.isfile(path):
         return []
     try:
@@ -280,14 +283,20 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
 
 def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
                  verify=None, shell_allow=None, suffix="", compaction_policy=None,
-                 on_line=None, stall_after=None):
+                 on_line=None, stall_after=None, observe_hook=False):
     """Invoke the Qwen Code executor and parse the result.
 
     Return (text, denials, session_id, err, meta).
+
+    `observe_hook` (U1.4, off by default) installs the PreToolUse hook outside
+    scoped mode purely for its attribution logs -- same yolo-underneath trick
+    scoped already uses. Absent, argv and env are byte-identical to a run that
+    never heard of it.
     """
     from qd.profiles import render_argv
 
-    real_mode = "yolo" if mode == "scoped" else mode
+    gated = mode == "scoped" or observe_hook
+    real_mode = "yolo" if gated else mode
     argv = render_argv(profile, task + suffix, real_mode, session_id)
     # Stream only when someone is watching. Measured: the streaming adapter's
     # result record carries NO `stats` field -- the batch adapter attaches it,
@@ -305,10 +314,12 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
 
     # Build temp settings
     td = tempfile.mkdtemp()
-    denylog = None
+    denylog = writelog = allowlog = None
     hooks_dict = {"hooks": compact_hooks()}
-    if mode == "scoped":
+    if gated:
         denylog = os.path.join(td, "denied.log")
+        writelog = os.path.join(td, "writes.log")
+        allowlog = os.path.join(td, "allowed.log")
         hooks_dict["hooks"]["PreToolUse"] = [
             {"matcher": ".*", "hooks": [
                 {"type": "command", "command": f"python3 {HOOK_SCRIPT}"},
@@ -344,11 +355,14 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
     env["QCOMPACT_POLICY"] = compaction_policy or "reinject"
     env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = sys_settings
     env.update(profile["env"])
-    if mode == "scoped":
+    if gated:
         env["QGATE_CWD"] = os.path.realpath(cwd)
         env["QGATE_VERIFY"] = verify or ""
         env["QGATE_DENYLOG"] = denylog
+        env["QGATE_WRITELOG"] = writelog
+        env["QGATE_ALLOWLOG"] = allowlog
         env["QGATE_EXTRA"] = json.dumps(shell_allow or [])
+        env["QGATE_MODE"] = "scoped" if mode == "scoped" else "autoedit"
 
     # Resolve timeout
     if timeout is None:
@@ -358,7 +372,11 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
     stdout, stderr, rc, run_err, aborted = _stream_process(
         argv, cwd, env, timeout, on_line, stall_after)
 
-    blocked = _read_denylog(denylog) if denylog else []
+    # Read before the tempdir goes: these three files ARE the run's evidence,
+    # and _cleanup deletes them.
+    blocked = _read_log(denylog)
+    writes = _read_log(writelog)
+    allowed = _read_log(allowlog)
     _cleanup(td)
 
     if stdout is None:                       # never started
@@ -369,7 +387,8 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
     # one-object-per-line shape, so nothing downstream changes.
     text, denials, sid = parse_qwen_json(stdout)
     meta = {"peak": peak_context(stdout), "stats": parse_stats(stdout),
-            "blocked": blocked, "limits_inert": limits_inert}
+            "blocked": blocked, "writes": writes, "allowed": allowed,
+            "limits_inert": limits_inert}
 
     # A run WE stopped reports why, ahead of whatever the partial output looks
     # like -- the executor did not fail, we cut it short, and a receipt that

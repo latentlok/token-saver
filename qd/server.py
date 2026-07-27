@@ -265,9 +265,81 @@ def run_batch(items, handler):
         r if r is not None else "STATUS: error\n(no result)" for r in results)
 
 
+def _receipt_status(text):
+    """The status a receipt reports. Receipts open with `STATUS: <status>`
+    (every producer here does, refusals included); anything else is a receipt
+    this server did not write, which a chain must treat as a failure rather
+    than read past."""
+    first = (text or "").splitlines()[0] if text else ""
+    if first.startswith("STATUS:"):
+        return first[len("STATUS:"):].strip() or "unknown"
+    return "unknown"
+
+
+def run_chain(items, handler):
+    """Run delegation items in submission order, halting on the first red one.
+
+    A chain is the dependent counterpart of `batch`: link 2 builds on link 1's
+    tree, so it is ALWAYS serial (never the dispatch-policy branch batch takes)
+    and the first link that does not come back green stops the rest. Continuing
+    past a failure is what makes an eight-step chain expensive -- seven more
+    delegations against a tree whose premise already broke, each producing a
+    receipt the caller still has to read.
+
+    Guards are taken per link through the same _guards_for machinery batch
+    uses, and released before the next link starts: a chain holds one endpoint
+    slot at a time, not one for its whole length.
+    """
+    from qd.engine import CHAIN_ARG
+    n = len(items)
+    out = []
+    halted_at = halted_status = None
+    for k, item in enumerate(items, 1):
+        if halted_at is not None:
+            out.append(f"=== chain link {k}/{n}: skipped ===\n"
+                       f"SKIPPED (chain halted at link {halted_at}: "
+                       f"{halted_status})")
+            continue
+        args = dict(item or {})
+        args[CHAIN_ARG] = {"pos": k, "of": n}
+        acquired = []
+        try:
+            for g in _guards_for("qwen_delegate", args):
+                g.acquire()
+                acquired.append(g)
+            try:
+                text = handler(args)
+            except Exception as e:
+                text = f"STATUS: error\n{e!r}"
+        except profiles.ProfileError as e:
+            text = f"STATUS: error\n{e}"
+        finally:
+            for g in reversed(acquired):
+                g.release()
+        status = _receipt_status(text)
+        out.append(f"=== chain link {k}/{n}: {status} ===\n{text}")
+        # A preflight-passed pass still moved the tree the next link builds on,
+        # so it is green here for the same reason the worktree commit treats it
+        # as green (U3.2, decision 4).
+        if status not in ("success", "success_but_preflight_passed"):
+            halted_at, halted_status = k, status
+    return "\n\n".join(out)
+
+
 def run_delegate_batch(args):
-    """The qwen_delegate entry, batch-aware: args['batch'] fans out, else one."""
+    """The qwen_delegate entry: args['chain'] runs dependent, args['batch']
+    fans out, else one delegation."""
     from qd import engine
+    if args.get("chain") and args.get("batch"):
+        # Refused by name before anything runs: the two mean opposite things
+        # about ordering and failure, and picking one for the caller would run
+        # N delegations under a policy they did not ask for.
+        return ("STATUS: error\n`chain` and `batch` are mutually exclusive -- "
+                "`chain` runs items in order and stops at the first failure, "
+                "`batch` runs independent items and reports each. Nothing was "
+                "run. Send one of them.")
+    if args.get("chain"):
+        return run_chain(args["chain"], engine.run)
     if args.get("batch"):
         return run_batch(args["batch"], engine.run)
     return engine.run(args)

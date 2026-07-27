@@ -95,6 +95,47 @@ def write_runlog(cwd, record):
         pass
 
 
+def ledger_summary(cwd):
+    """Aggregate of this project's qwen_delegate history, for the LEDGER line.
+
+    The log had no reader: `leverage` was computed and never surfaced, and a
+    dedicated logging agent existed in the field solely because receipts had
+    no memory. Returns {"n", "ok", "red", "stopped", "peak"} or None when
+    there is no history. Tolerant line-by-line parse; never raises.
+    """
+    try:
+        path = os.path.join(cwd, RUNLOG_DIR, RUNLOG_FILE)
+        if not os.path.isfile(path):
+            return None
+        n = ok = red = stopped = 0
+        peak = 0
+        with open(path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue  # a corrupt line must not hide the rest
+                if not isinstance(rec, dict) or rec.get("tool") != "qwen_delegate":
+                    continue
+                n += 1
+                status = rec.get("status") or ""
+                if status in ("success", "success_but_preflight_passed"):
+                    ok += 1
+                elif status in ("stopped", "compaction_refused"):
+                    stopped += 1
+                else:
+                    red += 1
+                try:
+                    peak = max(peak, int(rec.get("peak_context") or 0))
+                except (TypeError, ValueError):
+                    pass
+        if n == 0:
+            return None
+        return {"n": n, "ok": ok, "red": red, "stopped": stopped, "peak": peak}
+    except Exception:
+        return None
+
+
 def _tok_zero():
     return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "thoughts": 0}
 

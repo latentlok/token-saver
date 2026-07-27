@@ -18,6 +18,8 @@ Public surface
 - :func:`record_input_tokens` -- extract input-token count from one record.
 - :class:`BurnLimit` -- callable used as ``on_line`` for
   :func:`qd.invoke.run_executor`.
+- :class:`Progress` / :func:`read_progress` -- the C11 heartbeat sidecar.
+- :func:`compose` -- one ``on_line`` over several observers.
 """
 
 import os
@@ -79,6 +81,44 @@ class BurnLimit:
             )
 
 
+def compose(*callbacks):
+    """Fan one streamed record out to several ``on_line`` observers.
+
+    :func:`qd.invoke.run_executor` accepts exactly ONE ``on_line``, and the two
+    observers that exist want different things from the same stream: the burn
+    limit must be able to stop the run, the heartbeat only watches. Every
+    observer sees every record and the FIRST non-``None`` reason is returned,
+    so a heartbeat can never swallow a stop and a stop can never cost the
+    heartbeat its final snapshot.
+
+    ``None`` callbacks are skipped. When nothing is left to watch this returns
+    ``None`` rather than an inert callable: ``run_executor`` switches the
+    executor to stream-json for ANY on_line, and the streaming adapter emits no
+    ``stats``, so an empty composition would silently cost a run its tool
+    counts and its bySource token split for the sake of observing nothing.
+    """
+    watchers = [c for c in callbacks if c is not None]
+    if not watchers:
+        return None
+
+    def on_line(record):
+        reason = None
+        for w in watchers:
+            try:
+                r = w(record)
+            except Exception:
+                # The stream pump catches per-on_line, not per-observer: one
+                # raising observer would take every observer behind it down
+                # with it -- including the burn limit, which would then read as
+                # a guard that found nothing rather than one that never ran.
+                r = None
+            if r and reason is None:
+                reason = r
+        return reason
+
+    return on_line
+
+
 class Progress:
     """Write a live progress snapshot to disk as the executor streams.
 
@@ -88,20 +128,32 @@ class Progress:
 
     The snapshot path is ``<cwd>/.qwen-delegate/progress.json``.
 
+    :attr:`attempt` and :attr:`state` are set by the caller (C11): a poller
+    asking "is it hung?" cannot answer from a record count alone -- attempt 3
+    of 3 and a wedged attempt 1 look identical without them, and a run that
+    ended leaves its last running snapshot on disk forever unless something
+    marks it done.
+
     Parameters
     ----------
     cwd : str | Path
         Working directory that contains (or will contain) the
         ``.qwen-delegate`` folder.
     session_id : str | None
-        Optional session identifier stored in the snapshot.
+        Optional session identifier stored in the snapshot. Public and
+        settable: a cold run only learns its session from the first reply, and
+        a sidecar whose ``session`` is null forever cannot be correlated with
+        anything.
     """
 
     def __init__(self, cwd, session_id=None):
         self._cwd = cwd
-        self._session_id = session_id
+        self.session_id = session_id
         self._records = 0
         self._input_tokens = 0
+        self._last_type = None
+        self.attempt = 0
+        self.state = "running"
 
     def __call__(self, record):
         try:
@@ -110,65 +162,84 @@ class Progress:
             self._input_tokens += record_input_tokens(record)
 
             try:
-                last_type = record.get("type") if isinstance(record, dict) else None
+                self._last_type = (record.get("type")
+                                   if isinstance(record, dict) else None)
             except Exception:
-                last_type = None
+                self._last_type = None
 
-            try:
-                from datetime import datetime, timezone
-
-                updated = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
-            except Exception:
-                updated = ""
-
-            snapshot = {
-                "session": self._session_id,
-                "records": self._records,
-                "input_tokens": self._input_tokens,
-                "last_type": last_type,
-                "updated": updated,
-            }
-
-            dir_path = os.path.join(self._cwd, ".qwen-delegate")
-            os.makedirs(dir_path, exist_ok=True)
-
-            import json
-            import tempfile
-
-            fd = None
-            tmp_path = None
-            try:
-                fd = tempfile.NamedTemporaryFile(
-                    mode="w",
-                    dir=dir_path,
-                    suffix=".tmp",
-                    delete=False,
-                )
-                tmp_path = fd.name
-                json.dump(snapshot, fd)
-                fd.close()
-                fd = None
-                target = os.path.join(dir_path, "progress.json")
-                os.replace(tmp_path, target)
-                tmp_path = None
-            except Exception:
-                if fd is not None:
-                    try:
-                        fd.close()
-                    except Exception:
-                        pass
-                if tmp_path is not None:
-                    try:
-                        os.unlink(tmp_path)
-                    except Exception:
-                        pass
+            self._write()
 
         except Exception:
             pass
 
         return None
+
+    def finish(self, state="done"):
+        """Write the terminal snapshot, so a poller can stop polling.
+
+        Never raises: this runs on the way out of a delegation that has already
+        produced its result, and a failed heartbeat write must not be able to
+        take that result with it.
+        """
+        try:
+            self.state = state
+            self._write()
+        except Exception:
+            pass
+
+    def _write(self):
+        try:
+            from datetime import datetime, timezone
+
+            updated = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        except Exception:
+            updated = ""
+
+        snapshot = {
+            "session": self.session_id,
+            "records": self._records,
+            "input_tokens": self._input_tokens,
+            "last_type": self._last_type,
+            "updated": updated,
+            "attempt": self.attempt,
+            "state": self.state,
+        }
+
+        dir_path = os.path.join(self._cwd, ".qwen-delegate")
+        os.makedirs(dir_path, exist_ok=True)
+
+        import json
+        import tempfile
+
+        fd = None
+        tmp_path = None
+        try:
+            fd = tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=dir_path,
+                suffix=".tmp",
+                delete=False,
+            )
+            tmp_path = fd.name
+            json.dump(snapshot, fd)
+            fd.close()
+            fd = None
+            target = os.path.join(dir_path, "progress.json")
+            os.replace(tmp_path, target)
+            tmp_path = None
+        except Exception:
+            if fd is not None:
+                try:
+                    fd.close()
+                except Exception:
+                    pass
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
 
 def read_progress(cwd):

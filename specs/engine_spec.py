@@ -42,6 +42,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from qd import engine  # noqa: E402
+from qd import limits  # noqa: E402
 
 # The scenario stub: each invocation pops the next step from steps.json, writes
 # the files that step names, records the task text it received, and prints a
@@ -56,10 +57,27 @@ open(n_path, "w").write(str(n + 1))
 step = steps[min(n, len(steps) - 1)]
 task = sys.argv[2]
 open(os.path.join(sdir, "task_%d.txt" % (n + 1)), "w").write(task)
+# The output format is a decision, not a detail: batch carries stats the
+# streaming adapter drops, so a spec has to be able to see which one ran.
+open(os.path.join(sdir, "argv_%d.txt" % (n + 1)), "w").write(" ".join(sys.argv))
 for rel, content in (step.get("write") or {}).items():
     p = os.path.join(os.getcwd(), rel)
     os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(rel) else None
     open(p, "w").write(content)
+# A worker may stage its own new file (git add is not hard-denied outside
+# scoped); the touch-scope classifier must not read that as "pre-existing".
+for rel in (step.get("git_add") or []):
+    subprocess.run(["git", "add", rel], cwd=os.getcwd())
+# Stand in for scoped_hook.py's log files (deny + the C10 allow-side pair).
+for env_key, step_key in (("QGATE_DENYLOG", "deny_log"),
+                          ("QGATE_WRITELOG", "write_log"),
+                          ("QGATE_ALLOWLOG", "allow_log")):
+    lines = step.get(step_key) or []
+    path = os.environ.get(env_key)
+    if lines and path:
+        with open(path, "a") as f:
+            for ln in lines:
+                f.write(ln + "\n")
 # Simulate a concurrent fan-out sibling: move the MAIN tree's HEAD with a
 # change that will conflict with this worktree's edit, so classify_merge has
 # something real to detect (within one delegate the main HEAD is otherwise
@@ -69,7 +87,8 @@ if step.get("main_diverge"):
     open(os.path.join(mr, "other.py"), "w").write("MAIN_SIDE = 1\n")
     subprocess.run(["git", "-C", mr, "commit", "-qam", "main diverged"])
 result = {"type": "result", "result": step.get("result", "did the work\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing"),
-          "session_id": step.get("sid", "e-sess-%d" % (n + 1)), "permission_denials": [],
+          "session_id": step.get("sid", "e-sess-%d" % (n + 1)),
+          "permission_denials": step.get("denials") or [],
           "stats": {"tools": {"totalCalls": 1, "totalFail": 0, "byName": {}},
                     "models": {}}}
 # Stand in for compact_hook.py firing inside the run: "pre" is a compaction that
@@ -85,7 +104,7 @@ if step.get("compact"):
     st.setdefault("pending" if step["compact"] == "pre" else "events", []).append(
         {"ts": "stub"})
     json.dump(st, open(mp, "w"))
-msgs = [{"type": "assistant", "message": {"usage": {"input_tokens": 25000}}}, result]
+msgs = [{"type": "assistant", "message": {"usage": {"input_tokens": step.get("usage", 25000)}}}, result]
 # Honour the output flag: a stub that always batches makes every streaming
 # assertion vacuous, and a live limit that never sees a record looks passing.
 if "stream-json" in sys.argv:
@@ -157,6 +176,17 @@ class Fixture(unittest.TestCase):
     def task_seen(self, n):
         with open(os.path.join(self.sdir, f"task_{n}.txt")) as f:
             return f.read()
+
+    def argv_seen(self, n):
+        with open(os.path.join(self.sdir, f"argv_{n}.txt")) as f:
+            return f.read()
+
+    def commit_cfg(self, cfg):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump(cfg, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "cfg"],
+                       check=True)
 
     def delegate(self, **over):
         args = {"task": "build out.py with MARKER", "cwd": self.cwd,
@@ -619,6 +649,22 @@ class GraphWiring(Fixture):
         time.sleep(0.5)
         self.assertIsNone(graph.read_state(self.cwd))    # main graph untouched
 
+    def test_a_demoted_preflight_pass_still_refreshes(self):
+        # The refresh keyed on status == "success"; with the demotion moved into
+        # the engine (U3.2) that would have quietly stopped refreshing for a
+        # whole class of runs that did move the tree.
+        self._stub_graphify()
+        with open(os.path.join(self.cwd, "out.py"), "w") as f:
+            f.write("MARKER already\n")
+        self.steps([{"write": {"extra.py": "E = 1\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("STATUS: success_but_preflight_passed", out)
+        st = self._wait_sidecar(self.cwd)
+        self.assertIsNotNone(st)
+        self.assertEqual(st["status"], "fresh")
+
     def test_failure_does_not_refresh(self):
         from qd import graph
         self._stub_graphify()
@@ -629,6 +675,1107 @@ class GraphWiring(Fixture):
                     "max_iterations": 1})
         time.sleep(0.5)
         self.assertIsNone(graph.read_state(self.cwd))
+
+
+class ScopeGuardT0(Fixture):
+    """U0.1/U0.2: reverts restore the tree as it WAS at T0 (byte snapshot),
+    never stage what they restore, classify against tracked-at-T0, and
+    touch_scope binds with or without a verify command."""
+
+    def test_revert_restores_t0_content_not_head(self):
+        # Caller left other.py dirty BEFORE the run; the worker then edits it
+        # out of scope. The revert must bring back the CALLER's dirty content,
+        # not HEAD's -- checkout-from-sha destroyed real work in the field.
+        with open(os.path.join(self.cwd, "other.py"), "w") as f:
+            f.write("CALLER_EDIT = 1\n")
+        self.steps([{"write": {"other.py": "TAMPERED = 1\n",
+                               "out.py": "MARKER\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        with open(os.path.join(self.cwd, "other.py")) as f:
+            self.assertEqual(f.read(), "CALLER_EDIT = 1\n")
+
+    def test_revert_stages_nothing(self):
+        self.steps([{"write": {"other.py": "TAMPERED = 1\n",
+                               "out.py": "MARKER\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        self.delegate(touch_scope=["out.py"])
+        staged = subprocess.run(
+            ["git", "-C", self.cwd, "diff", "--cached", "--name-only"],
+            capture_output=True, text=True).stdout.strip()
+        self.assertEqual(staged, "")
+
+    def test_worker_added_new_file_is_not_a_violation(self):
+        # git add is not denied outside scoped; a worker staging its own NEW
+        # file must not convert it into a pre-existing-file violation.
+        self.steps([{"write": {"out.py": "MARKER\n", "fresh.py": "NEW = 1\n"},
+                     "git_add": ["fresh.py"]}])
+        r = self.delegate(touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(len(r["trail"]), 1)
+        self.assertTrue(os.path.exists(os.path.join(self.cwd, "fresh.py")))
+
+    def test_touch_scope_binds_without_verify(self):
+        # It used to be silently unenforced when no gate was supplied.
+        self.steps([{"write": {"other.py": "TAMPERED = 1\n"}}])
+        r = self.delegate(trust="verified", verify=None,
+                          touch_scope=["out.py"], max_iterations=1)
+        self.assertEqual(r["status"], "scope_violation")
+        with open(os.path.join(self.cwd, "other.py")) as f:
+            self.assertEqual(f.read(), "ORIGINAL = 1\n")
+
+    def test_final_attempt_violation_is_named_not_verify_failed(self):
+        self.steps([{"write": {"other.py": "TAMPERED = 1\n"}}])
+        r = self.delegate(touch_scope=["out.py"], max_iterations=1)
+        self.assertEqual(r["status"], "scope_violation")
+
+
+class DenialAccumulation(Fixture):
+    """U0.3: denials and blocked-shell lines accumulate across attempts --
+    the denylog is fresh per attempt, so keeping only the last one silently
+    dropped every earlier attempt's denials."""
+
+    def test_permission_denials_span_attempts(self):
+        self.steps([{"write": {"out.py": "wrong\n"},
+                     "denials": [{"tool_name": "run_shell_command"}]},
+                    {"write": {"out.py": "MARKER\n"},
+                     "denials": [{"tool_name": "web_fetch"}]}])
+        r = self.delegate()
+        names = {d.get("tool_name") for d in r["denials"]}
+        self.assertEqual(names, {"run_shell_command", "web_fetch"})
+
+    def test_blocked_shell_spans_attempts(self):
+        self.steps([{"write": {"out.py": "wrong\n"},
+                     "deny_log": ["run_shell_command: rm x  (state-changing)"]},
+                    {"write": {"out.py": "MARKER\n"},
+                     "deny_log": ["run_shell_command: curl y  (network)"]}])
+        r = self.delegate(approval_mode="scoped")
+        blocked = r["ctx"]["meta"]["blocked"]
+        self.assertIn("run_shell_command: rm x  (state-changing)", blocked)
+        self.assertIn("run_shell_command: curl y  (network)", blocked)
+
+
+class Attribution(Fixture):
+    """U1.2/C10, the co-work contract: with the hook's write log active, ONLY
+    positively-attributed files are ever reverted or counted as violations.
+
+    The failure this closes was destructive: the caller (or one of its agents)
+    edits the same tree while a run is live, and the guards revert its work as
+    if the worker had done it. Now an unattributed change is REPORTED and left
+    alone -- and with no channel at all, nothing changes from today."""
+
+    def setUp(self):
+        super().setUp()
+        # A second pre-existing tracked file, so one out-of-scope change can be
+        # the worker's and another the caller's in the same attempt.
+        with open(os.path.join(self.cwd, "third.py"), "w") as f:
+            f.write("CALLER_BASE = 1\n")
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "third"],
+                       check=True)
+
+    def abs(self, *names):
+        return [os.path.join(self.cwd, n) for n in names]
+
+    def test_only_the_logged_write_is_reverted(self):
+        self.steps([{"write": {"other.py": "WORKER_TAMPER = 1\n",
+                               "third.py": "CALLER_EDIT = 1\n",
+                               "out.py": "MARKER\n"},
+                     "write_log": self.abs("other.py", "out.py")},
+                    {"write": {"out.py": "MARKER\n"},
+                     "write_log": self.abs("out.py")}])
+        r = self.delegate(approval_mode="scoped", touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        with open(os.path.join(self.cwd, "other.py")) as f:
+            self.assertEqual(f.read(), "ORIGINAL = 1\n")      # attributed: reverted
+        with open(os.path.join(self.cwd, "third.py")) as f:
+            self.assertEqual(f.read(), "CALLER_EDIT = 1\n")   # caller's: untouched
+        self.assertIn("other.py", r["trail"][0])
+        self.assertNotIn("third.py", r["trail"][0])
+        self.assertEqual(r["ctx"]["scope_unattributed"], ["third.py"])
+        self.assertEqual(r["ctx"]["attribution"], "hook")
+
+    def test_writes_reach_ctx_repo_relative(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "write_log": self.abs("out.py") + ["/etc/passwd"]}])
+        r = self.delegate(approval_mode="scoped")
+        # Absolute hook paths are useless to guards that speak repo-relative,
+        # and a write outside the tree cannot be a violation in it.
+        self.assertEqual(r["ctx"]["writes"], ["out.py"])
+
+    def test_unattributed_change_alone_never_fails_the_attempt(self):
+        self.steps([{"write": {"third.py": "CALLER_EDIT = 1\n",
+                               "out.py": "MARKER\n"},
+                     "write_log": self.abs("out.py")}])
+        r = self.delegate(approval_mode="scoped", touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(len(r["trail"]), 1)          # no retry burned on it
+        self.assertEqual(r["ctx"]["scope_unattributed"], ["third.py"])
+
+    def test_unattributed_spec_change_is_warned_not_reverted(self):
+        self.steps([{"write": {"guard_spec.py": "WEAKENED = 1\n",
+                               "out.py": "MARKER\n"},
+                     "write_log": self.abs("out.py")}])
+        r = self.delegate(approval_mode="scoped")
+        self.assertEqual(r["status"], "success")
+        with open(os.path.join(self.cwd, "guard_spec.py")) as f:
+            self.assertEqual(f.read(), "WEAKENED = 1\n")   # a caller's edit stands
+        self.assertEqual(r["ctx"]["spec_unattributed"], ["guard_spec.py"])
+        note = r["trail"][0]
+        self.assertIn("SPEC CHANGED (unattributed)", note)
+        # The status classifier keys on this substring -- an unattributed change
+        # must never read as the worker weakening its own gate.
+        self.assertNotIn("SPEC VIOLATION", " ".join(r["trail"]).upper())
+
+    def test_attributed_spec_edit_keeps_the_revert_and_fail_path(self):
+        self.steps([{"write": {"guard_spec.py": "WEAKENED = 1\n",
+                               "out.py": "MARKER\n"},
+                     "write_log": self.abs("guard_spec.py", "out.py")},
+                    {"write": {"out.py": "MARKER\n"},
+                     "write_log": self.abs("out.py")}])
+        r = self.delegate(approval_mode="scoped")
+        self.assertEqual(r["status"], "success")
+        with open(os.path.join(self.cwd, "guard_spec.py")) as f:
+            self.assertEqual(f.read(), "PROTECTED = 1\n")
+        self.assertIn("SPEC VIOLATION", r["trail"][0])
+        self.assertEqual(r["ctx"]["spec_unattributed"], [])
+
+    def test_no_channel_reverts_everything_exactly_as_before(self):
+        # Plain auto-edit: no write log exists, so nothing is attributable and
+        # the old behavior is the only honest one.
+        self.steps([{"write": {"other.py": "TAMPERED = 1\n",
+                               "third.py": "ALSO = 1\n",
+                               "out.py": "MARKER\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(touch_scope=["out.py"])
+        self.assertEqual(r["ctx"]["attribution"], "none")
+        self.assertEqual(r["ctx"]["scope_unattributed"], [])
+        for name in ("other.py", "third.py"):
+            with open(os.path.join(self.cwd, name)) as f:
+                self.assertIn("BASE = 1\n" if name == "third.py"
+                              else "ORIGINAL = 1\n", f.read())
+
+    def test_receipt_names_the_caller_change_and_never_claims_a_revert(self):
+        self.steps([{"write": {"third.py": "CALLER_EDIT = 1\n",
+                               "out.py": "MARKER\n"},
+                     "write_log": self.abs("out.py")}])
+        receipt = engine.run({"task": "t", "cwd": self.cwd,
+                              "verify": "grep -q MARKER out.py",
+                              "approval_mode": "scoped", "executor": "stub",
+                              "touch_scope": ["out.py"]})
+        self.assertIn("STATUS: success", receipt)
+        self.assertIn("NOT by a logged worker write", receipt)
+        self.assertIn("third.py", receipt)
+        self.assertIn("never reverted", receipt)
+
+
+class ObservedAutoEdit(Fixture):
+    """U1.4, ships dark: `autoedit_via_hook` buys attribution outside scoped
+    mode. Off (the default), the run is byte-identical to today's."""
+
+    def _commit_cfg(self, cfg):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump(cfg, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "cfg"],
+                       check=True)
+
+    def test_flag_off_auto_edit_has_no_attribution_channel(self):
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "write_log": [os.path.join(self.cwd, "out.py")]}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["attribution"], "none")
+        self.assertEqual(r["ctx"]["writes"], [])      # no log was even exported
+
+    def test_flag_on_auto_edit_attributes_writes(self):
+        self._commit_cfg({"autoedit_via_hook": True})
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "write_log": [os.path.join(self.cwd, "out.py")]}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["attribution"], "hook")
+        self.assertEqual(r["ctx"]["writes"], ["out.py"])
+
+    def test_flag_does_not_apply_to_other_modes(self):
+        # scoped already has the hook; plan/yolo would silently change mode.
+        self._commit_cfg({"autoedit_via_hook": True})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(approval_mode="yolo")
+        self.assertEqual(r["ctx"]["attribution"], "none")
+
+
+class HeadMovedAttribution(Fixture):
+    """U1.3: scoped hard-denies `git commit`, so a moved HEAD there is a
+    caller's. Everywhere else nobody knows -- and saying so beats accusing the
+    worker, which is what the receipt did on every co-working caller's commit."""
+
+    def test_scoped_blames_the_caller(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(approval_mode="scoped")
+        self.assertEqual(r["ctx"]["head_moved_attribution"], "caller")
+
+    def test_anything_else_is_unknown_never_worker(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["head_moved_attribution"], "unknown")
+
+
+class StoppedRunHygiene(Fixture):
+    """U0.5: a stopped run must not present a previous attempt's prose as if
+    it were the stopped attempt's output."""
+
+    def test_burn_stop_on_attempt_2_clears_attempt_1_prose(self):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump({"burn_budget": 30000}, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "b"],
+                       check=True)
+        # The stub reports 25,000 input tokens per attempt: attempt 1 clears
+        # the 30k budget, attempt 2's record crosses it mid-run.
+        self.steps([{"write": {"out.py": "wrong\n"}, "result": "ATTEMPT1PROSE"},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "stopped")
+        self.assertEqual(r["result_text"], "")
+
+
+class MaxIterations(Fixture):
+    """U0.6: the schema's promise restored -- project-config default, else 3,
+    clamped 1..10."""
+
+    def _commit_cfg(self, cfg):
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            json.dump(cfg, f)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "cfg"],
+                       check=True)
+
+    def test_project_config_default_honored(self):
+        self._commit_cfg({"max_iterations": 1})
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = engine.delegate({"task": "t", "cwd": self.cwd,
+                             "verify": "grep -q MARKER out.py",
+                             "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertEqual(r["max_iter"], 1)
+        self.assertEqual(len(r["trail"]), 1)
+
+    def test_arg_clamped_to_10(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(max_iterations=99)
+        self.assertEqual(r["max_iter"], 10)
+
+    def test_arg_overrides_project_config(self):
+        self._commit_cfg({"max_iterations": 1})
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(max_iterations=3)
+        self.assertEqual(r["status"], "success")
+
+
+class WorktreeReceipts(Fixture):
+    """U0.4: the receipt reports the tree the run USED. Tree facts are captured
+    before the worktree commit/release, so the engine's own commit never reads
+    as a worker commit, a released failure still reports what was destroyed,
+    and a caller commit in the MAIN tree is not blamed on a worktree run."""
+
+    def run_args(self, **over):
+        args = {"task": "t", "cwd": self.cwd,
+                "verify": "grep -q MARKER out.py",
+                "approval_mode": "auto-edit", "executor": "stub",
+                "worktree": "auto"}
+        args.update(over)
+        return engine.run(args)
+
+    def test_worktree_success_no_false_committed_no_rollback(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        receipt = self.run_args()
+        self.assertIn("STATUS: success", receipt)
+        self.assertNotIn("COMMITTED:", receipt)
+        self.assertIn("out.py", receipt)        # CHANGED reflects the worktree
+        self.assertNotIn("ROLLBACK:", receipt)  # discard = the worktree line
+
+    def test_worktree_failure_still_reports_changed(self):
+        self.steps([{"write": {"out.py": "wrong\n"}}])
+        receipt = self.run_args(max_iterations=1)
+        self.assertIn("STATUS: verify_failed", receipt)
+        self.assertIn("CHANGED: 1 file(s)", receipt)
+        self.assertIn("out.py", receipt)
+
+    def test_caller_commit_in_main_not_blamed_on_worktree_run(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}, "main_diverge": True}])
+        receipt = self.run_args()
+        self.assertIn("STATUS: success", receipt)
+        self.assertNotIn("COMMITTED:", receipt)
+
+
+class GateBudget(Fixture):
+    """U3.1: the verify timeout is a knob, and a gate that cannot finish inside
+    it is refused BEFORE the worker runs.
+
+    The field case: a live-network gate timed out at the old hardcoded 300s
+    before the run AND after it, so the classifier saw identical output either
+    side and filed a good delivery as gate_suspect -- having paid the timeout on
+    every attempt first. Nobody could raise the limit, because it was a literal.
+
+    The refusal path below is driven with an INJECTED timeout rather than a real
+    sleep: the clamp floor is 10s, so proving it for real would cost the suite
+    ten seconds per case. What that injection stands in for -- a real subprocess
+    timeout becoming this signal, and only a real one -- is pinned first."""
+
+    def spy_timeouts(self):
+        """Record the budget every gate run is given; keep real behavior."""
+        seen = []
+        real = engine._run_verify_timed
+
+        def spy(cmd, cwd, timeout):
+            seen.append(timeout)
+            return real(cmd, cwd, timeout)
+
+        engine._run_verify_timed = spy
+        self.addCleanup(setattr, engine, "_run_verify_timed", real)
+        return seen
+
+    def force_timeout(self):
+        real = engine._run_verify_timed
+        engine._run_verify_timed = lambda cmd, cwd, timeout: (
+            False, f"verify command timed out after {timeout}s",
+            timeout * 1000, True)
+        self.addCleanup(setattr, engine, "_run_verify_timed", real)
+
+    def test_a_real_timeout_is_reported_as_a_timeout(self):
+        passed, out, ms, timed_out = engine._run_verify_timed(
+            "sleep 5", self.cwd, 1)
+        self.assertFalse(passed)
+        self.assertTrue(timed_out)
+        self.assertIn("timed out after 1s", out)
+        self.assertLess(ms, 5000)
+
+    def test_a_gate_that_merely_prints_the_sentence_is_not_a_timeout(self):
+        # Inferring the timeout from the output text would hand any gate the
+        # power to refuse its own run by echoing one line.
+        passed, out, _, timed_out = engine._run_verify_timed(
+            "echo verify command timed out after 300s; exit 1", self.cwd, 30)
+        self.assertFalse(passed)
+        self.assertFalse(timed_out)
+
+    def test_default_budget_is_the_documented_300(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.assertEqual(self.delegate()["ctx"]["verify_timeout_sec"], 300)
+
+    def test_project_config_sets_the_budget(self):
+        self.commit_cfg({"verify_timeout_sec": 45})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.assertEqual(self.delegate()["ctx"]["verify_timeout_sec"], 45)
+
+    def test_call_arg_wins_and_clamps_both_ends(self):
+        self.commit_cfg({"verify_timeout_sec": 45})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.assertEqual(
+            self.delegate(verify_timeout_sec=99999)["ctx"]["verify_timeout_sec"],
+            3600)
+        self.setUp()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.assertEqual(
+            self.delegate(verify_timeout_sec=1)["ctx"]["verify_timeout_sec"], 10)
+
+    def test_the_budget_reaches_every_gate_run_not_just_the_preflight(self):
+        # A budget honoured by the pre-flight alone still leaves the in-loop
+        # gate and the advisory gates killing at the old literal.
+        seen = self.spy_timeouts()
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(verify_timeout_sec=77,
+                          advisory_gates=[{"name": "arch", "cmd": "true"}])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(set(seen), {77})
+        self.assertGreaterEqual(len(seen), 4)   # preflight + 2 gates + advisory
+
+    def test_preflight_timeout_refuses_before_any_attempt(self):
+        self.force_timeout()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "refused")
+        self.assertTrue(r["result_text"].startswith("GATE UNUSABLE:"))
+        self.assertIn("verify_timeout_sec", r["result_text"])
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_1.txt")))
+
+    def test_the_refusal_reaches_the_caller_through_run(self):
+        self.force_timeout()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("STATUS: refused", out)
+        self.assertIn("GATE UNUSABLE", out)
+
+    def test_a_gate_refusal_does_not_leak_its_worktree(self):
+        # Every refusal above this one fires before a container exists; these
+        # fire after, and returning straight out would strand the branch.
+        self.force_timeout()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(worktree="auto")
+        self.assertEqual(r["status"], "refused")
+        wl = subprocess.run(["git", "-C", self.cwd, "worktree", "list"],
+                            capture_output=True, text=True).stdout
+        self.assertNotIn("qwen/", wl.replace(self.cwd, ""))
+
+    def test_a_slow_preflight_is_flagged_with_what_it_cost(self):
+        real = engine._run_verify_timed
+        engine._run_verify_timed = lambda cmd, cwd, timeout: (
+            False, "red", int(timeout * 900), False)     # 90% of the budget
+        self.addCleanup(setattr, engine, "_run_verify_timed", real)
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(max_iterations=1, verify_timeout_sec=100)
+        self.assertTrue(r["ctx"]["gate_slow"])
+        self.assertEqual(r["ctx"]["gate_ms"], 90000)
+
+    def test_an_ordinary_gate_is_not_slow(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertFalse(r["ctx"]["gate_slow"])
+        self.assertLess(r["ctx"]["gate_ms"], 150_000)
+
+
+class PreflightExpect(Fixture):
+    """U3.2: the caller declares what the gate should say BEFORE the run.
+
+    Two field failures meet here. Greenfield work whose gate was already green
+    delivered a pass that proved nothing, discovered only by reading the
+    receipt. Revision work -- where a passing suite IS the premise -- was
+    demoted to success_but_preflight_passed on every single run, until the flag
+    meant nothing. And the demotion is the ENGINE's now (decision 4): a chain or
+    a log reading STATUS server-side used to see a clean success where the
+    receipt said otherwise."""
+
+    def make_green(self, commit=False):
+        with open(os.path.join(self.cwd, "out.py"), "w") as f:
+            f.write("MARKER already\n")
+        if commit:
+            subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+            subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "green"],
+                           check=True)
+
+    def test_absent_param_is_todays_behavior(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["preflight_expect"], "any")
+
+    def test_the_demotion_is_final_in_the_status_not_only_the_receipt(self):
+        self.make_green()
+        self.steps([{}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success_but_preflight_passed")
+
+    def test_expect_red_refuses_a_gate_that_already_passes(self):
+        self.make_green()
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(preflight_expect="red")
+        self.assertEqual(r["status"], "refused")
+        self.assertTrue(r["result_text"].startswith("GATE VACUOUS:"))
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_1.txt")))
+
+    def test_expect_red_leaves_an_honest_red_gate_alone(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(preflight_expect="red")
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(len(r["trail"]), 1)
+
+    def test_expect_green_stops_the_flag_crying_wolf(self):
+        self.make_green()
+        self.steps([{"write": {"extra.py": "E = 1\n"}}])
+        r = self.delegate(preflight_expect="green")
+        self.assertEqual(r["status"], "success")
+        self.assertTrue(r["ctx"]["preflight"])       # still recorded honestly
+
+    def test_expect_green_receipt_states_the_fact_without_the_alarm(self):
+        self.make_green()
+        self.steps([{"write": {"extra.py": "E = 1\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "preflight_expect": "green"})
+        self.assertIn("STATUS: success", out)
+        self.assertIn("PREFLIGHT: green pre-run, declared expected", out)
+        self.assertNotIn("ALREADY PASSED", out)
+
+    def test_expect_green_against_the_self_gate_is_refused_by_name(self):
+        # The self-gate ratchet exists to force the preflight red; declaring it
+        # green asks the server for a contradiction.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(verify=None, trust="self", preflight_expect="green")
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("contradicts", r["result_text"])
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_1.txt")))
+
+    def test_an_unknown_value_falls_back_to_any(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(preflight_expect="RED-ISH")
+        self.assertEqual(r["ctx"]["preflight_expect"], "any")
+        self.assertEqual(r["status"], "success")
+
+    def test_a_demoted_run_still_commits_its_worktree(self):
+        # The commit block used to key on status == "success"; moving the
+        # demotion into the engine would otherwise have started deleting the
+        # work of every preflight-passed worktree run.
+        self.make_green(commit=True)
+        self.steps([{"write": {"extra.py": "E = 1\n"}}])
+        r = self.delegate(worktree="auto")
+        self.assertEqual(r["status"], "success_but_preflight_passed")
+        self.assertIsNotNone(r["ctx"]["worktree"])
+        ahead = subprocess.run(
+            ["git", "-C", self.cwd, "rev-list", "--count",
+             f"HEAD..{r['ctx']['worktree']['branch']}"],
+            capture_output=True, text=True).stdout.strip()
+        self.assertEqual(ahead, "1")
+
+
+class AdvisoryGates(Fixture):
+    """U3.4: gates that indicate instead of gating.
+
+    A red advisory is an architecture seam worth one line in the receipt. If it
+    could fail a run, feed a retry, or reach the worker at all, it would just be
+    a second verify command with a friendlier name -- and the worker would start
+    optimising for it, which is the exact thing a loose gate must not cause."""
+
+    def test_a_red_advisory_leaves_a_green_run_green(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(advisory_gates=[
+            {"name": "layering", "cmd": "echo ARCH DRIFT; exit 1"}])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(len(r["trail"]), 1)          # no extra attempt burned
+        adv = r["ctx"]["advisory"][0]
+        self.assertEqual(adv["name"], "layering")
+        self.assertFalse(adv["ok"])
+        self.assertEqual(adv["head"], "ARCH DRIFT")
+
+    def test_nothing_advisory_ever_reaches_the_worker(self):
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        self.delegate(advisory_gates=[
+            {"name": "layering", "cmd": "echo SEAMWORD; exit 1"}])
+        for n in (1, 2):
+            self.assertNotIn("SEAMWORD", self.task_seen(n))
+            self.assertNotIn("layering", self.task_seen(n))
+            self.assertNotIn("ADVISORY", self.task_seen(n))
+
+    def test_the_gates_run_on_a_failed_run_too(self):
+        # A run that went red is exactly when a seam indicator is worth having.
+        self.steps([{"write": {"out.py": "wrong\n"}}])
+        r = self.delegate(max_iterations=1,
+                          advisory_gates=[{"name": "arch", "cmd": "true"}])
+        self.assertEqual(r["status"], "verify_failed")
+        self.assertTrue(r["ctx"]["advisory"][0]["ok"])
+
+    def test_the_gates_read_the_tree_the_run_actually_used(self):
+        # In a worktree run the work only exists in the container, and only
+        # until the engine commits or releases it -- a gate run against the main
+        # tree, or after the release, sees nothing the run did.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(worktree="auto", advisory_gates=[
+            {"name": "sees-the-work", "cmd": "grep -q MARKER out.py"}])
+        self.assertEqual(r["status"], "success")
+        self.assertTrue(r["ctx"]["advisory"][0]["ok"])
+
+    def test_malformed_items_are_counted_never_raised(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(advisory_gates=[
+            "not a dict", {"name": "no cmd"}, {"cmd": "true"},
+            {"name": "", "cmd": "true"}, {"name": "ok", "cmd": "true"}])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual([a["name"] for a in r["ctx"]["advisory"]], ["ok"])
+        self.assertEqual(r["ctx"]["advisory_skipped"], 4)
+
+    def test_the_head_is_one_short_line_not_a_log(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(advisory_gates=[
+            {"name": "chatty", "cmd": "python3 -c \"print('Z'*300)\"; false"}])
+        self.assertEqual(len(r["ctx"]["advisory"][0]["head"]), 120)
+
+    def test_absent_param_leaves_no_trace(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertNotIn("advisory", r["ctx"])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertNotIn("ADVISORY", out)
+
+    def test_a_red_gate_glows_in_the_receipt(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "advisory_gates": [
+                              {"name": "layering", "cmd": "echo DRIFT; exit 1"},
+                              {"name": "naming", "cmd": "true"}]})
+        self.assertIn("STATUS: success", out)
+        self.assertIn("ADVISORY red: layering — DRIFT", out)
+        self.assertIn("ADVISORY: 1/2 green", out)
+
+
+class Heartbeat(Fixture):
+    """U4.4/C11: the sidecar answers "is it hung?" for free.
+
+    The wiring rule is the load-bearing part: run_executor switches to
+    stream-json for ANY on_line and the streaming adapter emits no `stats`, so a
+    heartbeat wired on its own would silently cost every burn_budget=0 run the
+    tool counts and token split that batch mode is kept for."""
+
+    def test_a_default_run_leaves_a_finished_snapshot(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        snap = limits.read_progress(self.cwd)
+        self.assertIsNotNone(snap)
+        self.assertGreaterEqual(snap["records"], 1)
+        self.assertEqual(snap["state"], "done")
+        self.assertEqual(snap["attempt"], 1)
+        self.assertEqual(snap["session"], r["session_id"])
+
+    def test_the_attempt_number_is_visible(self):
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        self.delegate()
+        self.assertEqual(limits.read_progress(self.cwd)["attempt"], 2)
+
+    def test_no_budget_means_no_sidecar_and_no_streaming(self):
+        self.commit_cfg({"burn_budget": 0})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertIsNone(limits.read_progress(self.cwd))
+        self.assertNotIn("stream-json", self.argv_seen(1))
+
+    def test_a_budgeted_run_streams_for_both_observers(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate()
+        self.assertIn("stream-json", self.argv_seen(1))
+
+    def test_the_burn_limit_still_stops_the_run_beside_the_heartbeat(self):
+        self.commit_cfg({"burn_budget": 1000})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "stopped")
+        self.assertEqual(limits.read_progress(self.cwd)["state"], "done")
+
+    def test_the_sidecar_is_invisible_to_the_guards(self):
+        # It is written into the tree the run is being judged on: un-ignored it
+        # would land in CHANGED as the worker's work and could trip the
+        # touch-scope classifier on a file the worker never touched.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["tree_facts"]["changed"], ["out.py"])
+
+    def test_a_worktree_run_beats_inside_its_container(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(worktree="auto")
+        self.assertIsNone(limits.read_progress(self.cwd))
+        self.assertIsNotNone(
+            limits.read_progress(r["ctx"]["worktree"]["path"]))
+
+
+class RefusalReceipts(Fixture):
+    """U0.8: a refusal's explanation must reach the caller through run().
+    Routing the empty refusal ctx through the renderer replaced every refusal
+    text with KeyError('cwd') wrapped as a generic error receipt."""
+
+    def test_refused_run_carries_refusal_text(self):
+        out = engine.run({"task": "t", "cwd": self.cwd, "verify": "true",
+                          "executor": "stub", "trust": "auto"})
+        self.assertIn("STATUS: refused", out)
+        self.assertIn("criticality", out)
+
+    def test_dirty_spec_refusal_keeps_its_own_status_line(self):
+        with open(os.path.join(self.cwd, "guard_spec.py"), "a") as f:
+            f.write("dirty\n")
+        out = engine.run({"task": "t", "cwd": self.cwd, "verify": "true",
+                          "executor": "stub"})
+        self.assertIn("STATUS: error", out)
+        self.assertIn("Uncommitted changes in protected spec", out)
+
+
+class ChainEndToEnd(Fixture):
+    """U4.1 through the real engine (the shape of run_chain itself is pinned in
+    specs/chain_spec.py). The claim that needs a real worker: a halted chain
+    does not INVOKE the links behind the failure -- the saving is delegations
+    never run, not receipts suppressed after the fact."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
+
+    def link(self, name):
+        return {"task": f"build {name}.py", "cwd": self.cwd,
+                "verify": f"grep -q {name.upper()} {name}.py",
+                "approval_mode": "auto-edit", "executor": "stub",
+                "max_iterations": 1}
+
+    def attempts(self):
+        with open(os.path.join(self.sdir, "attempt")) as f:
+            return int(f.read())
+
+    def read_log(self):
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            return [json.loads(line) for line in f.read().splitlines()]
+
+    def test_a_red_link_never_reaches_the_next_links_worker(self):
+        from qd import server
+        # One step per link -- the stub counts attempts globally per STUB_DIR,
+        # so "link 3 never ran" is measurable as an attempt that never happened.
+        self.steps([{"write": {"a.py": "A\n"}},
+                    {"write": {"b.py": "WRONG\n"}},
+                    {"write": {"c.py": "C\n"}}])
+        out = server.run_delegate_batch(
+            {"chain": [self.link("a"), self.link("b"), self.link("c")]})
+        self.assertIn("=== chain link 1/3: success ===", out)
+        self.assertIn("=== chain link 2/3: verify_failed ===", out)
+        self.assertIn("SKIPPED (chain halted at link 2: verify_failed)", out)
+        self.assertEqual(self.attempts(), 2)
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_3.txt")))
+
+    def test_the_run_log_carries_the_position_and_the_halt(self):
+        from qd import server
+        self.steps([{"write": {"a.py": "A\n"}},
+                    {"write": {"b.py": "WRONG\n"}}])
+        server.run_delegate_batch(
+            {"chain": [self.link("a"), self.link("b")]})
+        recs = self.read_log()
+        self.assertEqual(recs[0]["chain"], {"pos": 1, "of": 2})
+        self.assertEqual(recs[1]["chain"], {"pos": 2, "of": 2, "halted": True})
+
+    def test_a_lone_delegation_logs_no_chain_key(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        engine.run({"task": "t", "cwd": self.cwd,
+                    "verify": "grep -q MARKER out.py",
+                    "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertNotIn("chain", self.read_log()[-1])
+
+
+class ReportDontFix(Fixture):
+    """U4.2: `report_dont_fix` buys a diagnosis, not a repair.
+
+    The field pattern it replaces: a caller wanting to know WHY something fails
+    delegates a fix, the worker spends three attempts making the gate green by
+    any means available, and the answer -- which the first attempt already had
+    -- is buried under the changes made after it."""
+
+    FINDING = ("looked at it\n\nHANDOFF: diagnosed\nFILES: none\n"
+               "NEXT: nothing\nFINDINGS: parser drops the last row; the loop "
+               "stops one short")
+
+    def test_one_attempt_only_whatever_max_iterations_says(self):
+        self.steps([{"result": self.FINDING}, {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(report_dont_fix=True, max_iterations=3)
+        self.assertEqual(r["max_iter"], 1)
+        self.assertEqual(len(r["trail"]), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_2.txt")))
+
+    def test_a_red_gate_is_the_deliverable_not_a_failure(self):
+        self.steps([{"result": self.FINDING}])
+        r = self.delegate(report_dont_fix=True)
+        self.assertEqual(r["status"], "reported")
+        self.assertIs(r["ctx"]["report_gate_green"], False)
+
+    def test_a_green_gate_is_also_reported_and_says_it_did_not_reproduce(self):
+        with open(os.path.join(self.cwd, "out.py"), "w") as f:
+            f.write("MARKER already\n")
+        self.steps([{"result": self.FINDING}])
+        r = self.delegate(report_dont_fix=True)
+        self.assertEqual(r["status"], "reported")   # not demoted, not success
+        self.assertIs(r["ctx"]["report_gate_green"], True)
+
+    def test_the_worker_is_asked_for_findings_beside_the_handoff(self):
+        self.steps([{"result": self.FINDING}])
+        self.delegate(report_dont_fix=True)
+        task = self.task_seen(1)
+        self.assertIn("FINDINGS:", task)
+        self.assertIn("do NOT fix", task)
+        self.assertIn("HANDOFF:", task)             # the handoff still rides along
+
+    def test_the_findings_line_is_parsed_into_ctx(self):
+        self.steps([{"result": self.FINDING}])
+        r = self.delegate(report_dont_fix=True)
+        self.assertEqual(r["ctx"]["findings"],
+                         "parser drops the last row; the loop stops one short")
+
+    def test_the_receipt_leads_with_the_finding_and_the_gate_output(self):
+        self.steps([{"result": self.FINDING}])
+        out = engine.run({"task": "why does out.py fail", "cwd": self.cwd,
+                          "verify": "echo GATEOUTPUT; false",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "report_dont_fix": True})
+        self.assertIn("STATUS: reported", out)
+        self.assertIn("FINDINGS: parser drops the last row", out)
+        self.assertIn("GATEOUTPUT", out)            # the gate IS the deliverable
+        self.assertIn("RESUME: session_id=", out)   # follow-ups are the point
+
+    def test_a_green_report_says_it_did_not_reproduce(self):
+        self.steps([{"result": self.FINDING}])
+        out = engine.run({"task": "why", "cwd": self.cwd, "verify": "true",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "report_dont_fix": True})
+        self.assertIn("STATUS: reported", out)
+        self.assertIn("did not reproduce under this gate", out)
+
+    def test_the_run_log_marks_the_run_a_report(self):
+        self.steps([{"result": self.FINDING}])
+        engine.run({"task": "why", "cwd": self.cwd, "verify": "true",
+                    "approval_mode": "auto-edit", "executor": "stub",
+                    "report_dont_fix": True})
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            rec = json.loads(f.read().splitlines()[-1])
+        self.assertIs(rec["report"], True)
+        self.assertIs(rec["findings"], True)
+
+    def test_absent_the_flag_the_same_run_retries_and_never_says_reported(self):
+        self.steps([{"result": self.FINDING, "write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("STATUS: success", out)
+        self.assertNotIn("REPORTED", out)
+        self.assertNotIn("FINDINGS:", self.task_seen(1))
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            self.assertNotIn("\"report\"", f.read())
+
+
+class TestDodge(Fixture):
+    """U4.2: an added skip in delivered tests is how a red suite becomes a
+    green receipt without the failure being fixed. Scanned on EVERY delegation,
+    reported on green, and never inferred from prose."""
+
+    def add_test_file(self, body):
+        path = os.path.join(self.cwd, "test_thing.py")
+        with open(path, "w") as f:
+            f.write(body)
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "tests"],
+                       check=True)
+
+    def test_an_added_skip_in_a_tracked_test_file_is_named(self):
+        self.add_test_file("import unittest\n\n\ndef test_a():\n    pass\n")
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "test_thing.py": "import unittest\n\n\n"
+                                                "@unittest.skip('flaky')\n"
+                                                "def test_a():\n    pass\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["dodge"], {"test_thing.py": ["@unittest.skip"]})
+
+    def test_it_renders_on_a_green_receipt(self):
+        self.add_test_file("def test_a():\n    pass\n")
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "test_thing.py": "import pytest\n"
+                                                "@pytest.mark.xfail\n"
+                                                "def test_a():\n    pass\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("STATUS: success", out)
+        self.assertIn("TEST DODGE: test_thing.py adds pytest.mark.xfail", out)
+        self.assertIn("review before trusting green", out)
+
+    def test_a_marker_that_was_already_there_is_not_this_runs_doing(self):
+        self.add_test_file("import unittest\n\n\n@unittest.skip('old')\n"
+                           "def test_a():\n    pass\n")
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["dodge"], {})
+
+    def test_prose_about_skipping_does_not_fire(self):
+        self.add_test_file("def test_a():\n    pass\n")
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "test_thing.py": "# we skipped the slow ones\n"
+                                                "def test_a():\n    pass\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["dodge"], {})
+
+    def test_a_brand_new_test_file_is_scanned_whole(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/test_new.py": "import unittest\n"
+                                                    "class T(unittest.TestCase):\n"
+                                                    "    @unittest.expectedFailure\n"
+                                                    "    def test_x(self): pass\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["dodge"],
+                         {"tests/test_new.py": ["expectedFailure"]})
+
+    def test_a_skip_in_ordinary_source_is_not_a_test_dodge(self):
+        self.steps([{"write": {"out.py": "MARKER\n@skip\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["dodge"], {})
+
+
+class Strays(Fixture):
+    """U4.3: files a run creates that its task never asked for.
+
+    Debris is invisible today -- the gate is green and CHANGED lists the file
+    without judgement. The rule that keeps the line honest is attribution: with
+    a channel active, a file the worker did not write is the CALLER's work on
+    the same tree, and calling that debris would be the co-work contract broken
+    from the other end."""
+
+    def abs(self, *names):
+        return [os.path.join(self.cwd, n) for n in names]
+
+    def test_an_unrequested_file_is_a_stray(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "scratch_dump.py": "print(1)\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["strays"], ["scratch_dump.py"])
+
+    def test_a_file_the_task_names_is_expected_not_debris(self):
+        self.steps([{"write": {"out.py": "MARKER\n", "helper.py": "h = 1\n"}}])
+        r = self.delegate(task="build out.py with MARKER, plus helper.py")
+        self.assertEqual(r["ctx"]["strays"], [])
+
+    def test_naming_the_basename_is_enough(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "pkg/util/helper.py": "h = 1\n"}}])
+        r = self.delegate(task="build out.py with MARKER and a helper.py")
+        self.assertEqual(r["ctx"]["strays"], [])
+
+    def test_a_touch_scope_file_is_expected_too(self):
+        self.steps([{"write": {"out.py": "MARKER\n", "helper.py": "h = 1\n"}}])
+        r = self.delegate(touch_scope=["out.py", "helper.py"])
+        self.assertEqual(r["ctx"]["strays"], [])
+
+    def test_qwen_scratch_files_are_the_sanctioned_convention(self):
+        self.steps([{"write": {"out.py": "MARKER\n", "calc_qwen.py": "t = 1\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["strays"], [])
+
+    def test_caller_co_work_is_never_called_debris(self):
+        # Attribution active, and the extra file is NOT in the write log: the
+        # caller created it while the run was live.
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "caller_note.md": "mine\n"},
+                     "write_log": self.abs("out.py")}])
+        r = self.delegate(approval_mode="scoped")
+        self.assertEqual(r["ctx"]["attribution"], "hook")
+        self.assertEqual(r["ctx"]["strays"], [])
+
+    def test_an_attributed_extra_file_still_is_debris(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "scratch_dump.py": "print(1)\n"},
+                     "write_log": self.abs("out.py", "scratch_dump.py")}])
+        r = self.delegate(approval_mode="scoped")
+        self.assertEqual(r["ctx"]["strays"], ["scratch_dump.py"])
+
+    def test_an_edited_pre_existing_file_is_not_created_by_this_run(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "other.py": "EDITED = 1\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["ctx"]["strays"], [])
+
+    def test_the_receipt_counts_and_names_them(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "scratch_dump.py": "print(1)\n"}}])
+        out = engine.run({"task": "build out.py with MARKER", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub"})
+        self.assertIn("1 strays", out)                     # the RUN line
+        self.assertIn("STRAYS: 1 file(s) not named in the task: "
+                      "scratch_dump.py", out)
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            self.assertEqual(json.loads(f.read().splitlines()[-1])["strays"], 1)
+
+
+class FixtureProvenance(Fixture):
+    """U3.3, opt-in: a fixture nobody can trace is indistinguishable from an
+    invented one, and a gate written against invented bytes passes forever --
+    the field report's single worst defect class."""
+
+    HEADER = "captured-from: https://api.example/v1/users 2026-07-01\n"
+
+    def test_a_header_in_the_first_lines_passes(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/users.json":
+                                   f"// {self.HEADER}[]\n"}}])
+        r = self.delegate(fixture_provenance=True)
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["fixtures_unproven"], [])
+
+    def test_a_missing_header_fails_the_attempt_and_names_the_file(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/users.json": "[]\n"}},
+                    {"write": {"tests/fixtures/users.json":
+                               f"// {self.HEADER}[]\n"}}])
+        r = self.delegate(fixture_provenance=True)
+        self.assertEqual(r["status"], "success")
+        fed = self.task_seen(2)
+        self.assertIn("tests/fixtures/users.json", fed)
+        self.assertIn("captured-from: <url or command> <date>", fed)
+        self.assertIn("<path>.src", fed)               # the binary route too
+
+    def test_the_final_attempt_ends_named_not_verify_failed(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "testdata/sample.csv": "a,b\n"}}])
+        r = self.delegate(fixture_provenance=True, max_iterations=1)
+        self.assertEqual(r["status"], "fixture_unproven")
+        self.assertEqual(r["ctx"]["fixtures_unproven"], ["testdata/sample.csv"])
+
+    def test_the_receipt_says_what_is_missing_and_why_it_matters(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "testdata/sample.csv": "a,b\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "fixture_provenance": True, "max_iterations": 1})
+        self.assertIn("STATUS: fixture_unproven", out)
+        self.assertIn("FIXTURES: testdata/sample.csv lack captured-from", out)
+        self.assertIn("worst defect class", out)
+
+    def test_a_binary_fixture_is_proven_by_its_src_sidecar(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/blob.bin": "\x00\x01binary",
+                               "tests/fixtures/blob.bin.src":
+                                   f"{self.HEADER}"}}])
+        r = self.delegate(fixture_provenance=True, max_iterations=1)
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["fixtures_unproven"], [])
+
+    def test_a_binary_fixture_without_one_is_not_proven(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/blob.bin": "\x00\x01binary"}}])
+        r = self.delegate(fixture_provenance=True, max_iterations=1)
+        self.assertEqual(r["ctx"]["fixtures_unproven"],
+                         ["tests/fixtures/blob.bin"])
+
+    def test_only_fixture_directories_are_policed(self):
+        # A substring rule would demand a provenance header in golden_ratio.py.
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "src/golden_ratio.py": "PHI = 1.618\n"}}])
+        r = self.delegate(fixture_provenance=True, max_iterations=1)
+        self.assertEqual(r["status"], "success")
+
+    def test_a_project_can_name_its_own_fixture_directories(self):
+        self.commit_cfg({"fixture_globs": ["recordings"]})
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "recordings/call.json": "{}\n"}}])
+        r = self.delegate(fixture_provenance=True, max_iterations=1)
+        self.assertEqual(r["status"], "fixture_unproven")
+
+    def test_the_flag_absent_leaves_the_same_run_untouched(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/users.json": "[]\n"}}])
+        r = self.delegate(max_iterations=1)
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["fixtures_unproven"], [])
+        self.assertEqual(len(r["trail"]), 1)
+
+    def test_caller_created_fixtures_are_not_the_workers_to_prove(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/users.json": "[]\n"},
+                     "write_log": [os.path.join(self.cwd, "out.py")]}])
+        r = self.delegate(approval_mode="scoped", fixture_provenance=True,
+                          max_iterations=1)
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["fixtures_unproven"], [])
 
 
 if __name__ == "__main__":

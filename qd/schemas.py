@@ -7,6 +7,12 @@ tool/param does, nothing more. The measured guidance they used to carry lives in
 skills/delegation/SKILL.md, loaded only when a session actually delegates. The
 input SHAPES (names, params, enums, required) are frozen here; only description
 text may change.
+
+Additive evolution (C9): existing names, enums and required lists never change
+-- a caller's working call must keep working. New OPTIONAL params may be added
+by a C9 amendment, each landing with a spec proving that its ABSENCE leaves
+behavior and receipt identical, so the freeze holds for everyone who never
+passes it.
 """
 
 import json
@@ -107,6 +113,41 @@ TOOL = json.loads(r'''
           "type": "object"
         },
         "description": "N independent delegations in ONE call (same fields per item), fanned across worktrees with per-item receipts -- the reliable fan-out; separate tool calls serialize."
+      },
+      "chain": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        },
+        "description": "DEPENDENT steps in ONE call (same fields per item), run in order on the same tree; the first link that does not come back green halts the rest, which render as one-line SKIPPED receipts. Mutually exclusive with `batch` -- that one is for INDEPENDENT work."
+      },
+      "report_dont_fix": {
+        "type": "boolean",
+        "description": "Diagnose, do not repair: one attempt, one `verify` run, no retry loop, status 'reported'. The gate output is the deliverable (a red gate is the reproduction) plus a FINDINGS line from the worker."
+      },
+      "fixture_provenance": {
+        "type": "boolean",
+        "description": "Require every fixture file the run creates (under fixtures/testdata/golden/snapshots/cassettes, or project `fixture_globs`) to carry a `captured-from: <url or command> <date>` line in its first 10 lines -- a `<path>.src` sidecar for binaries. Violations are fed back by name; the last attempt ends 'fixture_unproven'. Imagined fixtures pass any gate written against them."
+      },
+      "verify_timeout_sec": {
+        "type": "integer",
+        "description": "Kill time for ONE `verify` run, seconds (default 300, or project .qwen-delegate.json `verify_timeout_sec`; clamped 10..3600). A pre-flight that times out refuses the run before any attempt is burned."
+      },
+      "preflight_expect": {
+        "type": "string",
+        "enum": [
+          "red",
+          "green",
+          "any"
+        ],
+        "description": "What `verify` should say BEFORE the worker runs. 'red' (greenfield): a pre-flight that passes refuses the run -- the gate could not prove the work. 'green' (revision work on an already-passing suite): no success_but_preflight_passed demotion. 'any' (default): today's behavior."
+      },
+      "advisory_gates": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        },
+        "description": "Loose gates [{name, cmd}] run once after the final attempt in the run's tree. They NEVER affect status, never enter a retry prompt, never reach the worker -- red ones just glow in the receipt (architecture/conformance seams)."
       }
     },
     "required": [

@@ -179,5 +179,45 @@ class ConcurrentAppends(Fixture):
         self.assertEqual(seen, set(range(n)))
 
 
+class LedgerSummary(unittest.TestCase):
+    """U2.5: the log gets its first reader. Tolerant, delegate-only, never
+    raises; None when there is nothing to summarise."""
+
+    def setUp(self):
+        self.cwd = tempfile.mkdtemp()
+
+    def seed(self, records, corrupt=False):
+        d = os.path.join(self.cwd, ".qwen-delegate")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "runs.jsonl"), "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+            if corrupt:
+                f.write("{not json\n")
+
+    def test_none_when_no_history(self):
+        self.assertIsNone(runlog.ledger_summary(self.cwd))
+
+    def test_counts_by_status_and_peak_delegate_only(self):
+        self.seed([
+            {"tool": "qwen_delegate", "status": "success",
+             "peak_context": 30000},
+            {"tool": "qwen_delegate", "status": "success_but_preflight_passed",
+             "peak_context": 60000},
+            {"tool": "qwen_delegate", "status": "verify_failed",
+             "peak_context": 10000},
+            {"tool": "qwen_delegate", "status": "stopped", "peak_context": 0},
+            {"tool": "qwen_query", "status": "ok", "peak_context": 999999},
+        ])
+        s = runlog.ledger_summary(self.cwd)
+        self.assertEqual(s, {"n": 4, "ok": 2, "red": 1, "stopped": 1,
+                             "peak": 60000})
+
+    def test_corrupt_lines_must_not_hide_the_rest(self):
+        self.seed([{"tool": "qwen_delegate", "status": "success",
+                    "peak_context": 5}], corrupt=True)
+        self.assertEqual(runlog.ledger_summary(self.cwd)["n"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
