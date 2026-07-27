@@ -159,3 +159,24 @@ with the traps that only showed up on contact with the code.
 `## Build log — playbooks` to the END of this file when it is green. Then task #3
 (README + USAGE rebuilt from scratch), which is still the last item.
 
+
+### Size discipline (user question, 2026-07-27 — build these into the phase)
+
+A huge brief costs nothing at the caller (filename) — the risks are worker
+window pressure (an inlined bloated brief raises peak ctx and converts to
+compaction_refused deaths under the refuse policy) and amendment sprawl (an
+append-only list that contradicts itself is session-confusion in document
+form). Four layers, first two are cheap units of THIS phase:
+1. Visibility: BRIEF: line carries a size estimate; when amendments exceed ~5,
+   append "(N amendments — consolidate)".
+2. Precheck guard: brief text over a fraction of the worker window (~25% of
+   context_window(), when known) ⇒ named refusal at submit, same family as
+   GATE UNUSABLE ("split into steps + chain: true, or consolidate").
+3. Steps→chain is the pressure valve: links get preamble + own step only, so
+   per-link load stays flat as the document grows. Recommend in docs.
+4. Distillation is a delegable task: "fold this playbook's amendments into its
+   body" is mechanical, gateable (document still parses: front matter + slots
+   + steps), and git preserves the archaeology. Guidance in USAGE (task #3).
+Discipline rule for USAGE: the playbook carries the DELEGATION (task, gate,
+scope), never the design doc — background stays in stable repo docs the worker
+reads on demand.
