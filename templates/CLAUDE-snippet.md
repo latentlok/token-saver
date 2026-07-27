@@ -34,8 +34,7 @@ truth). Load the `delegation` skill before first use.
   the receipt's STATUS. Never re-run a green gate or read the diff.
 - `trust="self"` is the default (worker grades its own suite). Work that must be
   right: `trust="verified"` + your own `*_spec.*` gate — the worker can never edit
-  it, and an untested gate is a hope: break the thing it watches once and confirm
-  it fails. Tell it where tests live once (`test_dir` in `.qwen-delegate.json`).
+  it. Tell it where tests live once (`test_dir` in `.qwen-delegate.json`).
 - **Async**: the response is a run id + receipt path — do other work, read the file
   when it lands (its `WATCH:` line waits on it; `wait: true` blocks).
 - `stopped` / `compaction_refused` = task too big — split it; a rerun hits the same
