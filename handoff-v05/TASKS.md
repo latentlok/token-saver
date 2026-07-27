@@ -73,3 +73,9 @@ metadata check), final CHANGELOG polish, then the user decides on merging
   advertised-not-implemented (deliberate, in PENDING).
 - Trust L1–L4 intermediate dial stops; capability slider outward (API-class
   executors — config recipe in PENDING's API-expansion readiness note).
+
+## See also
+
+- `BORROWINGS.md` (this folder) — what to adopt from existing architectures,
+  prioritized (secret scrubbing, PR-as-receipt, matrix fan-out are the near-term
+  smalls; resumable chains once chains see real use).
