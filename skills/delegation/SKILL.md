@@ -38,6 +38,21 @@ You speak at most three times; everything between is free-side and unseen:
    you are not in that loop. `qwen_query` is unchanged: synchronous, answer in the
    response. (Ending your session kills its in-flight runs — they are threads of this
    MCP server, not detached jobs.)
+
+   **Heartbeat for long runs (optional).** A submitted build can run 40–50 min with
+   nothing pinging back, so a healthy long run looks identical to a wedged one. Arm a
+   self-paced `ScheduleWakeup` loop from the two paths the submit just gave you —
+   `RECEIPT:` (the stop condition) and `HEARTBEAT:` (the status source, the C11
+   `progress.json` sidecar the engine writes live as Qwen streams). Fire every ~900s:
+   on each wake, if the receipt file exists, end the loop (`stop: true`); otherwise read
+   `progress.json` and ping one bare line — `attempt=2 ctx=41200 state=running` — then
+   reschedule. Time-based, not change-based: it fires even when Qwen has gone silent, so
+   a stall still surfaces (a file-watcher would stay quiet through exactly the hang you
+   want to catch). It rides the *caller's* timeline, so on a 1-hour-TTL subscription it
+   also resets the cache timer for runs that threaten to exceed the hour; on a 5-minute
+   TTL it is liveness only. No engine change — it only reads what the submit already
+   advertised. Skip it for short runs; arm it when you're switching to other work and
+   want to know the build is still alive.
 3. **Relay.** Read the receipt file (never the diff). On green, **do not read the
    code — the gate already proved it.** Relay the outcome + proof.
 
