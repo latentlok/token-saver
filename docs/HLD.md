@@ -344,7 +344,7 @@ Project keys that back call args (U5.6 recipe defaults; a call arg always wins):
 `approval_mode`, `shell_allow`, `timeout_sec`, `preflight_expect`,
 `verify_timeout_sec`, `fixture_globs`, plus `task_suffix` (appended to the task itself,
 so it rides compaction re-injection), `store_briefs: false` (opt out of U5.5 briefs) and
-`autoedit_via_hook` (dark until probe P1).
+`autoedit_via_hook` (default ON since probe P1, 2026-07-29; opt out with `false`).
 
 **Additive-evolution clause** (pinned in the `qd/schemas.py` docstring): existing names,
 enums and required lists never change — a caller's working call must keep working. New

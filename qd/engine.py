@@ -1061,10 +1061,12 @@ def _delegate(args, t0_dir):
         progress = limits.Progress(cwd, session_id=session_id)
     on_line = limits.compose(burn, progress) if burn else None
 
-    # U1.4, ships dark (config-only, default off until probe P1): run auto-edit
-    # as yolo + the PreToolUse hook so attribution exists outside scoped mode.
+    # U1.4: run auto-edit as yolo + the PreToolUse hook so attribution exists
+    # outside scoped mode. Default ON (probe P1, 2026-07-29: confirmed behaviorally
+    # free -- same outcome/gate as plain auto-edit, only adds the C10 attribution
+    # log; ~1s overhead). Opt out per-project with "autoedit_via_hook": false.
     # Off, run_executor is called exactly as before -- argv and env byte-identical.
-    observe_hook = (bool(cfg.get("autoedit_via_hook"))
+    observe_hook = (cfg.get("autoedit_via_hook", True)
                     and approval_mode == "auto-edit")
     # Whether ANY channel can say "the worker wrote this". Without one, a
     # changed file is just a changed file -- the guards below must not accuse.

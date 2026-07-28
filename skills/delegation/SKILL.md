@@ -39,20 +39,28 @@ You speak at most three times; everything between is free-side and unseen:
    response. (Ending your session kills its in-flight runs — they are threads of this
    MCP server, not detached jobs.)
 
-   **Heartbeat for long runs (optional).** A submitted build can run 40–50 min with
-   nothing pinging back, so a healthy long run looks identical to a wedged one. Arm a
-   self-paced `ScheduleWakeup` loop from the two paths the submit just gave you —
-   `RECEIPT:` (the stop condition) and `HEARTBEAT:` (the status source, the C11
-   `progress.json` sidecar the engine writes live as Qwen streams). Fire every ~900s:
-   on each wake, if the receipt file exists, end the loop (`stop: true`); otherwise read
-   `progress.json` and ping one bare line — `attempt=2 ctx=41200 state=running` — then
-   reschedule. Time-based, not change-based: it fires even when Qwen has gone silent, so
-   a stall still surfaces (a file-watcher would stay quiet through exactly the hang you
-   want to catch). It rides the *caller's* timeline, so on a 1-hour-TTL subscription it
-   also resets the cache timer for runs that threaten to exceed the hour; on a 5-minute
-   TTL it is liveness only. No engine change — it only reads what the submit already
-   advertised. Skip it for short runs; arm it when you're switching to other work and
-   want to know the build is still alive.
+   **Heartbeat for long runs (optional) — push AND poll, two different questions.**
+   A submitted build can run 40–50 min with nothing pinging back, and "is it done?"
+   is a different question from "is it hung?" — answer each with the primitive that fits:
+
+   - **Push for completion (zero-latency "done").** Arm a background waiter that exits
+     the instant the receipt appears: `Bash` with `run_in_background: true` running
+     `until [ -f <receipt> ]; do sleep 5; done`. It notifies you the moment the run
+     finishes — no tick delay. This is the only one you need for short/fast runs.
+
+   - **Poll for liveness (the "is it hung?" watchdog).** Only for runs long enough that
+     silence could mean stuck. Arm a self-paced `ScheduleWakeup` loop from the `HEARTBEAT:`
+     path (the C11 `progress.json` sidecar the engine writes live as Qwen streams): fire
+     every ~900s; on each wake, if the receipt exists, end the loop (`stop: true`);
+     otherwise read `progress.json` and ping one bare line —
+     `attempt=2 ctx=41200 state=running` — then reschedule. Time-based, not change-based:
+     it fires even when Qwen has gone silent, so a stall still surfaces (the push waiter
+     stays quiet through exactly the hang you want to catch). It rides the *caller's*
+     timeline, so on a 1-hour-TTL subscription it also resets the cache timer for runs
+     that threaten to exceed the hour; on a 5-min TTL it is liveness only.
+
+   Arm both on a long run; arm only the push on a short one. No engine change — both
+   read only what the submit already advertised (`RECEIPT:` + `HEARTBEAT:`).
 3. **Relay.** Read the receipt file (never the diff). On green, **do not read the
    code — the gate already proved it.** Relay the outcome + proof.
 

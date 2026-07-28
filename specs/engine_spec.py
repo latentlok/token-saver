@@ -166,6 +166,15 @@ class Fixture(unittest.TestCase):
             }}}, f)
         os.environ["QWEN_DELEGATE_EXECUTORS"] = machine
         os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(td, "reg.jsonl")
+        # Pin the harness to `autoedit_via_hook: false` via the lowest-precedence
+        # machine config. Production default flipped ON (probe P1, 2026-07-29); the
+        # harness opts out so the many tests written against "auto-edit = no
+        # attribution channel" stay focused on their own subject. ObservedAutoEdit
+        # overrides this to exercise the real default.
+        _cfg = os.path.join(td, "cfg.json")
+        with open(_cfg, "w") as f:
+            json.dump({"autoedit_via_hook": False}, f)
+        os.environ["QWEN_DELEGATE_CONFIG"] = _cfg
 
     def tearDown(self):
         os.environ.clear()
@@ -879,8 +888,9 @@ class Attribution(Fixture):
 
 
 class ObservedAutoEdit(Fixture):
-    """U1.4, ships dark: `autoedit_via_hook` buys attribution outside scoped
-    mode. Off (the default), the run is byte-identical to today's."""
+    """U1.4: `autoedit_via_hook` buys attribution outside scoped mode. Default
+    ON (probe P1, 2026-07-29: behaviorally free -- only adds the C10 log); opt
+    out per-project with "autoedit_via_hook": false."""
 
     def _commit_cfg(self, cfg):
         with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
@@ -889,7 +899,29 @@ class ObservedAutoEdit(Fixture):
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "cfg"],
                        check=True)
 
-    def test_flag_off_auto_edit_has_no_attribution_channel(self):
+    def test_default_on_auto_edit_attributes_writes(self):
+        # No config: the production default is ON, so an auto-edit run gets the
+        # hook. The base Fixture opts the harness OUT via QWEN_DELEGATE_CONFIG;
+        # point at an empty config here to exercise the real default.
+        _empty = os.path.join(os.path.dirname(self.stub), "empty_cfg.json")
+        with open(_empty, "w") as f:
+            json.dump({}, f)
+        saved = os.environ.get("QWEN_DELEGATE_CONFIG")
+        os.environ["QWEN_DELEGATE_CONFIG"] = _empty
+        try:
+            self.steps([{"write": {"out.py": "MARKER\n"},
+                         "write_log": [os.path.join(self.cwd, "out.py")]}])
+            r = self.delegate()
+            self.assertEqual(r["ctx"]["attribution"], "hook")
+            self.assertEqual(r["ctx"]["writes"], ["out.py"])
+        finally:
+            if saved is None:
+                os.environ.pop("QWEN_DELEGATE_CONFIG", None)
+            else:
+                os.environ["QWEN_DELEGATE_CONFIG"] = saved
+
+    def test_explicit_off_opt_out_of_attribution(self):
+        self._commit_cfg({"autoedit_via_hook": False})
         self.steps([{"write": {"out.py": "MARKER\n"},
                      "write_log": [os.path.join(self.cwd, "out.py")]}])
         r = self.delegate()
