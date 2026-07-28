@@ -70,6 +70,21 @@ manager didn't allowlist can slip through on shape alone.
 gap to fix (deny-by-default for `mcp__*`, or an explicit allowlist) — a build, not a flip.
 If they're correctly fenced → no change.
 
+**RESULT (2026-07-29): TARGETED QUESTION UNPROVEN — worker declined to call the MCP tool.**
+Two `scoped` runs (the worker has `firecrawl` connected, `mcp__firecrawl__*`), both with
+explicit instructions to call it. The worker ignored the instruction both times and wrote
+code from its own knowledge (`tools.calls: 0`, no `mcp__` anywhere in either run). So the
+"does an MCP tool slip through on shape?" question was never triggered live — a
+worker-behavior limit, not a hook finding. What *was* observed: the scoped hook correctly
+**denies out-of-project writes** (a `write_file` to `~/.qwen/...` blocked as "write outside
+the project") and **denies off-allowlist shell** (verify.sh blocked as "not on the shell
+allowlist"; a `python3 -c` blocked as "compound...not allowed"). Path-confinement and shell
+fencing work; MCP-namespaced fencing remains spec-only until a run actually invokes one.
+Code-path note: an unknown tool with no `EFFECT_KEYS` field is allowed + logged
+`ungated:<tool>` (`scoped_hook.py:73-80`) — so an MCP tool *would* be allowed unless its
+input carries `file_path`/`path`/`command`/`content`. That's the live question still open.
+Retry: a task that *cannot* be done without the MCP tool, or unit-test the hook directly.
+
 ---
 
 ## P3 — real `edit` / `replace` tool_input field names
@@ -109,6 +124,12 @@ record, no change (it's correct code, just never exercised — it'll matter on a
 endpoint, see API-expansion in PENDING). If `cached` reports → confirm `BURN` binds on
 `prompt − cached` correctly.
 
+**RESULT (2026-07-29): `cached` is always 0 — BURN cache clause is INERT on this endpoint.**
+Run `r1c7c18` (streaming, burn_budget 20000): `tokens.cached = 0`, `token_source = none`.
+The endpoint never reports cached prompt tokens, so `fresh == prompt` and the
+`cached`-aware branch (`verdict.py:56-57`) never renders. Correct code, dead here. No
+change — it'll activate on a caching endpoint (API-expansion path, PENDING).
+
 ---
 
 ## P5 — `usage` fallback + BurnLimit on a real stream
@@ -132,6 +153,19 @@ actually consume, so `BurnLimit` must fire and stop it mid-stream (`limits.py:50
 **Decision:** if `BurnLimit` stops the run and the total is sane → `usage` fallback is
 vindicated; record. If totals are wrong/the limit doesn't fire → that's a live-limit
 correctness bug to fix before trusting any priced-endpoint cost figure.
+
+**RESULT (2026-07-29): BurnLimit FIRED correctly; `usage` FALLBACK still unproven.**
+Run `r1c7c18` (`burn_budget: 20000`): `STATUS: stopped`, `attempt 1: run stopped: Burn limit
+exceeded: 23,688 input tokens against 20,000 budget`. `BurnLimit` read per-call
+`usage.input_tokens` from the live stream and stopped the run mid-stream — works as
+designed. BUT `token_source = "none"` (not `"usage"`): the stop came via the `on_line`
+`BurnLimit` path, NOT the post-hoc `usage` fallback (`invoke.py:477`, the path that
+synthesizes totals when a stream drops them). This endpoint's stream kept `usage` intact, so
+the fallback path remains **unproven live** (still spec-only). The `BURN:` total was sane
+(`121,839 in / 909 out, 5 calls` — the 23,688 stop-figure is per-call-at-stop, the 121,839
+is the run sum; both consistent). Known 0.4.0 gap confirmed: `tools.calls = 0` in stream
+mode — still can't tell "measured zero" from "unmeasured." **P5 half-vindicated: the live
+limit works; the fallback that priced-endpoint cost figures depend on does not yet.**
 
 ---
 
@@ -206,6 +240,18 @@ probe measures the *write* side, which both primitives assume.)
 heartbeat with a stated "updates per streamed record" interval in the skill/docs. If writes
 are sparse/stalled → that bounds what the heartbeat can honestly claim, and the stated
 interval must reflect it. Record the measured number.
+
+**RESULT (2026-07-29): writes are PER-RECORD — frequent; the sidecar is a sound liveness signal.**
+Captured every `progress.json` mtime change during run `r1c7c18` (~33 s, 15 records): 6
+distinct writes, `records` advancing 1→5→8→11→14→15. `Progress.__call__` runs on every
+streamed record (`limits.py:158`) and `_write()` is not throttled — so the sidecar updates
+on the order of seconds during active streaming, far more often than the 900 s heartbeat.
+`attempt` advanced correctly (stayed 1 — single attempt); `state` stayed `running` until the
+terminal `finish()` write coincided with the receipt landing. **Verdict: advertise the
+heartbeat as "the sidecar updates per streamed record — a stall shows as a frozen `updated`
+timestamp."** The push+poll recipe's watchdog reads exactly this. Caveat: between records
+(e.g. a long tool execution or a model stall) the file is quiet — that's the gap the
+time-based poll exists to catch, confirmed necessary.
 
 ---
 
