@@ -14,6 +14,36 @@ arms). The saving grows with how much *reading* the task would force on Claude �
 delegation pays most exactly where sessions hurt most. The trade: wall-clock. The
 local worker is slow; your tokens are the scarce thing, its time is not.
 
+## A delegation is a submission, not a wait
+
+`qwen_delegate` answers in **seconds**, before any work happens:
+
+    STATUS: submitted
+    RUN: r3f9a2c
+    RECEIPT: /path/.qwen-delegate/receipts/r3f9a2c.md — lands on completion
+    HEARTBEAT: /path/.qwen-delegate/progress.json
+    WATCH: until [ -f …/r3f9a2c.md ]; do sleep 5; done; cat …/r3f9a2c.md
+
+The run continues in the background; the receipt lands as a **file** when it's done
+(written atomically — if the file exists, it's complete). So the working rhythm is:
+submit, go do something else, read the file later. The `WATCH:` line is the wait-for-it
+one-liner for when there's genuinely nothing else to do; `wait: true` restores the old
+blocking call outright. Chain/batch submissions add a `PARTIAL:` path where each link's
+receipt appears as it lands, so an eight-step overnight chain can be read mid-flight.
+
+Three things follow from the mechanics:
+
+- **Cheap refusals come back in the response, not the file** — a bad argument, a
+  non-git cwd, an unknown trust level, a playbook that doesn't parse, an oversized
+  brief. Nobody polls for a run that was never spawned. Gate problems that cost real
+  time (`GATE UNUSABLE`, `GATE VACUOUS`) are part of the run and land in the receipt.
+- **The heartbeat answers "is it hung?" for a file read** — records seen, input
+  tokens, attempt number, `state: running|done`. It lives in the cwd you submitted
+  from, next to the receipt.
+- **In-flight runs die with the session.** The run executes on a thread of the MCP
+  server, so ending the Claude session takes unfinished runs with it. A `running`
+  record whose pid is gone means exactly that — the receipt will never land; resubmit.
+
 ## Install (once per machine)
 
 1. **Prerequisites:** the `qwen` CLI (Qwen Code) configured against your free/local
@@ -23,8 +53,8 @@ local worker is slow; your tokens are the scarce thing, its time is not.
    `/plugin marketplace add latentlok/token-saver` then install `token-saver` from
    it. That registers everything at user scope via the plugin manifest: the two MCP
    tools (`qwen_delegate`, `qwen_query`), the skills (delegation, architect,
-   lld-principles), and the qwen-manager/architect agents. No manual MCP config —
-   `.mcp.json` wires the server through `${CLAUDE_PLUGIN_ROOT}`.
+   lld-principles, graphify-setup), and the qwen-manager/architect agents. No manual
+   MCP config — `.mcp.json` wires the server through `${CLAUDE_PLUGIN_ROOT}`.
 3. **Different/bigger worker model?** Add a profile in
    `~/.qwen-delegate/executors.json` (C7) and pass `executor=` per call — nothing
    else changes.
@@ -72,10 +102,34 @@ To edit the plugin itself, skip the marketplace and point Claude Code at a check
 Changes apply with `/reload-plugins` in the same session; `git pull` is the update.
 Don't do both — a marketplace install and a `--plugin-dir` clone load the plugin twice.
 
+## Routing: delegate, follow up, retry, or just do it
+
+The decision table, in the order the questions actually come up:
+
+| situation | route |
+|---|---|
+| a command could prove it was done (rename, codemod, tests-for-existing, boilerplate, lint sweep) | **delegate** — commit first, then `qwen_delegate` |
+| the inline edit would cost under ~500 tokens | **do it yourself** — a delegation round-trip has a floor |
+| a question about the code ("how does X work", "is there already a Z") | **`qwen_query`** — read-only, free, answers are leads to verify |
+| tight follow-up to a HEALTHY run, same task | **resume warm** — same `session_id` (the receipt's `RESUME:` line offers it); costs a sentence |
+| correcting a FAILED run | **`retry_of=<session_id>` + `retry_message`** — replays the stored brief COLD; a failed session argues with corrections, so never resume into one |
+| the same brief keeps coming back | **a playbook** — put the brief in the repo, send it by name (below) |
+| dependent steps | **`chain=[...]`** — serial on one tree, halts at the first red link |
+| independent pieces | **`batch=[...]`** — fans out across worktrees, per-item receipts |
+| diagnose only, don't fix | **`report_dont_fix=true`** — one attempt, `FINDINGS:` line, red gate = the reproduction |
+| vague task | **`approval_mode="plan"` first** — it cannot write; pick an option, then delegate that warm |
+| judgment, design, anything with no objective check | **keep it** — delegation needs a gate to mean anything |
+
+`retry_of` works because every run with a session id stores its brief (task, gate,
+scope, mode, trust) under `.qwen-delegate/briefs/`. Pass `task: ""` to reuse the stored
+task untyped; any argument you do pass beats the stored one. Project key
+`"store_briefs": false` opts out.
+
 ## Settings reference (`.qwen-delegate.json`)
 
 Per project, all optional. Machine-wide defaults for the same keys go in
-`~/.qwen-delegate/config.json`; the project file wins.
+`~/.qwen-delegate/config.json`; the project file wins, and a per-call argument beats
+both — the config is what a call *falls back to*, never what overrides it.
 
 | key | default | what it does |
 |---|---|---|
@@ -84,12 +138,25 @@ Per project, all optional. Machine-wide defaults for the same keys go in
 | `trust` | `self` | `self` = the worker writes and grades its own suite; `verified` = your `verify` command is the gate; `auto` = refuse a bare call so the orchestrator picks per task. |
 | `min_tests` | 5 | Floor for the non-vacuous guard under `trust="self"`. Ratchets automatically against an existing green suite. |
 | `spec_globs` | `specs/*`, `*_spec.*`, … | Files the worker may never edit. Its edits to them auto-revert. |
+| `approval_mode` | `auto-edit` | Standing mode for every delegation here (`plan`/`auto-edit`/`scoped`/`yolo`). |
+| `shell_allow` | unset | Standing extra command regexes for `scoped` mode. |
+| `timeout_sec` | 900 | Per-attempt kill time. |
+| `verify_timeout_sec` | 300 | Kill time for ONE gate run (clamped 10..3600). A pre-flight that times out refuses the run — every retry would pay it. |
+| `preflight_expect` | `any` | What the gate should say before the worker runs: `red` (greenfield — a passing pre-flight refuses the run, the gate could prove nothing) or `green` (revision work — stops the preflight alarm on a suite green by premise). |
+| `max_iterations` | 3 | Attempts before giving up (clamped 1..10). |
+| `task_suffix` | unset | Your standing worker discipline, appended to EVERY task server-side. Compaction-safe (it rides the task through re-injections, unlike QWEN.md) and never stacks into stored briefs. |
+| `store_briefs` | true | Whether runs store their brief for `retry_of`. |
+| `fixture_globs` | `fixtures`/`testdata`/`golden`/`snapshots`/`cassettes` | Directory segments policed by `fixture_provenance`. |
 | `dispatch` | unset (already serial) | `serial` pins every endpoint to one in-flight request whatever its `parallel_max` says; `parallel` honours the declared capacity. |
-| `burn_budget` | 10,000,000 | Cumulative input tokens one delegation may spend before it is stopped. `0` disables. |
+| `burn_budget` | 10,000,000 | Cumulative input tokens one delegation may spend before it is stopped. `0` disables (also disables the heartbeat — it rides the same stream). |
 | `decode_tps` | 15 | Your model's decode rate. The silence budget is derived from it and the declared max output — state the rate, not the seconds. |
 | `stall_seconds` | derived | Absolute override for the silence budget, if you'd rather state the answer directly. |
 | `compaction_threshold` | 1.0 | Fraction of the window at which the executor may auto-compact. Rarely the binding term — see below. |
 | `compaction_at` | unset | Absolute token target for the same thing. Resolves against the reserve rather than silently configuring an unreachable number. |
+
+`task_suffix` deserves a highlight: standing instructions like "do NOT stop after
+planning" or "write tests under tests/" used to need repeating in every task text.
+State them once here; the server appends them to every task in this repo.
 
 ### Where the tests live, and why it matters
 
@@ -103,8 +170,8 @@ They are never the gate; once the work is accepted they are ordinary regression 
 
 ### Live limits
 
-Every delegation now carries two ceilings. Both only ever end a run early — neither
-can turn a failing run green.
+Every delegation carries two ceilings. Both only ever end a run early — neither can
+turn a failing run green.
 
 - **Spend.** Cumulative input tokens across the whole delegation (not per attempt).
   Default 10M against ~560k for a real measured delegation, so it clears ordinary work
@@ -118,10 +185,12 @@ A run either one stops gets `STATUS: stopped` and a receipt saying **we** ended 
 nothing verified, work on disk partial, not a defect in the worker or your code. It
 does not retry: the same task into the same ceiling just spends it twice.
 
-One caveat worth knowing: a limit can only act on records it receives, which only
-arrive incrementally in streaming mode. If an executor profile's argv can't be
-switched to the streaming output format, the limit is inert — the receipt says so
-rather than letting a guard that never watched read as a guard that found nothing.
+The heartbeat sidecar (`.qwen-delegate/progress.json`) rides the same stream the
+limits watch, so it exists exactly when a burn budget does. One caveat worth knowing:
+a limit can only act on records it receives, which only arrive incrementally in
+streaming mode. If an executor profile's argv can't be switched to the streaming
+output format, the limit is inert — the receipt says so rather than letting a guard
+that never watched read as a guard that found nothing.
 
 ### Compaction is refused, not survived
 
@@ -275,7 +344,7 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
   judgement only the model can make, so `"auto"` routes it there rather than guessing
   server-side. Turn it on machine-wide with `{"trust": "auto"}` in
   `~/.qwen-delegate/config.json`.
-- **The unverified path is now opt-in:** omitting both `trust` and `verify` fires
+- **The unverified path is opt-in:** omitting both `trust` and `verify` fires
   the L5 self-gate (a real gate), not an *unverified claim*. The only route to
   `STATUS: unverified` is asking for `trust="verified"` with no `verify` — for
   stakes, pass both.
@@ -320,7 +389,7 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
 - **Serial vs parallel dispatch** — `"dispatch": "serial" | "parallel"` in project
   `.qwen-delegate.json` or `~/.qwen-delegate/config.json`. Default (unset) is already
   serial: with no `endpoints` section every endpoint holds one slot, and that slot is
-  now held **machine-wide** via a lock file, so separate Claude sessions queue instead
+  held **machine-wide** via a lock file, so separate Claude sessions queue instead
   of hitting one GPU at once. Set `"serial"` explicitly to pin that even where an
   endpoint declares `parallel_max > 1` (batches then run in order); `"parallel"` honours
   the declared capacity. Concurrency is not free on a local box — parallel requests
@@ -344,6 +413,114 @@ Pick by stakes, not by habit. A settings toggle is `self`; a billing calculation
   automatically. Note it constrains *modifications*, not creation — pair it with a
   gate if new files also matter.
 
+## Playbooks — the brief as a repo file
+
+A brief you'd send twice belongs in the repo, not in the chat. A **playbook** is a
+markdown file that carries a delegation; you send it by name:
+
+    qwen_delegate(cwd="...", brief_file="playbooks/add-endpoint.md",
+                  vars={"resource": "invoices"})
+
+The document looks like this:
+
+    ---
+    verify: python3 -m pytest tests/api/ -q
+    touch_scope: ["src/api/routes.py", "src/api/schemas.py"]
+    approval_mode: scoped
+    ---
+    Add a REST endpoint for {{resource}}: list + get by id, following the
+    pattern the existing endpoints use. Schemas in src/api/schemas.py.
+
+    ## Amendments
+    - 2026-07-27 return 404 as JSON, not HTML
+
+The rules, each of which is enforced rather than hoped for:
+
+- **The body is the task.** A `task` you pass alongside rides as an addendum ("focus
+  on X this time"), it never replaces the document.
+- **Front matter fills what the call doesn't.** Recognised keys: `verify`,
+  `touch_scope`, `shell_allow`, `approval_mode`, `timeout_sec`, `verify_timeout_sec`,
+  `preflight_expect`, `advisory_gates`, `max_iterations`, `chain`. Precedence is
+  **call args > front matter > project config > machine config**. Unknown keys,
+  wrong-shaped values, and an unclosed `---` fence are refused by name — a typo'd
+  gate key silently ignored is a gate that never runs. Values parse as JSON when
+  they can (`timeout_sec: 1200`, `touch_scope: ["a.py"]`), else as bare strings —
+  which has one gotcha: a gate command that *is* a JSON word needs quoting
+  (`verify: "true"`, not `verify: true`).
+- **`trust`, `executor`, and `worktree` are deliberately NOT front-matter keys.** Who
+  is trusted and where the run happens are the caller's decisions; a document that
+  could grant itself full trust would be privilege escalation in markdown.
+- **`{{slots}}` fill from `vars`** — across the whole file, front matter included
+  (`verify: pytest {{mod}}_test.py` works). An unfilled slot and a `vars` key
+  matching no slot are both refused by name; `{{` is reserved, no escape.
+- **The worker cannot edit its own brief.** An edit to the document reverts like a
+  spec edit and fails the attempt; a change with no logged worker write (your own
+  concurrent edit) is reported and left alone.
+- **The receipt pins the version.** `BRIEF: playbooks/add-endpoint.md @ <digest>
+  · ~140 tokens` on every receipt, and the `LEDGER:` line grows a per-document
+  tally — `this brief: 4 ok / 1 red` is what tells you to fix the document rather
+  than re-roll the worker.
+
+**Corrections go into the document.** On a retry, `amend_brief: true` folds your
+`retry_message` into the playbook itself as a dated `## Amendments` line instead of a
+one-shot CORRECTION on the task — git versions it, and every later run (and reader)
+inherits the lesson. The amendment lands *before* the run's snapshot, so it reads as
+pre-existing dirt, never as the worker's change.
+
+**Big briefs: split into steps.** Front matter `chain: true` compiles `## Step <n>`
+sections into a chain — each link gets the preamble plus its own step only, so
+per-link context stays flat however long the document grows. A step can override
+`verify:` / `touch_scope:` on its leading lines:
+
+    ---
+    chain: true
+    verify: bash ci/gate.sh
+    ---
+    Shared context every step needs.
+
+    ## Step 1: schema
+    verify: python3 -m pytest tests/schema_test.py -q
+    Add the column + migration.
+
+    ## Step 2: endpoint
+    Expose it in the API.
+
+**Size discipline.** A huge brief costs you a filename but costs the worker peak
+context — and under the refuse-compaction policy that converts to dead runs. The
+system pushes back in layers: the `BRIEF:` line always shows the size estimate; past
+5 amendments it says `consolidate`; and a brief composing to more than a quarter of
+the worker's window is refused at submit (`BRIEF TOO BIG`) with the fix named —
+split into steps + `chain: true`, or consolidate. Consolidation itself is a
+delegable, gateable task: *"fold this playbook's amendments into its body; the
+document must still parse"* — git preserves the archaeology. And keep the document
+to the **delegation** (task, gate, scope): background and design belong in stable
+repo docs the worker reads on demand, not inlined into every run's prompt.
+
+One retry subtlety worth knowing: `retry_of` re-reads the *document* (that's the
+point — amendments and edits bind), but any argument the original call passed
+explicitly is stored and beats the front matter, exactly like a live call.
+
+## Co-working while a delegation runs
+
+You can keep editing the same tree while a run is in flight — the guards attribute
+before they act, and the receipt reports what it couldn't attribute instead of
+guessing:
+
+- In `scoped` mode (or with the observe hook on), every worker write is logged, so a
+  changed file with **no logged worker write is yours** — the scope guard and spec
+  guard report it (`SCOPE: … caller co-work?`, `SPEC CHANGED (unattributed)`) and
+  **never revert it**. Rolling back a caller's concurrent edit is the one sin the
+  guards are built to avoid.
+- `HEAD MOVED` is attributed neutrally: in `scoped` mode commits are hard-denied to
+  the worker, so a moved HEAD is yours; elsewhere the receipt says "attribution
+  unknown — check git log" rather than accusing. `ROLLBACK:` advice follows suit — a
+  blanket reset is only suggested when the commits are positively the worker's.
+- In plain `auto-edit` there is no write log, so nothing is attributable and the old
+  rule stands: treat it as **one writer per tree**, and re-read any file the worker
+  touched before editing it.
+- A worktree run (`worktree="auto"`) sidesteps all of it: the worker builds on its
+  own branch and the receipt hands you a `MERGE:` line.
+
 ## Recipes
 
 **Mechanical task (rename, codemod, boilerplate, tests-for-existing, lint sweep):**
@@ -352,14 +529,15 @@ Rule of thumb from the loss data: if the inline edit would cost less than ~500
 tokens, just do it yourself — a delegation round-trip has a floor.
 
 **Question about a codebase:** `qwen_query` — free, read-only, can't invent scope.
-Treat answers as leads; precise citations are its weak spot.
+Treat answers as leads; precise citations are its weak spot. Need a value, not
+prose? Pass `result_schema` and read the JSON block back.
 
 **Building something new (feature after feature):** run the architect loop inline —
 per feature: one SHORT LLD (interfaces + behavior + edge cases, a few lines), then
-`qwen_delegate(task=goal+LLD, trust="self")`, then read the receipt. Include in
-every task text: "do NOT stop after planning — a plan is not a deliverable" and the
-worker's environment facts (they must survive compaction). Keep the current
-architecture in `docs/DESIGN.md`, not restated in chat.
+`qwen_delegate(task=goal+LLD, trust="self")`, submit and move on; read the receipt
+file when it lands. Put the standing discipline ("do NOT stop after planning…",
+environment facts) in `.qwen-delegate.json` `task_suffix` once, not in every task.
+Keep the current architecture in `docs/DESIGN.md`, not restated in chat.
 
 **Changing an existing codebase (the −69% case):** same loop, two additions —
 `approval_mode="scoped"` (lets the worker run the suite and query the graph), and
@@ -372,10 +550,28 @@ from the receipt's CHANGED line.
 `trust="self"`, `approval_mode="scoped"`, plus: "FIRST write a failing regression
 test under tests/ reproducing the report, confirm it fails, then find the cause and
 fix it; keep the suite green." The ratchet forces a net-new test; you read a
-one-line verdict. Measured: real planted bugs fixed at −43% vs solo.
+one-line verdict. Measured: real planted bugs fixed at −43% vs solo. Not sure it's
+even a bug? `report_dont_fix=true` first — the red gate is the reproduction, the
+`FINDINGS:` line is the diagnosis, and nothing gets "fixed" on a hunch.
+
+**A red receipt:** `retry_of=<session_id>` + `retry_message` — the stored brief
+replays COLD with your correction appended; `task: ""` saves the retyping. If the
+brief is a playbook, add `amend_brief: true` so the correction lands in the
+document instead of evaporating with the session.
+
+**Dependent steps (migrate, then adapt, then clean up):** `chain=[...]` in one call
+— serial on the same tree, one endpoint slot at a time, halts at the first
+non-green link (the rest render as one-line SKIPPED receipts). Watch it mid-flight
+through the `PARTIAL:` file. Recurring chains graduate into a `chain: true`
+playbook.
 
 **Parallel/independent pieces:** `batch=[...]` in one call — fans out across
 worktrees server-side, per-item receipts, `MERGE:` command included on success.
+
+**Architecture/conformance watchdogs:** `advisory_gates=[{name, cmd}]` — loose
+checks that glow red in the receipt but never touch STATUS, never enter the retry
+loop, never reach the worker. The place for "does the layering still hold" checks
+that shouldn't fail a build.
 
 ## Worked example (one full round-trip)
 
@@ -394,44 +590,59 @@ Claude's moves, in order:
               allowed (token-bucket semantics); a call past the limit BLOCKS until
               a slot frees, never raises; limits configurable at client
               construction, defaults 5/10. Edge cases: burst drains then refills
-              at 5/s; zero-wait when under the limit.
-              Locate the relevant code via graphify before grepping. Write pytest
-              tests for this under tests/. Never break the existing suite.
-              Do NOT stop after planning — a plan is not a deliverable."
+              at 5/s; zero-wait when under the limit."
     )
 
 Note what is NOT in the task: no file names, no function names, no test authored by
-Claude — behavior only. The receipt that comes back:
+Claude — behavior only. Also absent: the standing discipline lines ("locate via
+graphify before grepping", "write pytest tests under tests/", "never break the
+suite", "do NOT stop after planning") — those live in this project's
+`.qwen-delegate.json` as `task_suffix`, appended server-side to every task.
+
+The response arrives in seconds:
+
+    STATUS: submitted
+    RUN: r7c21b4
+    RECEIPT: /home/you/projects/myapp/.qwen-delegate/receipts/r7c21b4.md — lands on completion
+    HEARTBEAT: /home/you/projects/myapp/.qwen-delegate/progress.json
+    WATCH: until [ -f …/r7c21b4.md ]; do sleep 5; done; cat …/r7c21b4.md
+
+Claude goes back to whatever you were discussing. A few minutes later it reads the
+receipt file:
 
     STATUS: success
     SESSION: 7f3a…
     ATTEMPTS: 1/3
+    RUN: 1 attempt(s) · peak 41% ctx · 312s · 9,214 out
     TRUST: self (L5) -- gate = the delegate's own suite, non-vacuous guard only
     CHANGED: src/client.py, src/ratelimit.py, tests/test_ratelimit.py
     NEW PUBLIC SURFACE: RateLimiter (ratelimit.py)
     HANDOFF: token-bucket limiter wired into ApiClient, 11 tests green
+    LEDGER: run #12 · lifetime 9 ok / 2 red / 0 stopped · peak-ctx record 63%
+    RESUME: session_id=7f3a… -- a follow-up in this warm session costs a sentence
 
 Claude relays: "Rate limiting is in — new `RateLimiter`, 11 of its own tests green,
 suite intact. Want `RateLimiter` public, or internal?" — the one genuine design call
 the receipt surfaced.
 
-> The last four instruction lines in the task (graphify-before-grep, tests under
-> tests/, don't break the suite, don't stop after planning) are STANDING WORKER
-> DISCIPLINE, not task content — they belong in Qwen's workflow (server-injected,
-> compaction-safe), not in every architect task text. Moving them there is a pending
-> item ([PENDING.md](PENDING.md)); until it lands, include them manually.
-
 ## Reading a receipt (the whole job at L5)
 
-Green receipt ≈ 6 lines. What to actually look at:
+Green receipt ≈ 8 lines. What to actually look at:
 
 - `STATUS` decides; `TRUST: self` reminds you what the green means (its tests).
+- `RUN` — the telemetry line: attempts, peak context, time, output, denials, strays.
 - `CHANGED` — filesystem truth: where the work landed.
 - `NEW PUBLIC SURFACE` — new names others can depend on; unrequested ones are scope
   creep: re-delegate with a constraint, don't edit.
-- Flags that appear only when something needs you: `MISREPORT`, `COMMITTED`,
+- `BRIEF` (playbook runs) — which document version briefed it; pair with the
+  `LEDGER` per-document tally when deciding whether to amend.
+- `RESUME` — the session heuristic, computed for you: a healthy session offers a
+  warm follow-up; a failed one says re-delegate COLD (`retry_of`) instead, because
+  a session that failed carries its confusion forward.
+- Flags that appear only when something needs you: `MISREPORT`, `HEAD MOVED`,
   `SHELL APPROVAL NEEDED` (judge the command alone), `gate_suspect` (fix the gate,
-  never iterate), `PREFLIGHT` (the gate proved nothing — tighten it).
+  never iterate), `PREFLIGHT` (the gate proved nothing — tighten it), `TEST DODGE`
+  (a skip added beside the delivery), `STRAYS` (files the task never asked for).
 - Never re-verify a green gate and never read the diff — that's the token cost this
   system exists to remove.
 
@@ -449,11 +660,17 @@ When something matters enough to check but not enough for `verified`:
 ## Gotchas that are laws
 
 - **Commit before every delegation.** Git is the only rollback.
-- One writer per tree; re-read any file the worker touched before editing it.
+- **Don't end the session while runs are in flight** — they run on the server's
+  threads and die with it. The run log marks them (`dead: true`); resubmit.
+- Without attribution (plain `auto-edit`), one writer per tree; re-read any file the
+  worker touched before editing it. With it (`scoped`), co-work is safe — reported,
+  never rolled back.
 - Vague task → `approval_mode="plan"` first (it cannot write), pick an option,
   then delegate that option warm. Never delegate a vague task straight to a
   write-capable mode.
-- Critical rules go in the TASK TEXT, not just QWEN.md — compaction eats QWEN.md.
+- Critical rules go in `task_suffix` (or the task text), not just QWEN.md —
+  compaction eats QWEN.md; the suffix rides every re-injection.
 - `scoped` is an allowlist, not a sandbox. `yolo` only when shell IS the work.
 - Estimate `timeout_sec` for big tasks (receipt TIME line teaches you); the 900s
   default kills large builds mid-write.
+- In a playbook, quote a gate command that is also a JSON word: `verify: "true"`.

@@ -9,17 +9,23 @@ two-function surface backed entirely by qd submodules.
 import json
 import os
 import re
+import secrets
+import shutil
 import subprocess
+import tempfile
+import time
 
 from qd.profiles import resolve, cost_usd
 from qd.invoke import (
     run_executor, accum_stats, cum_zero,
     was_compacted_since_ack, ack_compaction, compaction_counts,
-    truncate, stall_seconds as invoke_stall_seconds,
+    truncate, stall_seconds as invoke_stall_seconds, context_window,
 )
 from qd.gittree import (
-    git, is_git_repo,
-    snapshot, violated_specs, revert_specs,
+    git, is_git_repo, file_sha,
+    snapshot, violated_specs, revert_specs, untracked_files,
+    snapshot_contents, restore_paths, dodge_markers,
+    committed_during_run, head_sha, new_public_symbols, numstat_map,
     _project_config, _global_config,
 )
 from qd.bootstrap import (
@@ -27,15 +33,26 @@ from qd.bootstrap import (
     bootstrap_notice, bootstrap_failed_refusal,
     nongit_refusal, detect_test_cmd, test_dir as detect_test_dir,
 )
+from qd.runlog import runlog_dir, save_brief, load_brief, BRIEFS_DIR
 from qd import doctor
+from qd import playbook
+from qd import jsonschema
 from qd import limits
 from qd import worktrees
-from qd.verdict import render, HANDOFF_SUFFIX, VERIFY_CAP
+from qd.verdict import (
+    render, HANDOFF_SUFFIX, FINDINGS_SUFFIX, VERIFY_CAP, parse_findings,
+)
 from qd import refs
 from qd import graph
 
 _DEFAULT_MAX_ITER = 3
 _DEFAULT_TIMEOUT = 900
+
+# How long ONE verify run may take. Was a bare literal: a live-network gate in
+# the field timed out at 300s before the run and again after it, which the
+# classifier then read as "output identical to preflight" and reported a good
+# delivery as gate_suspect. Nobody could raise it, because it was not a knob.
+_DEFAULT_VERIFY_TIMEOUT = 300
 
 # Cumulative input tokens a single delegation may spend before it is stopped.
 # Set deliberately high: a limit that fires on legitimate work is worse than no
@@ -46,6 +63,31 @@ _DEFAULT_TIMEOUT = 900
 # runaway less than halfway. Tune down with `burn_budget` once a project knows
 # where its own normal sits; 0 or null disables it.
 _DEFAULT_BURN_BUDGET = 10_000_000
+
+# U4.1: the chain position run_chain injects into each link's args. Reserved,
+# not a caller-facing param -- it is deliberately absent from the schema, so a
+# hand-written call cannot claim to be link 3 of a chain that never ran.
+CHAIN_ARG = "_chain"
+
+# U5.2, same reserved-arg convention: the submitted run's id, and the result of
+# the preconditions the server already ran. Both are injected by qd/server.py
+# on the way into a background delegation and are absent from the schema -- a
+# caller cannot mint its own run id, nor claim to have passed a check.
+RUN_ID_ARG = "_run_id"
+PRECHECK_ARG = "_precheck"
+
+# Minted per process, never leaving it. The tool schema does not carry
+# PRECHECK_ARG, but nothing stops a client from sending one anyway -- and
+# honoring an unsigned "I already passed the checks" would be a way to walk
+# past the trust and dirty-spec preconditions. A result without this token is
+# not one of ours, so the checks simply run again.
+_PRECHECK_TOKEN = secrets.token_hex(8)
+
+# U3.3 fixture provenance. Directory SEGMENTS, matched per path component: the
+# five names the field report's fixtures actually lived under. Projects override
+# with `fixture_globs` in .qwen-delegate.json.
+_FIXTURE_SEGMENTS = ("fixtures", "testdata", "golden", "snapshots", "cassettes")
+_PROVENANCE_HEADER = "captured-from:"
 
 _SELF_GATE_PATH = os.path.join(".qwen-delegate", "selfgate.sh")
 
@@ -113,17 +155,189 @@ def _ensure_self_gate(work_cwd, min_override=None):
     return f"bash {_SELF_GATE_PATH}"
 
 
-def _run_verify(cmd, cwd):
-    """Run verify shell command; return (passed_bool, combined_output_str)."""
+def _repo_relative(paths, work_cwd):
+    """Hook-logged absolute writes as repo-relative paths (C10).
+
+    Everything the guards compare against -- touch_scope, `git status`, the spec
+    list -- is repo-relative, while the hook can only log what it resolved, so
+    an un-translated write log matches nothing and attributes nothing. Writes
+    outside the tree are dropped: they cannot be a violation IN it, and both
+    sides are realpath'd because a /tmp symlink alone would break every match.
+    """
+    try:
+        root = os.path.realpath(work_cwd)
+    except Exception:
+        return []
+    out = []
+    for p in paths or []:
+        try:
+            ap = os.path.realpath(p)
+        except Exception:
+            continue
+        if ap != root and not ap.startswith(root + os.sep):
+            continue
+        rel = os.path.relpath(ap, root)
+        if rel not in out:
+            out.append(rel)
+    return out
+
+
+def _created(cwd, changed, pre_status, pre_tracked, writes, hooked):
+    """Paths this run CREATED, worker-attributed when a channel exists.
+
+    Shared by the stray line and the fixture check, because both would
+    otherwise accuse a caller of files it created itself on the same tree
+    while the run was live (C10). Pre-existing means dirty at T0 OR tracked at
+    T0: `pre_status` alone is the DIRTY snapshot, so against a clean tree every
+    edited file would read as brand new. A new DIRECTORY arrives from `git
+    status` as one `dir/` entry and is expanded here -- unexpanded, both rules
+    would report a directory name and neither could read the files inside it.
+    """
+    out = []
+    every = None
+    for p in changed:
+        if p in pre_status or p in (pre_tracked or ()):
+            continue
+        if p.endswith("/"):
+            if every is None:
+                every = untracked_files(cwd)
+            out += [q for q in every if q.startswith(p)]
+        else:
+            out.append(p)
+    if hooked:
+        out = [p for p in out if p in (writes or [])]
+    return sorted(out)
+
+
+def _strays(created, task, touch_scope):
+    """Created files the task never names (U4.3).
+
+    A delegation that leaves a scratch script, a second copy of a module or a
+    debug dump behind reads exactly like one that did not: the gate is green
+    either way and CHANGED lists the file without judgement. Named in the task
+    (by path OR basename) or listed in touch_scope means expected, not debris.
+    `*_qwen.*` files are excluded -- they are the sanctioned self-test scratch
+    convention, already surfaced by the C8 prefilter's NOTES line.
+    """
+    text = task or ""
+    scope = set(touch_scope or [])
+    out = []
+    for p in created:
+        if "_qwen." in p or p in scope:
+            continue
+        base = os.path.basename(p)
+        if p in text or (base and base in text):
+            continue
+        out.append(p)
+    return out
+
+
+def _fixture_files(paths, segments):
+    """Created paths living under a fixture-ish directory SEGMENT.
+
+    Matched per path component rather than by substring: `golden_ratio.py` and
+    `snapshots.md` are ordinary source, and demanding provenance headers in
+    them would teach callers to switch the whole check off.
+    """
+    segs = set(segments or ())
+    out = []
+    for p in paths:
+        parts = p.replace(os.sep, "/").split("/")[:-1]   # directories only
+        if any(part in segs for part in parts):
+            out.append(p)
+    return out
+
+
+def _unproven_fixtures(cwd, paths):
+    """Fixture files carrying no `captured-from:` provenance (U3.3).
+
+    Imagined fixtures were the field report's worst defect class: a golden file
+    the worker INVENTED satisfies any gate written against it, and nothing in
+    the diff distinguishes captured bytes from generated ones. Text files carry
+    the header themselves (first 10 lines); binary files cannot, so a
+    `<path>.src` sidecar carries it for them (C6) -- and that sidecar is a text
+    file whose first line IS the header, so it clears the check on its own.
+    An unreadable file is not evidence of a missing header and is never
+    accused.
+    """
+    bad = []
+    for p in paths:
+        full = os.path.join(cwd, p)
+        try:
+            with open(full, "rb") as f:
+                head = f.read(4096)
+        except Exception:
+            continue
+        if b"\0" in head:
+            proven = False
+            try:
+                with open(full + ".src", "rb") as f:
+                    first = f.readline().decode("utf-8", "replace").strip()
+                proven = first.lower().startswith(_PROVENANCE_HEADER)
+            except Exception:
+                proven = False
+            if not proven:
+                bad.append(p)
+            continue
+        # Re-read as text rather than slicing the 4 KB sniff: ten long lines
+        # can outrun it, and a header ruled missing by the buffer size would be
+        # a failure the worker cannot fix.
+        try:
+            with open(full, errors="replace") as f:
+                lines = [line for _, line in zip(range(10), f)]
+        except Exception:
+            continue
+        if not any(_PROVENANCE_HEADER in line.lower() for line in lines):
+            bad.append(p)
+    return bad
+
+
+def _run_verify_timed(cmd, cwd, timeout):
+    """Run a gate command; return (passed, output, ms, timed_out).
+
+    A timeout is reported as its own fact rather than inferred from the output
+    text: it decides whether the whole run is refused before the worker starts,
+    and a gate that merely PRINTS the timeout sentence must not be able to
+    trigger that. `ms` is what a retry pays to run this gate again.
+    """
+    t0 = time.monotonic()
     try:
         v = subprocess.run(
             cmd, cwd=cwd, shell=True,
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=timeout,
         )
         out = ((v.stdout or "") + (v.stderr or "")).strip()
-        return v.returncode == 0, out
+        return (v.returncode == 0, out,
+                int((time.monotonic() - t0) * 1000), False)
     except subprocess.TimeoutExpired:
-        return False, "verify command timed out after 300s"
+        return (False, f"verify command timed out after {timeout}s",
+                int((time.monotonic() - t0) * 1000), True)
+
+
+def _run_advisory(gates, cwd, timeout):
+    """Run the advisory gates once each; return ([{name, ok, ms, head}], skipped).
+
+    Malformed items are counted and skipped, never raised on: these are loose
+    indicators a caller bolts onto a delegation, and a typo in one of them must
+    not cost a finished run its receipt. `head` is the first output line,
+    because an advisory that pastes a full test log is a gate in disguise.
+    """
+    results, skipped = [], 0
+    for g in gates or []:
+        name = g.get("name") if isinstance(g, dict) else None
+        cmd = g.get("cmd") if isinstance(g, dict) else None
+        if (not isinstance(name, str) or not isinstance(cmd, str)
+                or not name.strip() or not cmd.strip()):
+            skipped += 1
+            continue
+        ok, out, ms, _ = _run_verify_timed(cmd.strip(), cwd, timeout)
+        head = ""
+        for line in (out or "").splitlines():
+            if line.strip():
+                head = line.strip()[:120]
+                break
+        results.append({"name": name.strip(), "ok": ok, "ms": ms, "head": head})
+    return results, skipped
 
 
 def _retry_prompt(session_id, task, verify, v_out, on_compaction, repeated=False):
@@ -175,34 +389,226 @@ def _retry_prompt(session_id, task, verify, v_out, on_compaction, repeated=False
     ), "reinject"
 
 
-def delegate(args):
-    """Single-candidate delegation loop.
+# U5.5: what a stored brief remembers -- the half of a call that describes the
+# WORK, so a retry replays it without the caller retyping any of it. Reserved
+# args, the session and the retry fields themselves are deliberately absent: a
+# retry is a new, cold run of the same brief, not a replay of the old run's
+# identity.
+BRIEF_KEYS = (
+    "task", "verify", "touch_scope", "approval_mode", "shell_allow",
+    "shell_feedback", "trust", "max_iterations", "timeout_sec",
+    "verify_timeout_sec", "preflight_expect", "worktree", "executor",
+    "report_dont_fix", "fixture_provenance", "advisory_gates",
+    "result_schema", "on_compaction", "workers",
+    # U6: a retry replays the same DOCUMENT, not a frozen copy of its text.
+    # `amend_brief` is deliberately NOT here: stored, it would re-amend the
+    # document on every later retry of that session.
+    "brief_file", "vars",
+)
 
-    Returns dict with keys:
-        status, session_id, trail, result_text, denials,
-        max_iter, last_verify, ctx
+_CORRECTION = ("\n\nCORRECTION (from the caller, after reviewing your "
+               "previous attempt):\n")
+
+
+def _resolve_retry(args):
+    """Rebuild a call from the brief stored for `retry_of` (U5.5).
+
+    Returns (args, refusal|None). PURE -- one file read and a dict merge -- so
+    the server can run it to answer a bad `retry_of` in the submit response
+    and the engine can run it again without the run coming out differently.
+
+    Merge rule: the stored brief supplies the defaults, an explicit call arg
+    wins. `task: ""` counts as "not passed", which is how a caller re-runs a
+    brief it does not want to retype (the schema requires the field).
+
+    The retry runs COLD: no session is resumed, even if the caller passed one.
+    The field finding this exists for is that a session which failed carries
+    its confusion forward -- resuming into it is how a corrected brief gets
+    argued with rather than followed.
     """
-    task = args["task"]
+    sid = args.get("retry_of")
+    if not sid:
+        return args, None
+    cwd = args.get("cwd") or "."
+    brief = load_brief(cwd, sid)
+    stored = (brief or {}).get("args")
+    if not isinstance(stored, dict) or not stored:
+        return args, (
+            f"retry_of=\"{sid}\": no stored brief for that session. Briefs are "
+            f"written to {os.path.join(cwd, '.qwen-delegate', BRIEFS_DIR)}/ "
+            f"when a delegation comes back with a session id -- a project can "
+            f"switch that off with \"store_briefs\": false. Send the task "
+            f"again, or check that directory for the session you meant."
+        )
+    merged = dict(stored)
+    for key, value in args.items():
+        if value is None:
+            continue
+        if key == "task" and not str(value).strip():
+            continue
+        merged[key] = value
+    merged.pop("session_id", None)
+    message = (args.get("retry_message") or "").strip()
+    # U6: `amend_brief` REPLACES the correction append -- the amendment IS the
+    # correction channel, and appending here too would send the same sentence
+    # twice, once as prose and once as a line of the document.
+    if message and not args.get("amend_brief"):
+        merged["task"] = (merged.get("task") or "") + _CORRECTION + message
+    return merged, None
+
+
+def resolve_call(args, amend=False):
+    """Resolve a call to its runnable form (U5.5 + U6): the retry brief first
+    (it is what carries `brief_file` on a retry), then the amendment, then the
+    playbook. Returns (args, refusal|None).
+
+    `precheck` runs this with amend=False and `_delegate` with amend=True, so
+    the amendment is written exactly once per run -- and `_delegate` runs its
+    preconditions BEFORE the amend pass, so a refused run never edits the
+    caller's document.
+    """
+    args, refusal = _resolve_retry(args)
+    if refusal:
+        return args, refusal
+    amended = False
+    if args.get("amend_brief"):
+        # Shape refusals fire on BOTH passes (so the submit answers them
+        # synchronously); only the amend=True pass writes.
+        if not args.get("retry_of"):
+            return args, (
+                "amend_brief without retry_of: the amendment is the "
+                "correction channel for a STORED brief -- pass "
+                "retry_of=<session> with a retry_message, or drop amend_brief.")
+        if not args.get("brief_file"):
+            return args, (
+                "amend_brief: the stored brief for that session has no "
+                "brief_file -- there is no document to amend. Use "
+                "retry_message alone.")
+        message = (args.get("retry_message") or "").strip()
+        if not message:
+            return args, (
+                "amend_brief with no retry_message: an amendment is a dated "
+                "correction line, and there is nothing to write.")
+        if amend:
+            refusal = playbook.amend(args.get("cwd") or ".",
+                                     args["brief_file"], message,
+                                     time.strftime("%Y-%m-%d"))
+            if refusal:
+                return args, refusal
+            amended = True
+    return playbook.resolve(args, amended=amended)
+
+
+def expand_playbook(args):
+    """The server seam (U6): compile a `chain: true` playbook into `chain`
+    items BEFORE the submit routes the call. Returns (args, refusal|None).
+
+    Args come back UNCHANGED unless the playbook compiled to a chain (then
+    `chain` is set and `brief_file`/`vars` are consumed) -- the single path
+    resolves its own brief inside the run, which is what keeps the amendment
+    on exactly one code path.
+    """
+    if not args.get("brief_file"):
+        return args, None
+    if args.get("chain") or args.get("batch"):
+        return args, (
+            "`brief_file` describes ONE delegation (or compiles to its own "
+            "chain) -- it cannot ride beside `chain`/`batch`. Put brief_file "
+            "on the items instead.")
+    resolved, refusal = playbook.resolve(dict(args))
+    if refusal:
+        return args, refusal
+    if resolved.get("chain"):
+        out = dict(resolved)
+        out.pop("brief_file", None)
+        out.pop("vars", None)
+        return out, None
+    return args, None
+
+
+def _refusal(text, max_iter=_DEFAULT_MAX_ITER):
+    """A refusal in delegate()'s return shape. ctx is EMPTY by contract: run()
+    routes refusals around the renderer, which needs a populated one."""
+    return {
+        "status": "refused",
+        "session_id": None,
+        "trail": [],
+        "result_text": text,
+        "denials": [],
+        "max_iter": max_iter,
+        "last_verify": None,
+        "ctx": {},
+    }
+
+
+def refusal_receipt(text):
+    """A refusal as the caller reads it -- run()'s formatting, extracted so the
+    server's synchronous submit path (U5.2) answers with the same bytes."""
+    text = text or "refused"
+    return text if text.startswith("STATUS:") else f"STATUS: refused\n\n{text}"
+
+
+def precheck(args):
+    """The refusals cheap enough to answer BEFORE a run is spawned (U5.2).
+
+    Returns {"refusal": text|None, "bootstrap_note": str|None, "token": ...}
+    -- the token is what lets _delegate tell a result this process produced
+    from one a caller made up.
+    """
+    result = _preconditions(args)
+    result["token"] = _PRECHECK_TOKEN
+    return result
+
+
+def _preconditions(args):
+    """The precheck body.
+
+    Returns {"refusal": text|None, "bootstrap_note": str|None}.
+
+    Everything here is config reads, one `git rev-parse` and one `git diff`:
+    milliseconds, so the async submit can answer them in the tool response,
+    where the caller is still looking, instead of filing them as a receipt
+    nobody is waiting on yet. What is deliberately NOT here is the PRE-FLIGHT
+    gate run: `GATE UNUSABLE` / `GATE VACUOUS` cost up to the whole verify
+    budget (an hour at the clamp), which is a run rather than a precondition --
+    they land in the receipt file with every other outcome.
+
+    The bootstrap step WRITES the worker rules file, so its notice is returned
+    here and threaded into the run through PRECHECK_ARG rather than recomputed:
+    a second pass would find the file already in place and the receipt would
+    silently lose the line saying it had just been made.
+    """
+    # U6: resolved BEFORE the trust/gate-expectation checks below, because the
+    # front matter can supply `verify` -- and verify's presence is what decides
+    # the preflight_expect="green" + trust="self" contradiction refusal.
+    args, refusal = resolve_call(args, amend=False)
+    if refusal:
+        return {"refusal": refusal, "bootstrap_note": None}
+
+    # U6 size guard: a huge brief costs the caller a filename, but the worker
+    # pays it as peak context -- and under the refuse policy that converts to
+    # compaction_refused deaths. Refused at submit, where the fix is cheap.
+    brief_meta = args.get("_brief")
+    if isinstance(brief_meta, dict):
+        win = context_window()
+        est = int(brief_meta.get("chars") or 0) // 4
+        if win and est > win * 0.25:
+            return {"refusal": (
+                f"BRIEF TOO BIG: {brief_meta.get('path')} composes to "
+                f"~{est:,} tokens -- over a quarter of the worker's "
+                f"{win:,}-token window before it reads a single file. Split "
+                f"the document into `## Step` sections with `chain: true`, "
+                f"or consolidate its amendments into the body."
+            ), "bootstrap_note": None}
+
     cwd = args["cwd"]
     verify = args.get("verify")
-    approval_mode = args.get("approval_mode", "auto-edit")
-    max_iter = args.get("max_iterations", _DEFAULT_MAX_ITER)
-    timeout = args.get("timeout_sec", _DEFAULT_TIMEOUT)
-    if timeout:
-        timeout = max(30, min(7200, int(timeout)))
-    else:
-        timeout = _DEFAULT_TIMEOUT
-    session_id = args.get("session_id")
-    # "refuse" is the default: compaction is the documented fabrication trigger, so a
-    # run that reaches it has already exceeded what one delegation can hold honestly.
-    # Continuing on a summarised history -- reinject or discard -- buys a result whose
-    # provenance nobody can vouch for. Stopping hands the call back to the orchestrator,
-    # which can split the task; that is the only fix that addresses the cause.
-    on_compaction = args.get("on_compaction") or "refuse"
-    if on_compaction not in ("refuse", "reinject", "discard"):
-        on_compaction = "refuse"
-    worktree_mode = args.get("worktree")
-    touch_scope = args.get("touch_scope")
+    # Config-aware for the same reason the engine is (U5.6): a project that
+    # declares its gate expectation in .qwen-delegate.json must hit the same
+    # contradiction check as one that passes it per call.
+    preflight_expect = (args.get("preflight_expect")
+                        or _project_config(cwd).get("preflight_expect")
+                        or _global_config().get("preflight_expect") or "any")
 
     # --- Precondition: trust (R3: the slider) ---
     # Position resolves like `executor`: call arg > project .qwen-delegate.json
@@ -218,53 +624,38 @@ def delegate(args):
         # Refuse the bare call so the orchestrator classifies THIS task and passes
         # a concrete level. A concrete call arg overrides an "auto" default above,
         # so this only fires when nobody chose.
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": (
-                "Trust is \"auto\" — pick per task by criticality and pass it "
-                "explicitly. Use trust=\"verified\" for correctness-critical, "
-                "irreversible, outward-facing, or security / data-loss / money / "
-                "auth work; trust=\"self\" (L5) for low-stakes mechanical or "
-                "greenfield work. \"auto\" has no gate of its own (the server "
-                "cannot judge criticality), so the orchestrator decides."
-            ),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
+        return {"refusal": (
+            "Trust is \"auto\" — pick per task by criticality and pass it "
+            "explicitly. Use trust=\"verified\" for correctness-critical, "
+            "irreversible, outward-facing, or security / data-loss / money / "
+            "auth work; trust=\"self\" (L5) for low-stakes mechanical or "
+            "greenfield work. \"auto\" has no gate of its own (the server "
+            "cannot judge criticality), so the orchestrator decides."
+        ), "bootstrap_note": None}
     if trust not in ("verified", "self"):
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": (
-                f"Trust dial \"{trust}\" is unknown — run refused. Accepted: "
-                "\"verified\" (your verify command is the gate) or \"self\" "
-                "(L5 full trust — the delegate's own suite is the gate; "
-                "verify optional). Intermediate levels are a parked design."
-            ),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
+        return {"refusal": (
+            f"Trust dial \"{trust}\" is unknown — run refused. Accepted: "
+            "\"verified\" (your verify command is the gate) or \"self\" "
+            "(L5 full trust — the delegate's own suite is the gate; "
+            "verify optional). Intermediate levels are a parked design."
+        ), "bootstrap_note": None}
+
+    # --- Precondition: the gate expectation must be satisfiable ---
+    # The self-gate ratchet exists to force the preflight RED (an already-green
+    # suite proves nothing about the delta), so declaring "green" against a gate
+    # generated for that purpose asks for a contradiction -- and would land as a
+    # pass that proves nothing, with the one flag that says so switched off.
+    if preflight_expect == "green" and trust == "self" and not verify:
+        return {"refusal": (
+            "preflight_expect=\"green\" contradicts trust=\"self\" with no "
+            "verify command: the server-generated gate ratchets its test "
+            "count precisely so the preflight comes back RED. Pass your own "
+            "`verify` for revision work, or drop preflight_expect."
+        ), "bootstrap_note": None}
 
     # --- Precondition: git repo ---
-    guard_on = is_git_repo(cwd)
-    if not guard_on:
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": nongit_refusal(cwd),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
+    if not is_git_repo(cwd):
+        return {"refusal": nongit_refusal(cwd), "bootstrap_note": None}
 
     # --- Bootstrap rules file ---
     bootstrap_note = None
@@ -272,16 +663,8 @@ def delegate(args):
     if rules_state != "ok":
         cmd, path = bootstrap_worker_rules(cwd)
         if not path:
-            return {
-                "status": "refused",
-                "session_id": None,
-                "trail": [],
-                "result_text": bootstrap_failed_refusal(cwd, "IO error"),
-                "denials": [],
-                "max_iter": max_iter,
-                "last_verify": None,
-                "ctx": {},
-            }
+            return {"refusal": bootstrap_failed_refusal(cwd, "IO error"),
+                    "bootstrap_note": None}
         bootstrap_note = bootstrap_notice(cmd, path) + " " + graph.bootstrap_line()
         # First delegation in a repo is also the first on a NEW MACHINE, and the
         # settings that decide whether a run comes back whole do not travel with
@@ -297,20 +680,135 @@ def delegate(args):
     # --- Precondition: no dirty protected spec ---
     pre_dirty = violated_specs(cwd)
     if pre_dirty:
-        return {
-            "status": "refused",
-            "session_id": None,
-            "trail": [],
-            "result_text": (
-                f"STATUS: error\nUncommitted changes in protected spec file(s): "
-                f"{', '.join(pre_dirty)}\n\nCommit or stash the spec changes first, "
-                f"then delegate."
-            ),
-            "denials": [],
-            "max_iter": max_iter,
-            "last_verify": None,
-            "ctx": {},
-        }
+        return {"refusal": (
+            f"STATUS: error\nUncommitted changes in protected spec file(s): "
+            f"{', '.join(pre_dirty)}\n\nCommit or stash the spec changes first, "
+            f"then delegate."
+        ), "bootstrap_note": bootstrap_note}
+
+    return {"refusal": None, "bootstrap_note": bootstrap_note}
+
+
+def delegate(args):
+    """Single-candidate delegation loop.
+
+    Returns dict with keys:
+        status, session_id, trail, result_text, denials,
+        max_iter, last_verify, ctx
+    """
+    # The T0 byte-snapshot lives in a per-run tempdir so a revert can restore
+    # what the tree actually held at T0 (see snapshot_contents).
+    t0_dir = tempfile.mkdtemp(prefix="qd-t0-")
+    try:
+        return _delegate(args, t0_dir)
+    finally:
+        shutil.rmtree(t0_dir, ignore_errors=True)
+
+
+def _delegate(args, t0_dir):
+    # --- Preconditions (U5.2: also runnable pre-spawn, see precheck) ---
+    # Run FIRST when the server has not already run them: resolve_call's
+    # amend=True pass below WRITES the amendment, and a run any precondition
+    # refuses must not have edited the caller's document. When the server did
+    # precheck, the result rides in on PRECHECK_ARG and is NOT recomputed --
+    # the bootstrap step writes a file, and running it twice would drop the
+    # notice that says so.
+    pre = args.get(PRECHECK_ARG)
+    if not isinstance(pre, dict) or pre.get("token") != _PRECHECK_TOKEN:
+        pre = precheck(args)
+    if pre.get("refusal"):
+        return _refusal(pre["refusal"])
+    bootstrap_note = pre.get("bootstrap_note")
+
+    # U5.5 + U6: the stored brief, then the amendment (written exactly once,
+    # here), then the playbook -- resolved before anything reads an argument.
+    # Idempotent with the server's precheck pass, which resolves its own copy.
+    args, refusal = resolve_call(args, amend=True)
+    if refusal:
+        return _refusal(refusal)
+    if args.get("chain") and args.get("_brief"):
+        # A single-run path cannot execute links. Reachable only when a stored
+        # or directly-passed brief compiles to a chain outside the server seam
+        # (e.g. retry_of a document later edited to chain: true).
+        return _refusal(
+            "this brief compiles to a chain (`chain: true`) -- submit it as "
+            "its own qwen_delegate call so the server runs the links; "
+            "retry_of replays one link, never a document.")
+    task = args["task"]
+    cwd = args["cwd"]
+    verify = args.get("verify")
+
+    # --- Config (project > machine) ---
+    # Read FIRST: U5.6 makes it the source of a project's standing defaults,
+    # so every resolution below can consult it. It still lands before the
+    # pre-flight, which is what the verify budget needs.
+    cfg = dict(_global_config())
+    cfg.update(_project_config(cwd))
+
+    # U5.6 recipe defaults: a project states its standing preferences once in
+    # .qwen-delegate.json instead of every call repeating them. Call args
+    # always win -- the config is what a call FALLS BACK to, never what
+    # overrides it.
+    approval_mode = args.get("approval_mode") or cfg.get("approval_mode") \
+        or "auto-edit"
+    shell_allow = args.get("shell_allow") or cfg.get("shell_allow")
+    # Default: project config, else 3; clamped 1..10 -- the schema has promised
+    # both since v1, and the engine port had silently dropped them.
+    max_iter = (args.get("max_iterations")
+                or _project_config(cwd).get("max_iterations")
+                or _DEFAULT_MAX_ITER)
+    try:
+        max_iter = max(1, min(10, int(max_iter)))
+    except (TypeError, ValueError):
+        max_iter = _DEFAULT_MAX_ITER
+    # U4.2: a report is ONE look at the tree. A second attempt would be the
+    # worker trying to turn the gate green, which is the exact behavior this
+    # param exists to switch off -- so the budget is clamped here rather than
+    # asked of the caller, and no retry-prompt branch below can be reached.
+    report = bool(args.get("report_dont_fix"))
+    if report:
+        max_iter = 1
+    timeout = args.get("timeout_sec") or cfg.get("timeout_sec") \
+        or _DEFAULT_TIMEOUT
+    if timeout:
+        timeout = max(30, min(7200, int(timeout)))
+    else:
+        timeout = _DEFAULT_TIMEOUT
+    session_id = args.get("session_id")
+    # "refuse" is the default: compaction is the documented fabrication trigger, so a
+    # run that reaches it has already exceeded what one delegation can hold honestly.
+    # Continuing on a summarised history -- reinject or discard -- buys a result whose
+    # provenance nobody can vouch for. Stopping hands the call back to the orchestrator,
+    # which can split the task; that is the only fix that addresses the cause.
+    on_compaction = args.get("on_compaction") or "refuse"
+    if on_compaction not in ("refuse", "reinject", "discard"):
+        on_compaction = "refuse"
+    worktree_mode = args.get("worktree")
+    touch_scope = args.get("touch_scope")
+    # U3.2: what the gate is expected to say BEFORE the worker runs. "red"
+    # (greenfield) refuses a gate that already passes; "green" (revision work)
+    # stops the preflight demotion crying wolf on every task whose suite is
+    # green by definition. An unrecognised value falls back to today's behavior
+    # rather than refusing -- same policy as on_compaction, and the schema enum
+    # is the front line.
+    preflight_expect = (args.get("preflight_expect")
+                        or cfg.get("preflight_expect") or "any")
+    if preflight_expect not in ("red", "green", "any"):
+        preflight_expect = "any"
+    # U5.1: the shape the caller needs OUT of the run. A non-object is treated
+    # as absent rather than refused -- the schema belongs to the caller, and a
+    # malformed one must not cost a delegation that would otherwise be fine.
+    result_schema = args.get("result_schema")
+    if not isinstance(result_schema, dict):
+        result_schema = None
+
+    # Past the precheck (top of this function) this is a fact, not a
+    # question: a non-repo cwd was refused there.
+    guard_on = True
+    trust = (args.get("trust")
+             or _project_config(cwd).get("trust")
+             or _global_config().get("trust")
+             or "self")
 
     # --- Resolve executor profile ---
     profile = resolve(cwd, args.get("executor"))
@@ -322,6 +820,36 @@ def delegate(args):
         wt = worktrees.acquire(cwd)
         work_cwd = wt["path"]
 
+    def refuse(text):
+        """Refuse from PAST the worktree acquisition.
+
+        The preconditions above run before any container exists; the gate
+        refusals below do not, and returning straight out of one would leave
+        the worktree and its branch behind for every refused run.
+        """
+        if wt is not None:
+            worktrees.release(cwd, wt["path"], wt["branch"])
+        return _refusal(text, max_iter)
+
+    # U3.1: arg > config > 300, clamped 10..3600. The floor is what keeps a
+    # mistyped budget from turning every gate into a timeout refusal; the
+    # ceiling is an hour, past which the timeout_sec kill lands first anyway.
+    verify_timeout = (args.get("verify_timeout_sec")
+                      or cfg.get("verify_timeout_sec")
+                      or _DEFAULT_VERIFY_TIMEOUT)
+    try:
+        verify_timeout = max(10, min(3600, int(verify_timeout)))
+    except (TypeError, ValueError):
+        verify_timeout = _DEFAULT_VERIFY_TIMEOUT
+
+    # U3.3, opt-in per call (default off until probe P7). The segment list is a
+    # project decision -- what a repo calls its fixture directory varies -- so
+    # the config value replaces the defaults rather than extending them.
+    fixture_provenance = bool(args.get("fixture_provenance"))
+    fixture_segments = cfg.get("fixture_globs") or _FIXTURE_SEGMENTS
+    if not isinstance(fixture_segments, (list, tuple)):
+        fixture_segments = _FIXTURE_SEGMENTS
+
     # --- trust="self" (R3): server-generated gate over the delegate's own suite ---
     self_gate = trust == "self" and not verify
     if self_gate:
@@ -331,13 +859,37 @@ def delegate(args):
     _, pre_sha_full = git(work_cwd, "rev-parse", "HEAD")
     pre_status = snapshot(work_cwd)
     pre_clean = not pre_status
+    # T0 byte contents of every dirty path: a revert must restore what the tree
+    # HELD at T0, not what HEAD holds -- checkout-from-sha destroyed pre-run
+    # caller edits (and staged the destruction).
+    t0_saved = snapshot_contents(work_cwd, pre_status, t0_dir)
+    # Tracked at T0, for the touch-scope classifier. `ls-files` answers
+    # "tracked NOW": a worker that creates a file and `git add`s it would turn
+    # its own new file into a pre-existing-file violation whose revert-from-sha
+    # then silently no-ops.
+    rc_t, out_t = git(work_cwd, "ls-tree", "-r", "--name-only",
+                      pre_sha_full or "HEAD")
+    pre_tracked = set(out_t.splitlines()) if rc_t == 0 and out_t else set()
+
+    # U6: the brief document is protected by CONTENT, not by the spec guard's
+    # base diff -- the amendment dirties it before the run, and a diff against
+    # the pre-run sha would convict the amendment as a worker edit on every
+    # attempt. Captured right after the T0 snapshot so a revert restores the
+    # AMENDED bytes (dirty path) or the HEAD content (clean worktree copy).
+    brief_meta = args.get("_brief") if isinstance(args.get("_brief"), dict) \
+        else None
+    brief_rel = (brief_meta or {}).get("path")
+    brief_sha0 = file_sha(work_cwd, brief_rel) if brief_rel else None
 
     # --- Pre-flight verify ---
     preflight = None
     preflight_out = ""
+    gate_ms = 0
+    gate_timed_out = False
     self_min = None
     if verify:
-        preflight, preflight_out = _run_verify(verify, work_cwd)
+        preflight, preflight_out, gate_ms, gate_timed_out = _run_verify_timed(
+            verify, work_cwd, verify_timeout)
         if self_gate and preflight:
             # Incremental ratchet: an existing suite is already green, so this
             # gate proves nothing -- and every later feature would read as
@@ -351,10 +903,43 @@ def delegate(args):
                                preflight_out or ""))
             self_min = n + 1
             verify = _ensure_self_gate(work_cwd, min_override=self_min)
-            preflight, preflight_out = _run_verify(verify, work_cwd)
+            preflight, preflight_out, gate_ms, gate_timed_out = \
+                _run_verify_timed(verify, work_cwd, verify_timeout)
+
+    # U3.1: fail fast. The same command runs after every attempt, so a gate that
+    # cannot finish inside its budget has already decided the run -- left alone
+    # it burns max_iter attempts of free tokens and then reports its own timeout
+    # as the worker's failure (measured: a good delivery filed as gate_suspect).
+    if gate_timed_out:
+        return refuse(
+            f"GATE UNUSABLE: the verify command timed out after "
+            f"{verify_timeout}s BEFORE the worker ran -- fix the gate or raise "
+            f"verify_timeout_sec; every retry would pay this."
+        )
+
+    # U3.2: a gate declared red that comes back green cannot prove anything the
+    # run does. Refusing here costs nothing; discovering it afterwards costs a
+    # whole delegation and hands back a pass nobody can read.
+    if preflight and preflight_expect == "red":
+        return refuse(
+            "GATE VACUOUS: preflight already passes and preflight_expect="
+            "\"red\" -- the gate cannot prove the work happened. Tighten the "
+            "gate or drop preflight_expect."
+        )
 
     # --- Refs snapshot (pre-run) ---
     refs_before = refs.snapshot(cwd)
+
+    # U5.6: the project's standing instruction, appended to the task itself so
+    # it rides every path the task rides -- the first prompt, and the
+    # compaction re-injections that re-send the task verbatim. A briefing
+    # discipline every task in the repo has to repeat is a discipline the
+    # caller pays for on every call; this is where it belongs. Kept out of the
+    # STORED brief (U5.5), which would otherwise stack a copy per retry.
+    base_task = task
+    task_suffix = cfg.get("task_suffix")
+    if isinstance(task_suffix, str) and task_suffix.strip():
+        task = f"{task}\n\n---\n{task_suffix.strip()}"
 
     # --- Shell feedback prefix ---
     feedback = (args.get("shell_feedback") or "").strip()
@@ -403,14 +988,51 @@ def delegate(args):
         "cost_usd": 0.0,
         "executor": args.get("executor"),
         "trust": trust,
+        "unrestorable": [],
+        # C10 attribution. Empty + "none" is the honest reading of a run with
+        # no evidence channel, and every consumer renders nothing for it.
+        "writes": [],
+        "attribution": "none",
+        "scope_unattributed": [],
+        "spec_unattributed": [],
+        # C3 gate hygiene: what the gate cost, what budget it had, and what the
+        # caller said it should say beforehand.
+        "gate_ms": gate_ms,
+        "verify_timeout_sec": verify_timeout,
+        "preflight_expect": preflight_expect,
+        # A pre-flight past half the budget is paid AGAIN by every attempt: at
+        # max_iter 3 the gate alone can outlast the work it is grading.
+        "gate_slow": bool(verify) and gate_ms > verify_timeout * 500,
+        # U5.5: this run is a corrected re-run of another session, started cold.
+        "retry_of": args.get("retry_of"),
+        # U6: which document briefed this run -- the receipt names it and the
+        # ledger groups by it. None whenever no brief_file was involved.
+        "brief": brief_meta,
+        # C3 features (U4.1/U4.2/U4.3): every one of these renders nothing when
+        # its param was never passed.
+        "report": report,
+        "findings": None,
+        "strays": [],
+        "dodge": {},
+        "fixtures_unproven": [],
+        # U5.1: the conforming result block (verbatim) and, when it did not
+        # conform, what was wrong with it.
+        "result_json": None,
+        "result_errors": [],
     }
+    chain = args.get(CHAIN_ARG)
+    if isinstance(chain, dict):
+        ctx["chain"] = {"pos": chain.get("pos"), "of": chain.get("of")}
+    # U5.2: the submitted run's id, so the completion record can be paired with
+    # the `running` record the submit wrote. Absent for a direct engine call --
+    # then nothing was ever left open to pair with.
+    if args.get(RUN_ID_ARG):
+        ctx["run_id"] = args[RUN_ID_ARG]
 
     # --- Live limits (config: project > machine > builtin) ---
     # Both are ceilings on how wrong a run may go before we stop paying for it,
     # and both are off the gate's critical path: neither can turn a failing run
     # green, only end one early.
-    cfg = dict(_global_config())
-    cfg.update(_project_config(cwd))
     budget = cfg.get("burn_budget", _DEFAULT_BURN_BUDGET)
     try:
         budget = int(budget or 0)
@@ -424,15 +1046,98 @@ def delegate(args):
     ctx["burn_budget"] = budget
     ctx["stall_after"] = stall_after
 
+    # U4.4/C11 heartbeat. Wired ONLY alongside the burn limit, never on its own:
+    # run_executor switches to stream-json for any on_line, and the streaming
+    # adapter emits no `stats` -- so a heartbeat attached to a burn_budget=0 run
+    # would silently cost it the tool counts and the bySource token split that
+    # batch mode is kept for. The sidecar lands in the SUBMIT cwd, not the
+    # work tree: the poller was handed <cwd>/.qwen-delegate/progress.json at
+    # submit time, and a worktree run's pulse written inside its container is
+    # a heartbeat nobody is watching. runlog_dir's self-ignoring .gitignore
+    # keeps it out of the guards' view of the caller's tree.
+    progress = None
+    if burn:
+        runlog_dir(cwd)
+        progress = limits.Progress(cwd, session_id=session_id)
+    on_line = limits.compose(burn, progress) if burn else None
+
+    # U1.4: run auto-edit as yolo + the PreToolUse hook so attribution exists
+    # outside scoped mode. Default ON (probe P1, 2026-07-29: confirmed behaviorally
+    # free -- same outcome/gate as plain auto-edit, only adds the C10 attribution
+    # log; ~1s overhead). Opt out per-project with "autoedit_via_hook": false.
+    # Off, run_executor is called exactly as before -- argv and env byte-identical.
+    observe_hook = (cfg.get("autoedit_via_hook", True)
+                    and approval_mode == "auto-edit")
+    # Whether ANY channel can say "the worker wrote this". Without one, a
+    # changed file is just a changed file -- the guards below must not accuse.
+    hooked = approval_mode == "scoped" or observe_hook
+
     trail = []
     result_text = ""
     denials = []
+    denials_all = []
+    blocked_all = []
+    writes_all = []
+    allowed_all = []
     last_verify = None
     prev_v_out = None
 
+    def schema_gate(attempt, note):
+        """U5.1: check the result contract on an attempt that would otherwise
+        END the loop, and record `note` as that attempt's trail line.
+
+        Only on an ending attempt, never beside a red gate: the gate is the
+        stronger signal, and replacing its output with a complaint about a
+        JSON block would spend the retry on the formatting instead of the bug.
+        Returns "ok" | "retry" | "stop".
+        """
+        nonlocal prompt
+        if result_schema is None:
+            trail.append(f"attempt {attempt}: {note}")
+            return "ok"
+        value, raw, err = jsonschema.last_json_block(result_text)
+        errors = [err] if err else jsonschema.validate(value, result_schema)
+        ctx["result_errors"] = errors
+        ctx["result_json"] = None if errors else raw
+        if not errors:
+            trail.append(f"attempt {attempt}: {note}")
+            return "ok"
+        trail.append(f"attempt {attempt}: {note}; RESULT SCHEMA invalid -- "
+                     + "; ".join(errors[:3]))
+        if attempt >= max_iter:
+            return "stop"
+        # Fed back like a red gate, and for the same reason: the worker can
+        # only fix what it is told by name. Every violation is listed with its
+        # path, and the schema is repeated so the reply does not depend on the
+        # worker remembering a suffix from several turns ago.
+        prompt = (
+            "Your reply is missing a usable result block. Each of these must "
+            "be fixed:\n\n"
+            + "\n".join(f"- {e}" for e in errors)
+            + "\n\nThe work itself is not in question here -- do not change "
+              "the code. Re-send your reply ending with a fenced ```json "
+              "block that conforms to this schema:\n\n"
+            + json.dumps(result_schema, indent=2)
+        )
+        return "retry"
+
     for attempt in range(1, max_iter + 1):
         suffix = HANDOFF_SUFFIX if (attempt == 1 or send_suffix) else ""
+        if report and suffix:
+            # Asked for beside the handoff lines, not instead of them: the
+            # findings line is the deliverable, and it rides the same
+            # machine-read tail the parser already reads.
+            suffix += FINDINGS_SUFFIX
+        if result_schema is not None and suffix:
+            # Rides the same suffix: it is asked for once up front and again
+            # after a compaction, which are exactly the moments the worker has
+            # no other way to learn what shape its answer must take.
+            suffix += jsonschema.schema_suffix(result_schema)
         send_suffix = False
+        if progress is not None:
+            # Records alone cannot tell a poller attempt 3 of 3 from an attempt
+            # 1 that wedged.
+            progress.attempt = attempt
 
         # --- Invoke executor ---
         compaction_before = compaction_counts(session_id)
@@ -440,25 +1145,57 @@ def delegate(args):
             profile, prompt, work_cwd, approval_mode,
             timeout=timeout, session_id=session_id,
             verify=verify,
-            shell_allow=args.get("shell_allow"),
+            shell_allow=shell_allow,
             suffix=suffix,
             compaction_policy=on_compaction,
-            on_line=burn,
+            on_line=on_line,
             stall_after=stall_after,
+            observe_hook=observe_hook,
         )
 
-        ctx["meta"] = meta or {}
-        ctx["peak"] = max(ctx.get("peak", 0), (meta or {}).get("peak", 0))
-        accum_stats(ctx["cum"], (meta or {}).get("stats"))
+        meta = meta or {}
+        # Accumulate across attempts: every QGATE log is fresh per attempt, so
+        # binding only the last one silently drops earlier attempts' evidence
+        # -- and for the write log that means un-attributing real worker edits.
+        for b in meta.get("blocked") or []:
+            if b not in blocked_all:
+                blocked_all.append(b)
+        for w in meta.get("writes") or []:
+            if w not in writes_all:
+                writes_all.append(w)
+        for a in meta.get("allowed") or []:
+            if a not in allowed_all:
+                allowed_all.append(a)
+        for d in denials or []:
+            if d not in denials_all:
+                denials_all.append(d)
+        meta["blocked"] = list(blocked_all)
+        meta["writes"] = list(writes_all)
+        meta["allowed"] = list(allowed_all)
+        ctx["meta"] = meta
+        ctx["writes"] = _repo_relative(writes_all, work_cwd)
+        ctx["attribution"] = "hook" if hooked else "none"
+        ctx["peak"] = max(ctx.get("peak", 0), meta.get("peak", 0))
+        accum_stats(ctx["cum"], meta.get("stats"))
 
         if sid:
             session_id = sid
+            if progress is not None:
+                # A cold run only learns its session here, and a sidecar whose
+                # session stays null is a heartbeat nobody can match to a run.
+                progress.session_id = sid
             if sid not in ctx["sessions"]:
                 ctx["sessions"].append(sid)
 
         # --- Executor error ---
         if err:
             trail.append(f"attempt {attempt}: {err}")
+            if "run stopped:" in err:
+                # A stopped run's output is exactly what was not graded; on
+                # attempt 2+ result_text still holds the PREVIOUS attempt's
+                # prose, which must not present under STATUS: stopped (mirror
+                # of the compaction clear below).
+                result_text = ""
             break
 
         # --- Compaction, under the refuse policy: stop, do not retry ---
@@ -483,8 +1220,25 @@ def delegate(args):
 
         # --- Spec guard ---
         cheated = violated_specs(work_cwd, base=pre_sha_full)
+        if cheated and hooked:
+            # Co-work (C10): a protected spec that moved with no logged worker
+            # write is somebody ELSE's edit -- reverting it is how a caller's
+            # concurrent work got destroyed. Report and leave it, at the cost
+            # of a gate whose definition of correct changed under the run,
+            # which the receipt has to say out loud.
+            attributed = ctx.get("writes") or []
+            fresh = [p for p in cheated if p not in attributed
+                     and p not in ctx["spec_unattributed"]]
+            ctx["spec_unattributed"] += fresh
+            if fresh:
+                trail.append(
+                    f"attempt {attempt}: SPEC CHANGED (unattributed) -- "
+                    f"{', '.join(fresh)} differs from its pre-run state with no "
+                    f"logged worker write; NOT reverted"
+                )
+            cheated = [p for p in cheated if p in attributed]
         if cheated:
-            revert_specs(work_cwd, cheated, base=pre_sha_full)
+            revert_specs(work_cwd, cheated, base=pre_sha_full, t0=t0_saved)
             names = ", ".join(cheated)
             trail.append(
                 f"attempt {attempt}: SPEC VIOLATION -- edited {names} (auto-reverted)"
@@ -514,12 +1268,53 @@ def delegate(args):
                 continue
             break
 
-        # --- No verify: unverified success ---
-        if not verify:
-            trail.append(f"attempt {attempt}: no verify supplied")
-            break
+        # --- Brief protection (U6) ---
+        # Compared by CONTENT against the post-amendment capture, with the
+        # spec guard's C10 attribution split: an unattributed change is a
+        # caller's edit on the same tree -- reported, never reverted.
+        if brief_rel:
+            brief_edited = file_sha(work_cwd, brief_rel) != brief_sha0
+            if brief_edited and hooked \
+                    and brief_rel not in (ctx.get("writes") or []):
+                if brief_rel not in ctx["spec_unattributed"]:
+                    ctx["spec_unattributed"].append(brief_rel)
+                    trail.append(
+                        f"attempt {attempt}: PLAYBOOK CHANGED (unattributed) "
+                        f"-- {brief_rel} differs from its pre-run content "
+                        f"with no logged worker write; NOT reverted")
+                brief_edited = False
+            if brief_edited:
+                restore_paths(work_cwd, [brief_rel], base=pre_sha_full,
+                              t0=t0_saved)
+                trail.append(f"attempt {attempt}: PLAYBOOK EDITED -- "
+                             f"{brief_rel} (auto-reverted)")
+                if attempt < max_iter:
+                    prompt = (
+                        f"You edited the brief document ({brief_rel}). That "
+                        f"file defines the task you were given and has been "
+                        f"reverted. Never modify the brief: do the work it "
+                        f"describes, and if you believe the brief is wrong, "
+                        f"stop and say so instead of editing it."
+                    )
+                    if was_compacted_since_ack(session_id):
+                        ack_compaction(session_id)
+                        send_suffix = True
+                        if on_compaction == "discard":
+                            ctx["discards"] += 1
+                            session_id = None
+                        else:
+                            ctx["reinjects"] += 1
+                        prompt += (
+                            f"\n\nYour conversation history was summarised "
+                            f"(compacted), so you may have lost the original "
+                            f"instructions and any summary of your earlier "
+                            f"work may be inaccurate. Re-read the files; do "
+                            f"not reconstruct it.\n\nOriginal task:\n{task}"
+                        )
+                    continue
+                break
 
-        # --- C8 prefilter (advisory) — after executor, before gate ---
+        # --- Post snapshot (shared by touch scope + C8 prefilter) ---
         post_snap = snapshot(work_cwd)
         changed = [
             p for p in set(list(post_snap.keys()) + list(pre_status.keys()))
@@ -527,17 +1322,30 @@ def delegate(args):
         ]
 
         # --- Touch scope check (M4 seam 2) ---
+        # BEFORE the no-verify break: the scope promise holds whether or not a
+        # gate was supplied (it used to be silently unenforced without one).
         if touch_scope is not None and changed:
+            attributed = ctx.get("writes") or []
             violated_paths = []
             for p in changed:
                 if p in touch_scope:
                     continue
-                rc, _ = git(work_cwd, "ls-files", "--error-unmatch", p)
-                if rc != 0:
+                if p not in pre_tracked:
+                    continue  # new files are always allowed
+                if hooked and p not in attributed:
+                    # C10: the worker never wrote this one, so it is the
+                    # caller's (or an agent of theirs) work on the same tree.
+                    # Recorded, never reverted, never fails the attempt.
+                    if p not in ctx["scope_unattributed"]:
+                        ctx["scope_unattributed"].append(p)
                     continue
                 violated_paths.append(p)
             if violated_paths:
-                revert_specs(work_cwd, violated_paths, base=pre_sha_full)
+                _, unrestored = restore_paths(
+                    work_cwd, violated_paths, base=pre_sha_full, t0=t0_saved)
+                for p in unrestored:
+                    if p not in ctx["unrestorable"]:
+                        ctx["unrestorable"].append(p)
                 names = ", ".join(violated_paths)
                 trail.append(
                     f"attempt {attempt}: TOUCH SCOPE VIOLATION -- edited {names} outside scope (auto-reverted)"
@@ -566,6 +1374,51 @@ def delegate(args):
                     continue
                 break
 
+        # --- Fixture provenance (U3.3) ---
+        # Beside the other guards, BEFORE the no-verify break: a fixture with no
+        # traceable source is a defect whether or not a gate was supplied -- and
+        # the gate is the thing least able to catch it, since it was very likely
+        # written against those same bytes.
+        if fixture_provenance:
+            fixtures = _fixture_files(
+                _created(work_cwd, changed, pre_status, pre_tracked,
+                         ctx.get("writes"), hooked),
+                fixture_segments)
+            bad = _unproven_fixtures(work_cwd, fixtures)
+            ctx["fixtures_unproven"] = bad
+            if bad:
+                names = ", ".join(bad)
+                trail.append(
+                    f"attempt {attempt}: FIXTURE PROVENANCE -- {names} lack "
+                    f"{_PROVENANCE_HEADER} provenance"
+                )
+                if attempt < max_iter:
+                    # No compaction rider here (unlike the spec/scope prompts):
+                    # this instruction names every file and the exact line to
+                    # add, so it stands on its own without the task re-injected.
+                    prompt = (
+                        f"These fixture files carry no provenance: {names}. A "
+                        f"fixture nobody can trace is indistinguishable from an "
+                        f"invented one, and a gate written against invented "
+                        f"bytes passes forever. Add this line to each, within "
+                        f"the first 10 lines:\n\n"
+                        f"{_PROVENANCE_HEADER} <url or command> <date>\n\n"
+                        f"For a BINARY fixture, put that line first in a "
+                        f"sibling <path>.src file instead. Do not invent a "
+                        f"source: if you generated the data, say so and say "
+                        f"with what."
+                    )
+                    continue
+                break
+
+        # --- No verify: unverified success ---
+        if not verify:
+            action = schema_gate(attempt, "no verify supplied")
+            if action == "retry":
+                continue
+            break
+
+        # --- C8 prefilter (advisory) — after executor, before gate ---
         qwen_files = [p for p in changed if "_qwen." in p]
         prefilter_out = None
         prefilter_failed = False
@@ -592,12 +1445,23 @@ def delegate(args):
         if self_gate:
             # overwrite any worker edit to the gate, keeping the ratcheted bar
             _ensure_self_gate(work_cwd, min_override=self_min)
-        passed, v_out = _run_verify(verify, work_cwd)
+        passed, v_out, _, _ = _run_verify_timed(verify, work_cwd, verify_timeout)
+
+        if report:
+            # On a report run the gate output IS the deliverable: red is the
+            # reproduction the caller asked for, green is the evidence that the
+            # reported problem does not reproduce here. Kept on BOTH colors,
+            # because the ordinary path saves it only on failure and would
+            # otherwise hand back a report with its findings missing.
+            last_verify = v_out
+            ctx["report_gate_green"] = passed
 
         if passed:
-            trail.append(f"attempt {attempt}: VERIFY PASS")
             if prefilter_failed:
                 ctx["notes"] = "self-tests failing"
+            action = schema_gate(attempt, "VERIFY PASS")
+            if action == "retry":
+                continue
             break
 
         trail.append(f"attempt {attempt}: verify failed")
@@ -639,30 +1503,122 @@ def delegate(args):
                     session_id = None
             continue
 
+    if progress is not None:
+        # A run that ended leaves its last "running" snapshot on disk forever
+        # otherwise, and a poller cannot tell that from a run still going.
+        progress.finish()
+
     # --- Determine status ---
     if not trail:
         status = "error"
     elif trail[-1].endswith(": VERIFY PASS"):
         status = "success"
+    elif "RESULT SCHEMA invalid" in trail[-1]:
+        # U5.1: the work may well be fine -- the gate on that line says so --
+        # but the machine-read result the caller asked for is not consumable,
+        # and a green status would hand back a promise this run did not keep.
+        status = "result_invalid"
     elif "run stopped:" in trail[-1]:
         status = "stopped"
     elif "COMPACTION" in trail[-1].upper():
         status = "compaction_refused"
     elif "SPEC VIOLATION" in trail[-1].upper():
         status = "spec_violation"
+    elif "PLAYBOOK EDITED" in trail[-1]:
+        # U6: same offence class as a spec edit -- the worker rewrote the
+        # document that defines its own task -- so C3 gains no new status.
+        status = "spec_violation"
+    elif "TOUCH SCOPE VIOLATION" in trail[-1]:
+        status = "scope_violation"
     elif "IDENTICAL to preflight" in trail[-1]:
         status = "gate_suspect"
+    elif "FIXTURE PROVENANCE" in trail[-1]:
+        status = "fixture_unproven"
     elif "no verify supplied" in trail[-1]:
         status = "unverified"
     else:
         status = "verify_failed"
 
+    # U4.2: a report run's status says what it IS, not what the gate said --
+    # a red gate here is the deliverable, and "verify_failed" would read as the
+    # worker having failed at a job it was told not to do. Only the gate-outcome
+    # statuses are overridden: a stopped, compacted or fixture-unproven run
+    # really did end for that reason, and calling it "reported" would hide it.
+    # Note: `reported` is neither ok nor stopped, so the LEDGER line counts it
+    # in the red bucket -- accepted, since a report IS an open problem.
+    if report and status in ("success", "success_but_preflight_passed",
+                             "verify_failed", "gate_suspect", "unverified"):
+        status = "reported"
+
+    # U3.2 (decision 4): the demotion happens HERE, not at render time. Chains,
+    # the run log and every server-side consumer read this status, and a
+    # receipt-only demotion left all of them believing a vacuous pass was a
+    # clean success. Under a declared "green" preflight (revision work) there is
+    # nothing to demote: the gate was expected to pass beforehand and said so.
+    if status == "success" and preflight and preflight_expect != "green":
+        status = "success_but_preflight_passed"
+
+    # --- Tree facts (C3) ---
+    # Captured from the tree the run ACTUALLY used, and BEFORE the worktree
+    # commit/release below -- after it, the work is either committed (which
+    # reads as a false COMMITTED alarm) or deleted (nothing left to report).
+    # The renderer prefers these facts and only re-reads a tree when they are
+    # absent (the v1-ctx fallback).
+    try:
+        post_status = snapshot(work_cwd)
+        final_changed = sorted(
+            p for p in set(list(post_status.keys()) + list(pre_status.keys()))
+            if post_status.get(p) != pre_status.get(p))
+        ctx["tree_facts"] = {
+            "post_status": post_status,
+            "changed": final_changed,
+            "numstat": numstat_map(work_cwd),
+            "head_moved": committed_during_run(work_cwd, pre_sha_full),
+            "head_now": head_sha(work_cwd),
+            "pubs": new_public_symbols(work_cwd),
+        }
+        # U4.2/U4.3, captured from the same tree and the same moment as the
+        # facts above -- after a worktree run's commit/release there is nothing
+        # left to scan.
+        ctx["dodge"] = dodge_markers(work_cwd, pre_sha_full, pre_status)
+        ctx["strays"] = _strays(
+            _created(work_cwd, final_changed, pre_status, pre_tracked,
+                     ctx.get("writes"), hooked),
+            task, touch_scope)
+    except Exception:
+        ctx["tree_facts"] = None
+    ctx["work_cwd"] = work_cwd
+    # Extracted here rather than at render time so the one line a report run
+    # exists to produce survives the receipt's result-text truncation.
+    ctx["findings"] = parse_findings(result_text)
+
+    # U1.3: WHO moved HEAD. Scoped hard-denies `git commit` in the hook, so a
+    # moved HEAD there cannot be the worker's -- the receipt accused it anyway,
+    # once per co-working caller. Anywhere else nobody knows, and saying so
+    # beats guessing. "worker" is reserved for positive evidence we cannot yet
+    # produce (no channel reports a commit as the worker's).
+    ctx["head_moved_attribution"] = ("caller" if approval_mode == "scoped"
+                                     else "unknown")
+
+    # --- Advisory gates (U3.4) ---
+    # Placed here on purpose: after the tree facts (the gates may read the tree
+    # the run used) and BEFORE the worktree block, which either commits that
+    # tree or deletes it. Indicators only -- nothing below reads the results,
+    # the retry loop is already over, and the worker never sees a line of them.
+    if args.get("advisory_gates"):
+        ctx["advisory"], ctx["advisory_skipped"] = _run_advisory(
+            args["advisory_gates"], work_cwd, verify_timeout)
+
     # --- Worktree commit or release (M4 seam 1) ---
     if wt is not None:
-        if status == "success":
+        # A demoted run is still a run whose gate went green: moving the
+        # demotion into the engine (U3.2) would otherwise have started silently
+        # DELETING the work of every preflight-passed worktree run.
+        if status in ("success", "success_but_preflight_passed"):
             git(work_cwd, "add", "-A")
             git(work_cwd, "commit", "-m", f"qwen delegation {wt['branch']}")
-            ctx["worktree"] = {"path": wt["path"], "branch": wt["branch"]}
+            ctx["worktree"] = {"path": wt["path"], "branch": wt["branch"],
+                               "dirty": wt.get("dirty")}
             ctx["merge"] = worktrees.classify_merge(cwd, wt["branch"])
         else:
             worktrees.release(cwd, wt["path"], wt["branch"])
@@ -679,12 +1635,37 @@ def delegate(args):
     # --- Refs added ---
     ctx["refs_added"] = refs.added(refs_before, work_cwd)
 
+    # --- Stored brief (U5.5) ---
+    # Written post-run and only when a session exists, because the session id
+    # is the handle the caller is given back: `retry_of=<that id>` is how a
+    # corrected re-run finds this call again. The task stored is the one the
+    # caller sent (corrections included, the project's task_suffix not), so
+    # retries accumulate the corrections and never a stack of suffixes.
+    if session_id and cfg.get("store_briefs", True) is not False:
+        skip = {"task"}
+        used_doc = bool(args.get("brief_file")) and brief_meta is not None
+        if used_doc:
+            # U6: front-matter-supplied values are NOT frozen into the stored
+            # brief -- the document is the source of truth and a retry re-reads
+            # it; a stored copy would beat an edited document on every retry.
+            skip.update(brief_meta.get("filled") or ())
+        brief = {k: args[k] for k in BRIEF_KEYS
+                 if args.get(k) is not None and k not in skip}
+        # U6 (the quiet trap): with a brief_file the composed task IS the
+        # document -- storing it would make a retry inline the document twice
+        # (once re-read, once as the stored addendum). Store the caller's
+        # ORIGINAL task instead. A compiled chain link has no brief_file, so
+        # it stores its composed link task and retries as a plain run.
+        brief["task"] = brief_meta.get("addendum", "") if used_doc else base_task
+        brief["trust"] = trust
+        save_brief(cwd, session_id, brief)
+
     return {
         "status": status,
         "session_id": session_id,
         "trail": trail,
         "result_text": result_text,
-        "denials": denials,
+        "denials": denials_all,
         "max_iter": max_iter,
         "last_verify": last_verify,
         "ctx": ctx,
@@ -699,8 +1680,24 @@ def run(args):
     d = delegate(args)
     cwd = args["cwd"]
     in_tree = (args.get("worktree") or "off") != "auto"
+
+    # Refusals carry their explanation in result_text and an EMPTY ctx; the
+    # renderer needs a populated ctx, so routing them through it replaced every
+    # carefully-written refusal with "STATUS: error KeyError('cwd')" -- the
+    # caller never learned why the run was refused.
+    if d["status"] == "refused":
+        text = d["result_text"] or "refused"
+        if text.startswith("STATUS:"):
+            return text
+        return f"STATUS: refused\n\n{text}"
+
+    # A preflight-passed run is demoted by the engine now (U3.2); it still moved
+    # the tree, so it still earns a graph refresh -- keying on "success" alone
+    # would have quietly stopped refreshing for a whole class of runs.
+    green = d["status"] in ("success", "success_but_preflight_passed")
+    will_refresh = green and in_tree
     try:
-        d["ctx"]["graph_line"] = graph.graph_line(cwd)
+        d["ctx"]["graph_line"] = graph.graph_line(cwd, will_refresh=will_refresh)
     except Exception:
         pass
     receipt = render(
@@ -709,7 +1706,7 @@ def run(args):
         d["max_iter"], d["ctx"],
         last_verify=d["last_verify"],
     )
-    if d["status"] == "success" and in_tree:
+    if green and in_tree:
         try:
             post = snapshot(cwd)
             changed = [

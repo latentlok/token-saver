@@ -150,6 +150,134 @@ class NeverBreaksTheSession(Fixture):
         self.assertEqual(setup.plugin_version("/nonexistent"), "unknown")
 
 
+class ManagedBlock(Fixture):
+    """U5.3: the CLAUDE.md block is a MANAGED block -- it is how agents learn
+    what this plugin can do, and a capability that never reaches it goes
+    undiscovered. So it is rewritten from the template once per version.
+
+    Every claim below is about somebody else's file, which is why they are all
+    about restraint: no file or no markers is a no-op (installing the block is
+    the user's choice), the bytes outside the markers are preserved exactly,
+    and identical content is not written at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.proj = tempfile.mkdtemp()
+        self.path = os.path.join(self.proj, "CLAUDE.md")
+
+    def write(self, text):
+        with open(self.path, "w") as f:
+            f.write(text)
+
+    def read(self):
+        with open(self.path) as f:
+            return f.read()
+
+    def installed(self, version="0.0.1"):
+        """A CLAUDE.md with the user's own content around an OLD block."""
+        block = setup.template_block(version)
+        self.write(f"# My project\n\nMy own notes.\n\n{block}\n\nTrailing.\n")
+        return block
+
+    def test_the_template_still_carries_both_markers(self):
+        block = setup.template_block("9.9.9")
+        self.assertIsNotNone(block)
+        self.assertIn("qwen-delegate:begin", block.splitlines()[0])
+        self.assertIn("qwen-delegate:end", block.splitlines()[-1])
+
+    def test_the_block_is_version_stamped(self):
+        self.assertIn("<!-- v: 9.9.9 -->", setup.template_block("9.9.9"))
+        self.assertNotIn("{version}", setup.template_block("9.9.9"))
+
+    def test_a_version_bump_rewrites_the_installed_block(self):
+        old = self.installed("0.0.1")
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "updated")
+        self.assertIn("<!-- v: 9.9.9 -->", self.read())
+        self.assertNotIn("<!-- v: 0.0.1 -->", self.read())
+        self.assertNotEqual(old, setup.template_block("9.9.9"))
+
+    def test_running_twice_is_byte_identical_and_leaves_one_block(self):
+        self.installed("0.0.1")
+        setup.update_managed_block(self.proj, version="9.9.9")
+        first = self.read()
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "current")
+        self.assertEqual(self.read(), first)
+        self.assertEqual(first.count("qwen-delegate:begin"), 1)
+        self.assertEqual(first.count("qwen-delegate:end"), 1)
+
+    def test_an_unchanged_version_does_not_touch_the_file(self):
+        self.installed("9.9.9")
+        before = os.stat(self.path).st_mtime_ns
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "current")
+        self.assertEqual(os.stat(self.path).st_mtime_ns, before)
+
+    def test_the_users_own_content_is_preserved_byte_for_byte(self):
+        self.installed("0.0.1")
+        setup.update_managed_block(self.proj, version="9.9.9")
+        text = self.read()
+        self.assertTrue(text.startswith("# My project\n\nMy own notes.\n\n"))
+        self.assertTrue(text.endswith("\n\nTrailing.\n"))
+
+    def test_a_file_without_the_markers_is_left_alone(self):
+        # Not installing the block is a decision; installing one uninvited is
+        # not this hook's to make.
+        self.write("# Just my notes\n")
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "absent")
+        self.assertEqual(self.read(), "# Just my notes\n")
+
+    def test_a_half_marked_file_is_left_alone(self):
+        self.write("# Notes\n<!-- qwen-delegate:begin -->\nhalf a block\n")
+        before = self.read()
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "absent")
+        self.assertEqual(self.read(), before)
+
+    def test_no_claude_md_at_all_is_a_no_op(self):
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "absent")
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_a_block_at_the_very_end_without_a_newline_still_updates(self):
+        self.write("# Notes\n\n" + setup.template_block("0.0.1"))
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "updated")
+        self.assertTrue(self.read().startswith("# Notes\n\n"))
+        self.assertIn("<!-- v: 9.9.9 -->", self.read())
+
+    def test_an_unwritable_project_is_survivable(self):
+        # Rule 3 of this hook: it never raises. A session that cannot start
+        # because a directory is read-only is a far worse bug than a stale
+        # capability list.
+        self.installed("0.0.1")
+        os.chmod(self.proj, 0o555)
+        self.addCleanup(os.chmod, self.proj, 0o755)
+        self.assertEqual(
+            setup.update_managed_block(self.proj, version="9.9.9"), "absent")
+        self.assertIn("<!-- v: 0.0.1 -->", self.read())
+
+    def test_the_run_hook_refreshes_the_block_once_per_version(self):
+        self.installed("0.0.1")
+        cwd = os.getcwd()
+        os.chdir(self.proj)
+        self.addCleanup(os.chdir, cwd)
+        self.write(self.read())          # same content, new mtime baseline
+        setup.run()
+        self.assertIn(f"<!-- v: {setup.plugin_version()} -->", self.read())
+
+    def test_the_block_names_the_capabilities_it_is_the_only_surface_for(self):
+        # The U2.7 rule: a capability surfaces here as one line or as a receipt
+        # affordance -- never only in long-form docs.
+        block = setup.template_block("9.9.9")
+        for capability in ("wait", "retry_of", "result_schema", "WATCH",
+                           "brief_file", "touch_scope"):
+            self.assertIn(capability, block)
+
+
 class HookWiring(unittest.TestCase):
     """The hook file is the delivery mechanism; a typo in it means none of the
     above ever runs."""

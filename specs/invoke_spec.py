@@ -24,8 +24,9 @@ Port gate for v1's invoke_qwen/parse machinery plus the v2 seams. Load-bearing:
 
 Public surface pinned here:
     run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
-                 verify=None, shell_allow=None, suffix="")
-        -> (text, denials, session_id, err, meta)   # meta: {"peak","stats","blocked"}
+                 verify=None, shell_allow=None, suffix="", observe_hook=False)
+        -> (text, denials, session_id, err, meta)
+        # meta: {"peak","stats","blocked","writes","allowed"}
     parse_qwen_json, parse_stats, norm_tokens, accum_stats, cum_zero,
     tok_zero, tok_add, peak_context, context_window, compaction_thresholds,
     truncate
@@ -53,6 +54,16 @@ open(os.path.join(out, "env.json"), "w").write(json.dumps(dict(os.environ)))
 sp = os.environ.get("QWEN_CODE_SYSTEM_SETTINGS_PATH")
 if sp and os.path.isfile(sp):
     shutil.copy(sp, os.path.join(out, "settings.json"))
+# Stand in for scoped_hook.py writing its QGATE_* logs during the run: the
+# server can only read what the hook left behind in the per-run tempdir.
+for env_key, stub_key in (("QGATE_DENYLOG", "STUB_DENIED"),
+                          ("QGATE_WRITELOG", "STUB_WRITES"),
+                          ("QGATE_ALLOWLOG", "STUB_ALLOWED")):
+    target, payload = os.environ.get(env_key), os.environ.get(stub_key)
+    if target and payload:
+        with open(target, "a") as f:
+            for ln in json.loads(payload):
+                f.write(ln + "\n")
 if os.environ.get("STUB_SLEEP"):
     time.sleep(float(os.environ["STUB_SLEEP"]))
 # Streaming mode: one record per line, flushed, with a beat between them, so a
@@ -214,6 +225,75 @@ class SettingsMerge(Fixture):
         self.run_exec()
         env = self.recorded("env.json")
         self.assertFalse(os.path.exists(env["QWEN_CODE_SYSTEM_SETTINGS_PATH"]))
+
+
+class AttributionLogs(Fixture):
+    """C10/U1.1: the gated run exports the allow-side log paths and reads all
+    three back into meta. They are the only evidence the engine has for saying
+    'the worker wrote this one' -- and they live in a tempdir this function
+    deletes, so reading them late is reading nothing."""
+
+    def settings(self):
+        with open(os.path.join(self.out, "settings.json")) as f:
+            return json.load(f)
+
+    def gated_profile(self, writes=(), allowed=(), denied=()):
+        return self.profile(env={
+            "STUB_OUT": self.out, "STUB_STDOUT": RESULT_JSON,
+            "STUB_WRITES": json.dumps(list(writes)),
+            "STUB_ALLOWED": json.dumps(list(allowed)),
+            "STUB_DENIED": json.dumps(list(denied))})
+
+    def test_scoped_exports_both_allow_side_logs(self):
+        self.run_exec(mode="scoped", verify="make test")
+        env = self.recorded("env.json")
+        for key in ("QGATE_WRITELOG", "QGATE_ALLOWLOG"):
+            self.assertTrue(env.get(key), key)
+        self.assertEqual(env.get("QGATE_MODE"), "scoped")
+
+    def test_meta_carries_writes_and_allowed_back(self):
+        _, _, _, err, meta = self.run_exec(
+            mode="scoped",
+            profile=self.gated_profile(
+                writes=["/repo/a.py", "/repo/b.py", "/repo/a.py"],
+                allowed=["run_shell_command: graphify query x", "ungated:web"],
+                denied=["run_shell_command: rm x  (state-changing)"]))
+        self.assertIsNone(err)
+        self.assertEqual(meta["writes"], ["/repo/a.py", "/repo/b.py"])  # deduped
+        self.assertEqual(meta["allowed"],
+                         ["run_shell_command: graphify query x", "ungated:web"])
+        self.assertEqual(meta["blocked"],
+                         ["run_shell_command: rm x  (state-changing)"])
+
+    def test_ungated_run_reports_empty_logs_not_missing_keys(self):
+        # A consumer that has to distinguish "no writes" from "no key" writes
+        # the check twice and gets one of them wrong.
+        _, _, _, _, meta = self.run_exec(mode="auto-edit")
+        self.assertEqual(meta["writes"], [])
+        self.assertEqual(meta["allowed"], [])
+
+    def test_observe_hook_runs_auto_edit_as_yolo_with_the_hook(self):
+        self.run_exec(mode="auto-edit", observe_hook=True)
+        argv = self.recorded("argv.json")
+        self.assertEqual(argv[argv.index("--approval-mode") + 1], "yolo")
+        self.assertIn("PreToolUse", self.settings().get("hooks", {}))
+        env = self.recorded("env.json")
+        self.assertEqual(env.get("QGATE_MODE"), "autoedit")
+        self.assertTrue(env.get("QGATE_WRITELOG"))
+
+    def test_absent_flag_leaves_argv_and_env_byte_identical(self):
+        # U1.4 ships dark: the inertness pin. The temp settings path is a fresh
+        # mkdtemp per call, so it is the one value that legitimately differs.
+        self.run_exec(mode="auto-edit")
+        argv_a, env_a = self.recorded("argv.json"), self.recorded("env.json")
+        self.run_exec(mode="auto-edit", observe_hook=False)
+        argv_b, env_b = self.recorded("argv.json"), self.recorded("env.json")
+        volatile = "QWEN_CODE_SYSTEM_SETTINGS_PATH"
+        self.assertEqual(argv_a, argv_b)
+        self.assertEqual({k: v for k, v in env_a.items() if k != volatile},
+                         {k: v for k, v in env_b.items() if k != volatile})
+        self.assertEqual([k for k in env_b if k.startswith("QGATE_")], [])
+        self.assertNotIn("PreToolUse", self.settings().get("hooks", {}))
 
 
 class Failures(Fixture):

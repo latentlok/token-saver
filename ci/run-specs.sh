@@ -8,12 +8,20 @@
 # so we write a minimal stub (the dev window, 196608) to make that assertion bind.
 set -uo pipefail
 
+# One throwaway root for EVERYTHING this run creates, removed on exit. The
+# specs mkdtemp a git repo per test (~40 inodes each) and unittest never cleans
+# them up -- a day of local runs filled /tmp to ENOSPC (83k inodes) and took
+# every session on the machine down with it. TMPDIR routes every
+# tempfile.mkdtemp in every spec under this root; the trap ends the leak.
+export TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
 # Run under a THROWAWAY HOME. This script writes a stub ~/.qwen/settings.json and
 # a --global git identity; on a CI runner that is harmless, but run locally it
 # silently overwrote a developer's real qwen config -- API key, endpoint and all.
 # A test suite that eats your credentials on a bad day is not a test suite.
 export HOME="$(mktemp -d)"
-echo "specs running under HOME=$HOME (throwaway)"
+echo "specs running under HOME=$HOME (throwaway, inside TMPDIR=$TMPDIR)"
 
 git config --global user.email "ci@token-saver.test"
 git config --global user.name "token-saver CI"

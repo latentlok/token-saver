@@ -1,8 +1,13 @@
 """Receipt rendering, crane-equal for v1 inputs, behavior frozen by specs/verdict_spec.py."""
 
-from qd.gittree import blast_radius, new_public_symbols, committed_during_run, head_sha, snapshot
+from qd.gittree import (
+    blast_radius, blast_lines, new_public_symbols, committed_during_run,
+    head_sha, snapshot,
+)
 from qd.invoke import context_window, compaction_thresholds, cum_zero, compaction_state, truncate
-from qd.runlog import write_runlog, leverage_record, digest
+from qd.runlog import (
+    write_runlog, leverage_record, digest, ledger_summary, brief_summary,
+)
 from qd import refs
 
 
@@ -16,30 +21,40 @@ BURN_WARN_TOKENS = 3_000_000
 
 
 def burn_line(ctx):
-    """One BURN: line — input tokens, calls, and the per-call context average.
+    """One BURN: line — tokens, calls, per-call context, and the time domain.
 
     On a local endpoint COST is $0.0000 whatever happens, so a run that made 218
     calls averaging 87k of context looked exactly like one that made four. The
     spend is real (GPU minutes, and the queue behind it) and nothing in the
-    receipt showed it. Input is reported first because that is where it goes:
-    a local endpoint does no cross-call prompt caching that these counters can
-    see, so every turn re-sends the whole accumulated context and a long
-    agentic loop costs roughly the SQUARE of its length.
+    receipt showed it. Time is appended because time IS the local cost axis.
+    When the endpoint reports cached prompt tokens, input is NOT re-paid in
+    full each turn -- HEAVY then binds on the un-cached remainder, and the line
+    says why (a raw multi-million input count on a caching endpoint alarmed
+    callers into diagnosing perfectly healthy runs).
     """
     cum = ctx.get("cum") or {}
     tokens = cum.get("tokens") or {}
     tin = int(tokens.get("prompt") or 0)
     tout = int(tokens.get("completion") or 0)
+    cached = int(tokens.get("cached") or 0)
     if not tin and not tout:
         return None
     turns = int(cum.get("turns") or 0)
     parts = [f"BURN: {tin:,} in / {tout:,} out"]
     if turns:
         parts.append(f"{turns} calls, ~{tin // turns:,} ctx/call")
+    ms = int(cum.get("ms") or 0)
+    if ms >= 90_000:
+        parts.append(f"{ms / 60000.0:.1f} min GPU")
+    elif ms:
+        parts.append(f"{ms / 1000.0:.0f}s GPU")
     line = ", ".join(parts)
-    if tin >= BURN_WARN_TOKENS:
+    fresh = max(0, tin - cached)
+    if fresh >= BURN_WARN_TOKENS:
         line += (" -- HEAVY. Free in money, not in time; a loop this long also "
                  "risks compaction. Split the task into smaller delegations.")
+    elif cached and tin >= BURN_WARN_TOKENS:
+        line += f" ({cached:,} cached -- prefill largely reused, not re-paid)"
     return line
 
 HANDOFF_SUFFIX = """
@@ -55,16 +70,37 @@ Keep each line under 120 characters. This is a machine-read handoff, not prose.
 """
 
 
+FINDINGS_SUFFIX = """
+
+---
+Add one more line, after those:
+
+FINDINGS: <what you found -- one line per finding, semicolon-separated>
+
+Under 300 characters. Report the problem; do NOT fix it.
+"""
+
+# The machine-read tail of a reply. FINDINGS joins the handoff keys rather than
+# getting a parser of its own: one reader means a worker that formats the line
+# oddly (bolded, hashed, back-ticked) is understood the same way in both.
+_TAIL_KEYS = ("HANDOFF", "FILES", "NEXT", "FINDINGS")
+
+
 def parse_handoff(text):
-    """Pull the HANDOFF/FILES/NEXT lines out of Qwen's reply."""
+    """Pull the HANDOFF/FILES/NEXT/FINDINGS lines out of Qwen's reply."""
     out = {}
     for line in (text or "").splitlines():
         line = line.strip().lstrip("*# ").strip()
-        for key in ("HANDOFF", "FILES", "NEXT"):
+        for key in _TAIL_KEYS:
             prefix = f"{key}:"
             if line.upper().startswith(prefix):
                 out[key] = line[len(prefix):].strip().strip("*`").strip()
     return out
+
+
+def parse_findings(text):
+    """The FINDINGS line of a report run, or None."""
+    return parse_handoff(text).get("FINDINGS")
 
 
 def strip_handoff(text):
@@ -72,7 +108,7 @@ def strip_handoff(text):
     keep = []
     for line in (text or "").splitlines():
         probe = line.strip().lstrip("*# ").strip().upper()
-        if any(probe.startswith(f"{k}:") for k in ("HANDOFF", "FILES", "NEXT")):
+        if any(probe.startswith(f"{k}:") for k in _TAIL_KEYS):
             continue
         keep.append(line)
     return "\n".join(keep).strip()
@@ -81,9 +117,20 @@ def strip_handoff(text):
 def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_verify=None):
     cwd = ctx["cwd"]
     guard_on = ctx["guard_on"]
+    # C3: tree facts captured by the engine from the tree the run actually used
+    # (worktree or main), BEFORE any worktree commit/release. When absent
+    # (v1-shaped ctx), every consumer below re-reads `cwd` -- the pinned
+    # fallback the differential oracle depends on.
+    facts = ctx.get("tree_facts")
 
-    # "verify passed" is only evidence if it was failing beforehand.
-    if ctx["preflight"] and status == "success":
+    # "verify passed" is only evidence if it was failing beforehand. U3.2 moved
+    # this decision into the engine (decision 4), so for an engine-rendered
+    # receipt this is a no-op on a status that is already final; it stays for
+    # direct render() callers whose ctx never went through the engine. A
+    # declared "green" preflight is revision work, where a passing gate
+    # beforehand is the premise rather than a warning.
+    if (ctx["preflight"] and status == "success"
+            and ctx.get("preflight_expect") != "green"):
         status = "success_but_preflight_passed"
 
     # R2 (PLAN-v3-l5): a clean green run gets a COMPACT receipt -- diagnostics render
@@ -92,6 +139,56 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     body = [f"STATUS: {status}", f"SESSION: {session_id or 'unknown'}"]
     body.append(f"ATTEMPTS: {len(trail)}/{max_iter}")
+
+    # RUN: one fixed telemetry line on every receipt -- the numbers a caller
+    # otherwise pieced together from four scattered sections (or investigated).
+    run_parts = [f"{len(trail)} attempt(s)"]
+    _peak = ctx.get("peak", 0)
+    _win = context_window()
+    if _peak and _win:
+        run_parts.append(f"peak {100.0 * _peak / _win:.0f}% ctx")
+    elif _peak:
+        run_parts.append(f"peak {_peak:,} ctx")
+    _cum = ctx.get("cum") or {}
+    if _cum.get("ms"):
+        run_parts.append(f"{_cum['ms'] / 1000.0:.0f}s")
+    _tout = int((_cum.get("tokens") or {}).get("completion") or 0)
+    if _tout:
+        run_parts.append(f"{_tout:,} out")
+    _denied = len(denials or []) + len(ctx.get("meta", {}).get("blocked") or [])
+    if _denied:
+        run_parts.append(f"{_denied} denied")
+    _strays = ctx.get("strays") or []
+    if _strays:
+        run_parts.append(f"{len(_strays)} strays")
+    body.append("RUN: " + " · ".join(run_parts))
+
+    # U5.5: this run is a corrected re-run of an earlier session, started COLD.
+    # Said out loud on every receipt, green included: it otherwise reads as a
+    # first attempt, and the session named here is where the attempt it
+    # corrects can be found.
+    if ctx.get("retry_of"):
+        body.append(f"RETRY OF: {ctx['retry_of']}")
+
+    # U6: which document version briefed this run. On every receipt, green
+    # included -- the path @ digest is what lets a caller pair a result with
+    # the exact git-versioned brief that produced it. The size estimate and
+    # the consolidate nudge are the cheap half of brief-size discipline: an
+    # append-only amendment list that contradicts itself is session confusion
+    # in document form.
+    brief = ctx.get("brief")
+    if isinstance(brief, dict) and brief.get("path"):
+        line = f"BRIEF: {brief['path']} @ {brief.get('sha256')}"
+        if brief.get("amended"):
+            line += " (amended)"
+        chars = int(brief.get("chars") or 0)
+        if chars:
+            line += f" · ~{max(1, chars // 4):,} tokens"
+        n_amend = int(brief.get("amendments") or 0)
+        if n_amend > 5:
+            line += f" ({n_amend} amendments — consolidate)"
+        body.append(line)
+
     if not clean:
         for t in trail:
             body.append(f"  - {t}")
@@ -139,17 +236,33 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         body.append(ctx["bootstrap_note"])
 
     if guard_on:
-        body.append(blast_radius(cwd, ctx["pre_status"]))
+        if facts:
+            body.append(blast_lines(ctx["pre_status"], facts["post_status"],
+                                    facts["numstat"]))
+        else:
+            body.append(blast_radius(cwd, ctx["pre_status"]))
         # Deterministic (no model tokens): new public symbols Qwen introduced -- the
         # design choices that become contracts. The manager reviews this one line
         # instead of reading the whole diff. A passing gate does NOT catch an EXTRA
         # public symbol; this does.
-        pubs = new_public_symbols(cwd)
+        pubs = facts["pubs"] if facts else new_public_symbols(cwd)
         if pubs:
             flat = ", ".join(
                 f"{n} ({f.split('/')[-1]})" for f, ns in pubs.items() for n in ns
             )
             body.append(f"NEW PUBLIC SURFACE: {flat}")
+
+    # U4.2 test dodge. Rendered on GREEN too, and deliberately not droppable:
+    # a skip added in the same run that delivers the tests is exactly the case
+    # where the receipt is otherwise indistinguishable from honest work, and
+    # suppressing it on the compact green path would hide it precisely when it
+    # matters most.
+    for path, marks in sorted((ctx.get("dodge") or {}).items())[:5]:
+        body.append(
+            f"TEST DODGE: {path} adds {', '.join(marks[:4])} -- an added skip "
+            f"in delivered tests can hide the very failure the task was about; "
+            f"review before trusting green."
+        )
 
     # Context used, so Claude can size the next delegation.
     peak = ctx.get("peak", 0)
@@ -172,14 +285,35 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         body.append(f"CONTEXT: peak {peak:,} tokens (window unknown)")
 
     # Scoped-shell elicitation: commands the hook blocked. Surfacing them is the
-    # "ask the manager" half -- Qwen wanted to run these; you decide if they're legit.
+    # "ask the manager" half -- Qwen wanted to run these; you decide if they're
+    # legit. Grouped by deny reason: the manager adjudicates at the REASON
+    # granularity, and the raw list ran to 12 lines of near-duplicates (~40% of
+    # a red receipt). The full list is in the run log.
     blocked = ctx.get("meta", {}).get("blocked") or []
     if blocked:
+        groups = {}
+        for b in blocked:
+            reason = "other"
+            if b.endswith(")") and "(" in b:
+                reason = b[b.rfind("(") + 1:-1]
+            groups.setdefault(reason, []).append(b)
+        lines = []
+        for reason, items in sorted(groups.items(),
+                                    key=lambda kv: -len(kv[1]))[:4]:
+            if len(items) == 1:
+                lines.append(f"  - {items[0]}")
+            else:
+                example = items[0]
+                if example.endswith(")") and "(" in example:
+                    example = example[:example.rfind("(")].rstrip()
+                lines.append(f"  - {len(items)}x ({reason}) -- e.g. {example}")
+        if len(groups) > 4:
+            lines.append(f"  ... and {len(groups) - 4} more group(s)")
         body.append(
-            "SHELL APPROVAL NEEDED (judge each on the command alone; approve via "
-            "shell_allow + same session_id, deny with the reason in shell_feedback):\n"
-            + "\n".join(f"  - {b}" for b in blocked[:12])
-            + ("\n  ..." if len(blocked) > 12 else "")
+            f"SHELL APPROVAL NEEDED: {len(blocked)} blocked in {len(groups)} "
+            "group(s) (judge on the command alone; approve via shell_allow + "
+            "same session_id, deny with the reason in shell_feedback; full "
+            "list in .qwen-delegate/runs.jsonl):\n" + "\n".join(lines)
         )
 
     st = ctx.get("meta", {}).get("stats") or {}
@@ -240,6 +374,16 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                 f"Re-delegate with on_compaction='discard' if you need a clean slate."
             )
 
+    # U3.1: rendered on green too. A gate that eats half its own budget is paid
+    # again by every attempt, and the one run where that is cheap to fix is the
+    # one that passed -- on a red receipt the same line arrives as an excuse.
+    if ctx.get("gate_slow"):
+        body.append(
+            f"GATE SLOW: preflight took {(ctx.get('gate_ms') or 0) / 1000.0:.0f}s "
+            f"of a {ctx.get('verify_timeout_sec') or 300}s verify budget -- every "
+            f"retry pays it; speed the gate up or raise verify_timeout_sec."
+        )
+
     if status == "gate_suspect":
         body.append(
             "GATE SUSPECT: the verify command produced identical output before and after "
@@ -258,25 +402,167 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             "its result. Tighten the gate to test the specific new behavior."
         )
 
-    # Qwen is told not to commit, but nothing enforces that in yolo -- and a commit hides
-    # its work from `git status`, so CHANGED goes quiet while the tree really moved.
-    moved, n_commits, committed_files = (
-        committed_during_run(cwd, ctx["pre_sha"]) if guard_on else (False, 0, []))
-    if moved:
-        shown = ", ".join(committed_files[:10]) + (" ..." if len(committed_files) > 10 else "")
+    # U3.2: under a declared "green" expectation the paragraph above is noise --
+    # revision work runs against a suite that already passes, and the alarm
+    # fired on every one of them. The fact still belongs on the receipt, as one
+    # line rather than a warning nobody can act on.
+    elif ctx.get("preflight") and ctx.get("preflight_expect") == "green":
         body.append(
-            f"COMMITTED: Qwen moved HEAD during this run ({n_commits} commit(s), "
-            f"{ctx['pre_sha']} -> {head_sha(cwd)}). It was told not to. Consequences you "
-            f"must account for:\n"
-            f"  - CHANGED above is INCOMPLETE: committed files no longer show in "
-            f"git status. Actually changed: {shown or '(none)'}\n"
-            f"  - the spec guard was still enforced (it diffs against the pre-run sha, "
-            f"not HEAD), but review those files yourself\n"
-            f"  - rollback needs a reset, not a checkout -- see ROLLBACK below"
+            "PREFLIGHT: green pre-run, declared expected (revision gate).")
+
+    # U4.2 report_dont_fix: the run was never asked to make the gate green, so
+    # the gate's output is the deliverable rather than a verdict on the work.
+    # Said out loud because every other red-ish status here means "the work
+    # failed", and this one means "the work was a diagnosis".
+    if status == "reported":
+        body.append(
+            "REPORTED: report_dont_fix -- one attempt, one gate run, no retry "
+            "loop; the worker was told to diagnose and NOT to fix. The gate "
+            "output below is the finding, not a failure of the work."
+        )
+        if ctx.get("report_gate_green"):
+            body.append("gate GREEN -- the reported problem did not reproduce "
+                        "under this gate.")
+
+    # Extracted by the engine BEFORE truncation, for the same reason HANDOFF is:
+    # on a report run this one line is the entire product of the delegation.
+    if ctx.get("findings"):
+        body.append(f"FINDINGS: {ctx['findings']}")
+
+    # U5.1 result contract. In the BODY, never the droppable region and never
+    # the truncated tail: the caller asked for this payload by schema, so it is
+    # the one part of the receipt that is not commentary on the work -- it IS
+    # a deliverable. Verbatim, as the worker wrote it.
+    if ctx.get("result_json"):
+        body.append("RESULT: valid (schema)")
+        body.append(f"```json\n{ctx['result_json']}\n```")
+    elif status == "result_invalid":
+        errs = ctx.get("result_errors") or []
+        body.append(
+            "RESULT INVALID: the reply's final JSON block does not conform to "
+            "result_schema after every attempt -- "
+            + "; ".join(errs[:4]) + (" ..." if len(errs) > 4 else "")
+            + ". Read STATUS above for the work itself: what failed here is "
+              "the machine-read result, which cannot be consumed as sent."
         )
 
-    if guard_on and ctx["pre_sha"]:
-        if moved:
+    # U3.3: a fixture nobody can trace is indistinguishable from an invented
+    # one, and a gate written against invented bytes passes forever.
+    unproven = ctx.get("fixtures_unproven") or []
+    if unproven:
+        body.append(
+            "FIXTURES: "
+            + ", ".join(unproven[:10])
+            + (" ..." if len(unproven) > 10 else "")
+            + " lack captured-from provenance -- imagined fixtures were the "
+              "field's worst defect class; capture real ones or mark their "
+              "source."
+        )
+
+    if status == "scope_violation":
+        body.append(
+            "SCOPE: the run ended on a touch_scope violation -- the worker "
+            "modified files outside the allowed set (named in the trail above) "
+            "and those edits were reverted. In-scope work may still be on disk: "
+            "check CHANGED, and widen touch_scope on re-delegation if the edits "
+            "were actually needed."
+        )
+
+    # C10 co-work: files that moved during the run with no logged worker write.
+    # They are NOT the worker's and were never reverted -- the caller edits this
+    # replaced were being destroyed silently, so the receipt names them instead.
+    co_work = ctx.get("scope_unattributed") or []
+    if co_work:
+        body.append(
+            "SCOPE: changed during the run but NOT by a logged worker write "
+            "(caller co-work?): "
+            + ", ".join(co_work[:10])
+            + (" ..." if len(co_work) > 10 else "")
+            + " -- reported, never reverted."
+        )
+
+    spec_co_work = ctx.get("spec_unattributed") or []
+    if spec_co_work:
+        body.append(
+            "SPEC CHANGED (unattributed): "
+            + ", ".join(spec_co_work[:10])
+            + (" ..." if len(spec_co_work) > 10 else "")
+            + " differs from its pre-run state with no logged worker write, so "
+            "it was left alone rather than reverted over a caller's edit -- but "
+            "gate integrity not guaranteed for this run: what the gate means "
+            "may have changed under it. Check the diff before trusting STATUS."
+        )
+
+    unrestorable = ctx.get("unrestorable") or []
+    if unrestorable:
+        body.append(
+            "SCOPE: out-of-scope change in "
+            + ", ".join(unrestorable[:10])
+            + (" ..." if len(unrestorable) > 10 else "")
+            + " NOT auto-reverted -- the pre-run content was too large to "
+            "snapshot, and restoring from a commit would destroy pre-run "
+            "edits. Review and revert manually."
+        )
+
+    # Qwen is told not to commit, but nothing enforces that in yolo -- and a commit hides
+    # its work from `git status`, so CHANGED goes quiet while the tree really moved.
+    if facts:
+        moved, n_commits, committed_files = facts["head_moved"]
+        head_now = facts["head_now"]
+    else:
+        moved, n_commits, committed_files = (
+            committed_during_run(cwd, ctx["pre_sha"]) if guard_on else (False, 0, []))
+        head_now = head_sha(cwd) if moved else None
+    # U1.3: WHO moved it. Absent (v1 ctx) or "worker" keeps the accusation; a
+    # run whose mode hard-denies commits (scoped) knows it was not the worker,
+    # and everything else says it does not know. The old unconditional
+    # accusation fired on every co-working caller's commit -- ~8 per project in
+    # the field, each one an investigation that found nothing.
+    who = ctx.get("head_moved_attribution")
+    if moved:
+        shown = ", ".join(committed_files[:10]) + (" ..." if len(committed_files) > 10 else "")
+        incomplete = (f"  - CHANGED above is INCOMPLETE: committed files no longer "
+                      f"show in git status. Actually changed: {shown or '(none)'}")
+        if who == "caller":
+            body.append(
+                f"HEAD MOVED: {n_commits} commit(s) {ctx['pre_sha']} -> {head_now} "
+                f"-- not the worker (commits are hard-denied in scoped mode); a "
+                f"caller in this repo committed during the run.\n{incomplete}"
+            )
+        elif who == "unknown":
+            body.append(
+                f"HEAD MOVED: {n_commits} commit(s) {ctx['pre_sha']} -> {head_now} "
+                f"-- by this session's caller or the worker (attribution "
+                f"unknown); check git log.\n{incomplete}"
+            )
+        else:
+            body.append(
+                f"COMMITTED: Qwen moved HEAD during this run ({n_commits} commit(s), "
+                f"{ctx['pre_sha']} -> {head_now}). It was told not to. Consequences you "
+                f"must account for:\n"
+                f"{incomplete}\n"
+                f"  - the spec guard was still enforced (it diffs against the pre-run sha, "
+                f"not HEAD), but review those files yourself\n"
+                f"  - rollback needs a reset, not a checkout -- see ROLLBACK below"
+            )
+
+    # ROLLBACK advice targets the tree the run used; a worktree run's discard
+    # path is its MERGE/worktree-remove line, not a main-tree rollback.
+    if guard_on and ctx["pre_sha"] and not ctx.get("worktree"):
+        if moved and who in ("caller", "unknown"):
+            # Reset advice only under positive worker attribution: a
+            # `reset --hard` over commits the worker did not make destroys
+            # somebody else's work, and the receipt would have told them to.
+            body.append(
+                f"ROLLBACK: review `git log --oneline {ctx['pre_sha']}..HEAD` "
+                f"before any rollback -- "
+                + ("the commits are not the worker's; a blanket reset would "
+                   "destroy a caller's work."
+                   if who == "caller" else
+                   "who made the commits is unknown; a blanket reset would "
+                   "destroy work this run did not do.")
+            )
+        elif moved:
             # `git checkout .` cannot undo a commit; advising it here would leave the
             # commits in place and read as a successful rollback.
             safety = ("safe -- tree was clean" if ctx["pre_clean"]
@@ -310,7 +596,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         # fib-fabrication failure mode in miniature -- trust the filesystem.
         claimed = handoff.get("FILES", "")
         if guard_on and claimed:
-            post_snap = snapshot(cwd)
+            post_snap = facts["post_status"] if facts else snapshot(cwd)
             actual = {p for p in post_snap if post_snap.get(p) != ctx["pre_status"].get(p)}
             said_none = claimed.strip().lower() in ("none", "no files", "-")
             if said_none and actual:
@@ -336,7 +622,9 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     # On a clean green, last_verify is a STALE earlier failure (the pass that
     # decided status produced no saved output) -- showing it misreads as red.
+    verify_idx = None
     if last_verify and not clean:
+        verify_idx = len(body)
         body.append(f"--- final verify output ---\n{truncate(last_verify, VERIFY_CAP)}")
 
     if status == "unverified":
@@ -347,13 +635,48 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # Lower drop_priority = higher priority (never dropped first).
     c2_blocks = []
 
+    # ADVISORY (U3.4): loose gates that indicate rather than gate -- they never
+    # touched STATUS and never reached the worker. First block in the region and
+    # NON-droppable while any is red: a red indicator the cap silently dropped
+    # is worse than none at all, because its absence reads as green.
+    advisory = ctx.get("advisory")
+    if advisory is not None:
+        adv_red = [a for a in advisory if not a.get("ok")]
+        adv_lines = []
+        for a in adv_red:
+            head = (a.get("head") or "").strip()
+            adv_lines.append(f"ADVISORY red: {a.get('name')}"
+                             + (f" — {head}" if head else ""))
+        summary = f"ADVISORY: {len(advisory) - len(adv_red)}/{len(advisory)} green"
+        skipped = ctx.get("advisory_skipped") or 0
+        if skipped:
+            summary += f", {skipped} skipped (malformed)"
+        adv_lines.append(summary)
+        c2_blocks.append(("\n".join(adv_lines),
+                          not adv_red, -1 if adv_red else 1))
+
     notes = ctx.get("notes")
     if notes:
         c2_blocks.append((f"NOTES: {notes[:200]}", True, 0))
 
+    # U4.3 strays: files this run created that the task never asked for. Drop
+    # priority 1 is shared with the all-green ADVISORY block; the cap's drop
+    # loop sorts stably, so on a tie the block appended FIRST goes first --
+    # advisory-green, which is the one whose absence costs the least.
+    strays = ctx.get("strays") or []
+    if strays:
+        c2_blocks.append((
+            f"STRAYS: {len(strays)} file(s) not named in the task: "
+            + ", ".join(strays[:6]) + (" ..." if len(strays) > 6 else "")
+            + " -- worker debris; review or rm.", True, 1))
+
     worktree = ctx.get("worktree")
     if worktree:
-        c2_blocks.append((f"WORKTREE: {worktree['path']}", False, -1))
+        wt_line = f"WORKTREE: {worktree['path']}"
+        if worktree.get("dirty"):
+            wt_line += (" (main tree had uncommitted changes at branch time -- "
+                        "they are NOT in this worktree)")
+        c2_blocks.append((wt_line, False, -1))
         merge = ctx.get("merge")
         if merge == "clean":
             c2_blocks.append(
@@ -365,8 +688,15 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                 (f"MERGE: CONFLICT -- contract overlap with "
                  f"{worktree['branch']}; escalate, do not force", False, -1))
 
+    # GRAPH accountability: count the worker's graphify reads (C10 allow-log)
+    # so a groomed-but-never-consulted graph is visible instead of invisible.
+    graph_used = sum(
+        1 for a in (ctx.get("meta", {}).get("allowed") or [])
+        if a.startswith("run_shell_command: graphify "))
     graph_line = ctx.get("graph_line")
     if graph_line:
+        if graph_used:
+            graph_line += f" · used {graph_used}x this run"
         c2_blocks.append((graph_line, True, 2))
 
     refs_added = ctx.get("refs_added") or []
@@ -384,33 +714,83 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if burn:
         c2_blocks.append((burn, True, 5))
 
+    # LEDGER: one line of project history -- the log finally gets a reader.
+    ledger = ledger_summary(cwd)
+    if ledger:
+        _lw = context_window()
+        pk = ledger["peak"]
+        pk_txt = f"{100.0 * pk / _lw:.0f}%" if pk and _lw else f"{pk:,}"
+        ledger_txt = (
+            f"LEDGER: run #{ledger['n'] + 1} · lifetime {ledger['ok']} ok / "
+            f"{ledger['red']} red / {ledger['stopped']} stopped · "
+            f"peak-ctx record {pk_txt}")
+        # U6: the same document's own record, only when prior runs used it --
+        # "this brief has cried red twice" is what tells a caller to amend the
+        # document rather than re-roll the worker.
+        if isinstance(ctx.get("brief"), dict) and ctx["brief"].get("path"):
+            bsum = brief_summary(cwd, ctx["brief"]["path"])
+            if bsum:
+                ledger_txt += (f" · this brief: {bsum['ok']} ok / "
+                               f"{bsum['red']} red")
+        c2_blocks.append((ledger_txt, True, 6))
+
+    # RESUME: the affordance is cheaper than the education -- session resume
+    # existed for 45 field delegations and went unused because nothing said so.
+    # U5.4 makes it three-way, because the affordance was pointing the wrong
+    # way half the time: a session that FAILED carries its confusion forward,
+    # and resuming into it buys an argument with the correction instead of a
+    # fix. Two exceptions keep the warm line on red: a run that was BLOCKED was
+    # fenced rather than confused, and the approval loop (shell_allow +
+    # shell_feedback) only works in the same session.
+    if session_id and status not in ("stopped", "compaction_refused",
+                                     "error", "refused"):
+        healthy = status in ("success", "success_but_preflight_passed",
+                             "unverified", "reported")
+        was_blocked = bool(ctx.get("meta", {}).get("blocked"))
+        if healthy or was_blocked:
+            c2_blocks.append((
+                f"RESUME: session_id={session_id} -- a follow-up in this warm "
+                f"session costs a sentence, not a re-brief (same cwd, pass "
+                f"session_id)", True, 7))
+        else:
+            c2_blocks.append((
+                f"RESUME: not recommended — {len(trail)} failed attempt(s) in "
+                f"this session carry their confusion forward; re-delegate COLD "
+                f"with a corrected brief (or retry_of={session_id}).",
+                True, 7))
+
     # Insert C2 blocks before the "--- qwen result ---" line.
-    tail = [f"--- qwen result ---\n{truncate(strip_handoff(result_text), RESULT_CAP)}"]
+    caps = {"result": RESULT_CAP, "verify": VERIFY_CAP}
 
     def _assembled():
         parts = list(body)
         for blk, _, _ in c2_blocks:
             parts.append(blk)
-        parts.extend(tail)
+        parts.append(
+            f"--- qwen result ---\n"
+            f"{truncate(strip_handoff(result_text), caps['result'])}")
         return "\n".join(parts)
 
-    # Cap enforcement: drop droppable C2 blocks in reverse-priority order.
-    def _enforce_cap(receipt):
-        if len(receipt) <= 3000:
-            return receipt
-        # Collect droppable blocks sorted by priority descending (drop highest number first).
+    # Cap enforcement (N1): drop droppable C2 blocks reverse-priority, THEN
+    # shrink the qwen-result tail (floor 200), then the verify tail (floor
+    # 400). The old enforcement stopped at C2 drops, so body+tails alone could
+    # -- and on this repo's own ledger, 4 of 18 receipts did -- blow the cap.
+    verdict = _assembled()
+    while len(verdict) > 3000:
         droppable = sorted(
-            [(i, line, pri) for i, (line, droppable, pri) in enumerate(c2_blocks) if droppable],
-            key=lambda x: -x[2]
-        )
-        if not droppable:
-            return receipt
-        # Remove the lowest-priority droppable block and reassemble.
-        idx, _, _ = droppable[0]
-        c2_blocks.pop(idx)
-        return _enforce_cap(_assembled())
-
-    verdict = _enforce_cap(_assembled())
+            [(i, pri) for i, (_, drop, pri) in enumerate(c2_blocks) if drop],
+            key=lambda x: -x[1])
+        if droppable:
+            c2_blocks.pop(droppable[0][0])
+        elif caps["result"] > 200:
+            caps["result"] = max(200, caps["result"] - (len(verdict) - 3000))
+        elif verify_idx is not None and caps["verify"] > 400:
+            caps["verify"] = max(400, caps["verify"] - (len(verdict) - 3000))
+            body[verify_idx] = (f"--- final verify output ---\n"
+                                f"{truncate(last_verify, caps['verify'])}")
+        else:
+            break
+        verdict = _assembled()
 
     # Logged LAST: every diff above is taken against the pre-run snapshot, so the log
     # file must not exist in the tree until they are done. (It is gitignored regardless
@@ -418,34 +798,80 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     cum = ctx.get("cum") or cum_zero()
     changed = 0
     if guard_on:
-        post = snapshot(cwd)
-        changed = len([p for p in post if post.get(p) != ctx["pre_status"].get(p)])
+        if facts:
+            changed = len(facts["changed"])
+        else:
+            post = snapshot(cwd)
+            changed = len(
+                [p for p in post if post.get(p) != ctx["pre_status"].get(p)])
+    extra = {
+        "session": session_id,
+        "approval_mode": ctx.get("approval_mode"),
+        "attempts": len(trail),
+        "max_iterations": max_iter,
+        "task": digest(ctx.get("task")),
+        "gate": {
+            "cmd": digest(ctx.get("verify")),
+            "preflight_passed": ctx.get("preflight"),
+        },
+        "trust": ctx.get("trust"),
+        "changed_files": changed,
+        "head_moved": moved,
+        "commits_by_worker": n_commits,
+        "resumed": bool(ctx.get("session_hint")),
+        "compactions": sum(compaction_state(s)[0] for s in ctx.get("sessions", [])),
+        "sessions": len(ctx.get("sessions", [])),
+        "reinjections": ctx.get("reinjects", 0),
+        "discards": ctx.get("discards", 0),
+        "on_compaction": ctx.get("on_compaction"),
+        "blocked_shell": len(ctx.get("meta", {}).get("blocked") or []),
+        "blocked_commands": (ctx.get("meta", {}).get("blocked") or [])[:50],
+        "denials": len(denials or []),
+        "graph_used": graph_used,
+        # C10: how much of this run's blast radius the worker owns, and how
+        # much a caller was doing at the same time.
+        "writes_attributed": len(ctx.get("writes") or []),
+        "caller_changed": len(ctx.get("scope_unattributed") or []),
+        "strays": len(strays),
+    }
+    # U5.2: the id the submit minted. This record is what CLOSES the `running`
+    # one written at spawn -- without the id here, a reader could not tell an
+    # in-flight run from one that died with its session.
+    if ctx.get("run_id"):
+        extra["run_id"] = ctx["run_id"]
+    if ctx.get("retry_of"):
+        extra["retry_of"] = ctx["retry_of"]
+    # U6: path + digest only -- enough for brief_summary to group runs by
+    # document without the log accumulating brief text (digest() policy).
+    if isinstance(ctx.get("brief"), dict) and ctx["brief"].get("path"):
+        extra["brief"] = {"path": ctx["brief"]["path"],
+                          "sha256": ctx["brief"].get("sha256")}
+    # C5, non-defaults only: one line per run is read whole by ledger_summary
+    # and by people, and a key that says "300"/"any" in every record is noise
+    # that hides the runs where somebody actually turned a knob.
+    if ctx.get("verify_timeout_sec") not in (None, 300):
+        extra["verify_timeout_sec"] = ctx["verify_timeout_sec"]
+    if ctx.get("preflight_expect") not in (None, "any"):
+        extra["preflight_expect"] = ctx["preflight_expect"]
+    if advisory is not None:
+        extra["advisory"] = {"red": len(adv_red), "of": len(advisory)}
+    if ctx.get("report"):
+        extra["report"] = True
+        extra["findings"] = bool(ctx.get("findings"))
+    chain = ctx.get("chain")
+    if chain:
+        # `halted` is DERIVED, not passed: run_chain stops at the first link
+        # whose receipt is not green, so a failing link IS the halt point by
+        # construction -- and by the time the halt is known this receipt has
+        # already been rendered, so nothing could retro-write the flag onto it.
+        rec = {"pos": chain.get("pos"), "of": chain.get("of")}
+        if status not in ("success", "success_but_preflight_passed"):
+            rec["halted"] = True
+        extra["chain"] = rec
     write_runlog(cwd, leverage_record(
         "qwen_delegate", cwd, status, verdict, cum, ctx.get("peak", 0),
         executor=executor or "qwen-local",
         cost_usd=cost_usd,
-        extra={
-            "session": session_id,
-            "approval_mode": ctx.get("approval_mode"),
-            "attempts": len(trail),
-            "max_iterations": max_iter,
-            "task": digest(ctx.get("task")),
-            "gate": {
-                "cmd": digest(ctx.get("verify")),
-                "preflight_passed": ctx.get("preflight"),
-            },
-            "trust": ctx.get("trust"),
-            "changed_files": changed,
-            "head_moved": moved,
-            "commits_by_worker": n_commits,
-            "resumed": bool(ctx.get("session_hint")),
-            "compactions": sum(compaction_state(s)[0] for s in ctx.get("sessions", [])),
-            "sessions": len(ctx.get("sessions", [])),
-            "reinjections": ctx.get("reinjects", 0),
-            "discards": ctx.get("discards", 0),
-            "on_compaction": ctx.get("on_compaction"),
-            "blocked_shell": len(ctx.get("meta", {}).get("blocked") or []),
-            "denials": len(denials or []),
-        },
+        extra=extra,
     ))
     return verdict

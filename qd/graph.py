@@ -203,8 +203,14 @@ def refresh_async(cwd, files=None):
     return th
 
 
-def graph_line(cwd):
-    """Return a single C2 GRAPH: status line."""
+def graph_line(cwd, will_refresh=False):
+    """Return a single C2 GRAPH: status line.
+
+    `will_refresh` must reflect whether a refresh is ACTUALLY about to be
+    scheduled (in-tree success). The stale line used to claim "refresh
+    running" unconditionally -- on failed and worktree runs nothing refreshes,
+    and the receipt was lying.
+    """
     state = read_state(cwd)
     if state is None:
         return "GRAPH: none \u2014 run graphify once to index"
@@ -222,4 +228,5 @@ def graph_line(cwd):
     if s["status"] == "fresh" or not s["stale"]:
         return f"GRAPH: fresh @ {sha_short}"
     n = len(s["stale"])
-    return f"GRAPH: stale ({n} files since {sha_short}) \u2014 refresh running"
+    tail = "refresh running" if will_refresh else "run graphify update"
+    return f"GRAPH: stale ({n} files since {sha_short}) \u2014 {tail}"

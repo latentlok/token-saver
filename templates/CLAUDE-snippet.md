@@ -6,73 +6,44 @@ with it, the policy is in context every session.
 Ask Claude to add it, or paste the block below yourself — everything between the
 begin / end markers, the markers included. The markers let a re-add detect the block
 and skip it, so it is never duplicated.
+
+Once installed, the block is MANAGED: on the first session after a plugin update the
+setup hook rewrites everything between the markers from this template (the `v:` line
+says which version wrote it) and touches nothing outside them. That is how a new
+capability reaches the agents that would otherwise never hear about it.
+
+The block is a ~350-token capability map, resident in every session — the measured
+details live in the `delegation` skill, which loads only when a session delegates.
 -->
 
 <!-- qwen-delegate:begin (managed block; delete from begin to end to remove) -->
+<!-- v: {version} -->
 
 ## Delegating mechanical work
 
-This project has the token-saver plugin installed (`qwen-manager` subagent + the
-`qwen_delegate` / `qwen_query` MCP tools). A free local model does the typing; you do the
-judgment; a command decides whether it worked.
+token-saver is installed: a free local model types, you judge, a command decides.
+**Before doing mechanical work inline, ask: could a command prove this was done?**
+If yes, delegate — `qwen_delegate`, or the `qwen-manager` subagent for long
+multi-unit grinds: bulk edits, renames, codemods, tests-for-existing, boilerplate,
+lint sweeps. Keep design, specs, gates, anything irreversible or outward-facing.
+Codebase questions go to `qwen_query` (free, read-only; answers are leads, not
+truth). Load the `delegation` skill before first use.
 
-**Before doing mechanical work inline, ask: could I write a command that proves this was
-done correctly?** If yes, it belongs to `qwen-manager`, not to you. Spawn it **in the
-background** with the goal — not the steps — and carry on with something else. You will
-be notified when it reports.
-
-Delegate: bulk or repetitive edits · a rename or signature change across many files ·
-adding tests for existing code · boilerplate · codemods · migrations · doc generation ·
-fixing every instance of a lint or type error.
-
-Keep for yourself: what gets built and why · the design · the spec and gate that define
-correct · anything outward-facing, irreversible, or contested.
-
-Use `qwen_query` for questions about this codebase ("how does X work", "where is Y
-handled", "is there already a Z") — it reads and answers on free tokens instead of
-spending your context. Treat its answers as leads to verify, not as truth.
-
-**Rules that are load-bearing here, not stylistic:**
-
-- Commit before delegating. Git is the only rollback — there is no sandbox, and the
-  worker runs at full user privilege.
-- Never accept the worker's own *prose* as evidence — Qwen has claimed tests passed with
-  the test runner not installed. The **gate** is the evidence, and the **server runs it**:
-  trust the receipt's `STATUS`/`VERIFY` verdict, not Qwen's narration. Do NOT re-run the
-  gate yourself — the server already ran it green, so a re-run just respends your tokens on
-  a result the receipt already carries. (High-stakes `self` work worth double-checking?
-  Run an *independent* audit — different tests — never a re-run of Qwen's own suite.)
-- **By default, let Qwen write and grade its own tests (`trust="self"`)** — the cheap path,
-  and how this runs unless you're told otherwise. **When you are told to, or the work must
-  be right, author the gate yourself (`trust="verified"`)**: then it is `*_spec.*`, and the
-  worker can never write or weaken *that* file — auto-reverted if it touches it. (A gate you
-  authored is yours alone; a self-graded suite passing is not proof it's correct — see the
-  `self` caveat above.)
-- A gate you have not tested is a hope. Break the thing it watches and confirm it fails
-  before trusting a pass.
-- **Tell it where the tests are, once.** Put `"test_dir"` (or the exact
-  `"test_command"`) in `.qwen-delegate.json`. Without it the plugin guesses from
-  packaging files, and a project it can't place gets a gate that can never pass —
-  silently. This is also what makes `trust="self"` work: keep the worker's own
-  tests somewhere separate from the files you protect as specs, or they auto-revert
-  as fast as it writes them.
-- **`STATUS: stopped` means a live limit ended the run — not a worker fault and
-  not a code fault.** Nothing was verified and the work on disk is partial. Either
-  split the task or raise `burn_budget` / `decode_tps`. Re-running it unchanged
-  hits the same wall.
-- **`STATUS: compaction_refused` means the task was too big to hold, not that it
-  failed.** The worker's history was about to be summarised, so the run was stopped and
-  nothing from it is trusted. Do not re-delegate it unchanged — split it into smaller
-  units with their own gates.
-- **A `STATUS: error` receipt is the worker failing, not a bug here — do not debug it.**
-  Truncated output, a dead endpoint, a timeout: the receipt names the cause and the
-  setting that fixes it, all of them user-side. Relay it, retry once smaller if it's
-  worth it, else do the work inline or hand the line to the user. Reading plugin
-  source or probing the endpoint to find out why burns the context this is meant to save.
-- Prefer `auto-edit`. `scoped` grants a shell and is not a sandbox.
-- Bound the blast radius when you know the target: pass `touch_scope=["a.py","b.py"]` and
-  any edit to another *existing* file auto-reverts (new files stay allowed). Worth it under
-  `self`, which grades the suite but does not constrain which files the worker may change.
+- **Commit first** — git is the only rollback; no sandbox.
+- **The gate decides, never the worker's prose**: the server runs `verify`; trust
+  the receipt's STATUS. Never re-run a green gate or read the diff.
+- `trust="self"` is the default (worker grades its own suite). Work that must be
+  right: `trust="verified"` + your own `*_spec.*` gate — the worker can never edit
+  it. Tell it where tests live once (`test_dir` in `.qwen-delegate.json`).
+- **Async**: the response is a run id + receipt path — do other work, read the file
+  when it lands (its `WATCH:` line waits on it; `wait: true` blocks).
+- `stopped` / `compaction_refused` = task too big — split it; a rerun hits the same
+  wall. `error` = the executor, not this repo — relay it, don't debug.
+- Red receipt → `retry_of=<session>` + `retry_message` (replays the brief cold).
+  Recurring brief → `brief_file: "playbooks/x.md"`, a git-versioned document (front
+  matter = gate/scope, `{{slots}}` from `vars`, `chain: true` steps, `amend_brief`
+  folds corrections in). Value back → `result_schema`.
+- Prefer `auto-edit`; `touch_scope=[...]` bounds edits to named files (new files
+  stay allowed); `scoped` is a shell allowlist, not a sandbox.
 
 <!-- qwen-delegate:end -->
-

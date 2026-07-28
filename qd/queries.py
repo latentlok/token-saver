@@ -7,6 +7,7 @@ import os
 
 import qd.bootstrap
 import qd.invoke
+import qd.jsonschema
 import qd.profiles
 import qd.runlog
 
@@ -90,7 +91,17 @@ def run_query(args):
 
     profile = qd.profiles.resolve(cwd, args.get("executor"))
 
+    # U5.1: a query can be asked for a machine-read answer too. There is no
+    # retry loop here to spend on a violation, so the check is REPORTED rather
+    # than enforced -- the answer is still worth having, and the caller needs
+    # to know before it parses it.
+    result_schema = args.get("result_schema")
+    if not isinstance(result_schema, dict):
+        result_schema = None
+
     suffix = INVESTIGATE_SUFFIX if fmt == "map" else ANSWER_SUFFIX
+    if result_schema is not None:
+        suffix += qd.jsonschema.schema_suffix(result_schema)
     verb = "Map this codebase to answer" if fmt == "map" else "Answer this question about the code"
     prompt = f"{verb}.\n\nQUESTION: {question}"
     if focus:
@@ -159,6 +170,14 @@ def run_query(args):
     st = meta.get("stats") or {}
     if st.get("tools"):
         lines.append(f"READS: {st['tools']} tool call(s), {st.get('ms', 0) / 1000:.0f}s")
+
+    # Above the answer, not below it: a caller that parses the block needs to
+    # know it is unparseable BEFORE it reads past this line.
+    if result_schema is not None:
+        value, _, err = qd.jsonschema.last_json_block(text)
+        errors = [err] if err else qd.jsonschema.validate(value, result_schema)
+        lines.append(f"RESULT: schema INVALID — {errors[0]}" if errors
+                     else "RESULT: valid (schema)")
 
     label = "map" if fmt == "map" else "answer"
     lines.append(f"--- {label} ---\n{qd.invoke.truncate(text, RESULT_CAP)}")

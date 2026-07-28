@@ -112,11 +112,120 @@ append, in this order, each only when applicable:
     REFS: <n> saved (<comma-joined names>)
     COST: $<usd 4dp> (<profile name>)       # emitted only when cost > 0
 
+*Amended by v0.5 (2026-07-27, the field-report round): the receipt is read by the most
+expensive model in the system, so it is written like a prompt, not a log.* New BODY
+lines (fixed position, before the droppable C2 region), each only when applicable:
+
+    RUN: <n> attempt(s) · peak <p>% ctx · <s>s · <n> out · <n> denied · <n> strays
+                                            # every receipt, green included; a part is
+                                            # omitted when it would read zero/unknown
+    RETRY OF: <session_id>                  # this run is a cold re-run of that session
+    BRIEF: <path> @ <sha16> [(amended)] · ~<n> tokens [(<n> amendments — consolidate)]
+                                            # U6: the document version that briefed the
+                                            # run; the nudge appears past 5 amendments
+    TEST DODGE: <path> adds <marks> -- ...  # rendered on GREEN too, never droppable
+    GATE SLOW: preflight took <s>s of a <b>s verify budget -- ...     # green too
+    PREFLIGHT: green pre-run, declared expected (revision gate).      # expect="green"
+    REPORTED: report_dont_fix -- ...        # + "gate GREEN -- the reported problem did
+                                            #   not reproduce under this gate."
+    FINDINGS: <text>                        # parsed from the reply's machine-read tail
+    RESULT: valid (schema) + the ```json block VERBATIM
+    RESULT INVALID: <first 4 path-named errors>                      # status result_invalid
+    FIXTURES: <paths> lack captured-from provenance -- ...
+    SCOPE: <scope_violation paragraph>
+         | changed during the run but NOT by a logged worker write (caller co-work?):
+           <paths> -- reported, never reverted.
+         | out-of-scope change in <paths> NOT auto-reverted -- pre-run content too large
+           to snapshot ... Review and revert manually.
+    SPEC CHANGED (unattributed): <paths> -- left alone rather than reverted over a
+           caller's edit; gate integrity not guaranteed for this run.
+    HEAD MOVED: <n> commit(s) <pre_sha> -> <head_now7> -- <attribution clause>
+    SHELL APPROVAL NEEDED: <n> blocked in <k> group(s)   # grouped by deny reason, one
+                                            # example per group, ≤4 groups; full list in
+                                            # the run log's `blocked_commands`
+
+`HEAD MOVED:` is the NEUTRAL attribution grammar (C10): `"caller"` (scoped mode, where
+commits are hard-denied to the worker) and `"unknown"` (everywhere else) render it, and
+ROLLBACK then says review `git log <pre_sha>..HEAD` first. The v1 `COMMITTED: Qwen moved
+HEAD` accusation and its `git reset --hard` advice render only on positive worker
+attribution (or a v1-shaped ctx with no attribution key at all).
+
+C2-region blocks gain, in render order: `ADVISORY red: <name> — <first output line>` +
+`ADVISORY: <k>/<n> green[, <m> skipped (malformed)]` (the FIRST block; non-droppable
+while any gate is red), `STRAYS:` (after NOTES), then `LEDGER:` and `RESUME:` as the
+last two. `WORKTREE:` gains the dirty-main caveat (`(main tree had
+uncommitted changes at branch time -- they are NOT in this worktree)`). `GRAPH:` says
+"refresh running" only when one is actually scheduled (in-tree green run) and gains
+` · used <n>x this run` counted from the C10 allow-log. `BURN:` gains a wall-clock
+suffix and, on a caching endpoint, binds HEAVY on `prompt − cached` with a cache note
+instead of the resend-the-context prose.
+
+    STRAYS: <n> file(s) not named in the task: <paths> -- worker debris; review or rm.
+    LEDGER: run #<n> · lifetime <ok> ok / <red> red / <stopped> stopped
+            · peak-ctx record <p>%
+    RESUME: session_id=<sid> -- a follow-up in this warm session costs a sentence ...
+          | not recommended — <n> failed attempt(s) in this session carry their
+            confusion forward; re-delegate COLD ... (or retry_of=<sid>).
+
+`RESUME:` is three-way at one priority: the warm line for healthy statuses
+(`success`, `success_but_preflight_passed`, `unverified`, `reported`) *and* for any run
+with blocked shell commands (the approval loop only works in the same session); the
+cold line for every other red; nothing at all on `stopped` / `compaction_refused` /
+`error` / `refused`.
+
+Two gate refusals are receipts of their own rather than C2 lines — `GATE UNUSABLE:`
+(pre-flight timed out, raised BEFORE any attempt is burned) and `GATE VACUOUS:`
+(`preflight_expect="red"` and the gate already passes) — rendered as
+`STATUS: refused\n\n<text>` by the engine, which releases any worktree first.
+
+**Cap (N1), amended enforcement order.** Drop droppable C2 blocks by reverse priority
+(RESUME 7 → LEDGER 6 → BURN 5 → COST 4 → REFS 3 → GRAPH 2 → STRAYS / all-green
+ADVISORY 1 → NOTES 0; on the tie at 1 the stable sort drops the block appended first,
+the all-green ADVISORY), THEN truncate the `--- qwen result ---` tail (floor 200),
+THEN the final-verify tail (floor 400). WORKTREE/MERGE and a red ADVISORY are never
+droppable. The old enforcement stopped at the C2 drops, so body + tails alone could
+blow 3,000 chars — 4 of 18 receipts on this repo's own ledger did (max 4,721).
+
 **C3 — Engine→verdict seam:** engine hands verdict a ctx dict with exactly these v2
 keys added to the v1 ctx: `notes: str`, `worktree: {path,branch}|None`,
 `merge: "clean"|"conflict"|None`, `graph_line: str|None`, `refs_added: [str]`,
 `cost_usd: float`, `trust: "verified"|"self"`. Internals of ctx beyond the seam are
 engine's.
+
+*Amended by v0.5 (2026-07-27): the engine hands over FACTS, not a tree to re-read, and
+the status it hands over is FINAL.* Added keys:
+
+    work_cwd: str                  # the tree the run actually used (worktree or main)
+    tree_facts: {post_status, changed, numstat, head_moved, head_now, pubs} | None
+                                   # captured from work_cwd BEFORE any worktree
+                                   # commit/release. None => verdict recomputes from
+                                   # ctx["cwd"] -- the pinned v1 fallback the
+                                   # differential oracle depends on
+    meta: {blocked, writes, allowed, ...}   # all three ACCUMULATE across attempts
+                                   # (order-preserving dedupe); each QGATE log is
+                                   # fresh per attempt, so binding the last one alone
+                                   # dropped earlier evidence
+    writes: [repo-relative path]   # C10 positively-attributed worker writes
+    attribution: "hook" | "none"
+    scope_unattributed: [path]     # changed, no logged worker write -> reported
+    spec_unattributed: [path]      # spec changed, unattributed -> never reverted
+    unrestorable: [path]           # over the snapshot cap, not auto-reverted
+    strays: [path]                 # created, attributed, unnamed in the task
+    dodge: {path: [marker]}        # added skip/xfail/expectedFailure in test-ish files
+    findings: str | None           # extracted pre-truncation
+    advisory: [{name, ok, ms, head}] | absent      # absent unless gates were supplied
+    advisory_skipped: int          # malformed gate entries, counted not raised on
+    gate_ms: int, gate_slow: bool, verify_timeout_sec: int, preflight_expect: str
+    report: bool, fixtures_unproven: [path], report_gate_green: bool
+    result_json: str|None, result_errors: [str]
+    retry_of: str|None, run_id: str?, chain: {pos, of}?
+    head_moved_attribution: "caller" | "unknown"   # absent = v1 accusation
+
+**Status arrives final.** The `success_but_preflight_passed` demotion (U3.2, decision 4)
+happens in the engine, so chains, the run log and every server-side consumer read the
+same status the receipt shows. `qd/verdict.py` keeps a *conditioned* render-time
+demotion — idempotent for engine callers, intact for direct `render()` callers (the
+verdict_spec oracle) — and skips it entirely under `preflight_expect="green"`.
 
 **C4 — graph sidecar** `.qwen-delegate/graph.json`:
 `{"indexed_sha": str, "ts": iso8601, "status": "fresh"|"indexing"|"failed",
@@ -125,6 +234,27 @@ engine's.
 **C5 — run-log v2 record:** v1 record (see `specs/runlog_spec.py`) + `executor: str`,
 `cost_usd: float`, `worktree: str?`, `branch: str?`, `merge: str?`,
 `graph_refresh: {files: int, seconds: num, status: str}?`.
+
+*Amended by v0.5 (2026-07-27): the log finally has readers — `ledger_summary()` renders
+the LEDGER line from it, and `runs_in_flight()` answers "did my run die with the
+session".* The `extra` map gains, always: `blocked_commands: [str] (≤50)` (the full list
+the grouped receipt line elides), `graph_used: int`, `writes_attributed: int`,
+`caller_changed: int`, `strays: int`. Conditionally: `run_id: str` (a submitted run),
+`retry_of: str`, `verify_timeout_sec` / `preflight_expect` **only when non-default**
+(a key that reads 300/"any" in every record hides the runs where somebody turned a
+knob), `advisory: {red: int, of: int}` when gates were supplied, `report: bool` +
+`findings: bool` on a report run, and `chain: {pos, of, halted?}` — `halted` is derived
+from the link's own status, never passed back onto a receipt already rendered.
+
+**The running-record pair (U5.2).** A submit writes an OPEN record at spawn —
+`{tool, status: "running", run_id, pid, cwd, ts}` — and the completion record carries
+the same `run_id`, which is what closes it. Nothing rewrites the open line: a reader
+pairs by `run_id` and marks a run dead when its `pid` is gone (`os.kill(pid, 0)`; EPERM
+counts as alive), because daemon threads die with the MCP process. `ledger_summary()`
+SKIPS `running` records — counted, they inflated the lifetime total and filed every live
+run in the red bucket. A `batch` whose items span repos logs its completions into other
+trees and so leaves its marker open until the process ends: accepted, the marker still
+answers the question it exists for.
 
 **C6 — naming:** run-id = `r` + 6 lowercase hex; branch `qwen/<run-id>`; worktree dir
 `~/.qwen-delegate/worktrees/<project-slug>/<run-id>/`; builder self-tests match
@@ -160,6 +290,99 @@ but N subagents multiplex concurrently over one shared connection. So: batch for
 overhead-free fan-out, N thin manager subagents as the proven client-side alternative;
 never rely on single-loop parallel tool_use.
 
+*Amended by v0.5 (2026-07-27).* **The behavior flip of the round: `qwen_delegate` is
+ASYNCHRONOUS by default.** A call SUBMITS and answers in milliseconds with
+`STATUS: submitted` + `RUN:` + `RECEIPT:` (+ `PARTIAL:` for chain/batch) + `HEARTBEAT:`
++ `WATCH:`; the receipt lands as a file under `.qwen-delegate/receipts/<run-id>.md`
+(temp + rename, so its existence means it is complete). `wait: true` restores the old
+blocking call byte-for-byte. `qwen_query` stays synchronous — the answer *is* the
+deliverable and arrives in a minute or two. Additive-optional params added this round:
+
+    verify_timeout_sec: int        # arg > project/machine config > 300, clamped 10..3600
+    preflight_expect: "red"|"green"|"any"   # unrecognised falls back to "any"
+    advisory_gates: [{name, cmd}]  # never touch STATUS, never reach the worker
+
+*Amended by v0.5 phase 6 (2026-07-28): playbooks — briefs live in the repo, versioned
+by git, sent by name.* Additive-optional params, each spec-proven inert when absent:
+
+    brief_file: str   # repo-relative markdown document, realpath-confined to cwd: body
+                      # = the task (the call's `task` rides as an addendum), `---` front
+                      # matter supplies verify/touch_scope/shell_allow/approval_mode/
+                      # timeouts/preflight_expect/advisory_gates/max_iterations where
+                      # the call is silent (args > front matter > project > machine);
+                      # unknown keys, wrong-shaped values, unclosed fences refuse by
+                      # name. `chain: true` compiles `## Step <n>` sections into chain
+                      # links (preamble + own step each; leading verify:/touch_scope:
+                      # lines are per-step overrides) at the server seam
+                      # (`engine.expand_playbook`). trust/executor/worktree are
+                      # deliberately NOT front-matter keys — the caller's decisions.
+    vars: object      # fills {{slot}}s across the WHOLE file before parsing; unfilled
+                      # slots and keys matching no slot both refuse by name
+    amend_brief: bool # with retry_of: retry_message appends to the document as a dated
+                      # `## Amendments` line INSTEAD of the CORRECTION task append; the
+                      # write lands BEFORE the pre-run snapshot (pre-existing dirt,
+                      # never worker change) and only after the preconditions pass
+
+The worker editing the document is a `PLAYBOOK EDITED` trail line classified to the
+existing `spec_violation` status; protection is by CONTENT (sha captured post-amendment,
+restored via the T0 byte snapshot), never by base-diff — a base-diff would convict the
+amendment as a worker edit on every attempt. The stored brief (U5.5) keeps `brief_file`
++ `vars` + the caller's ADDENDUM — never the composed document (double-inline trap) and
+never front-matter-derived values (the document is the source of truth on retry). An
+oversized composed brief (>25% of the worker window, when known) refuses at precheck:
+`BRIEF TOO BIG`.
+    chain: [item]                  # dependent, serial, halts on the first non-green;
+                                   # mutually exclusive with `batch` (refused by name)
+    report_dont_fix: bool          # one attempt, one gate run, status "reported"
+    fixture_provenance: bool       # opt-in, default off until probe P7
+    result_schema: object          # a non-object is treated as absent, never refused
+    wait: bool                     # block instead of submit
+    retry_of: str                  # replay a stored brief COLD with a correction
+    retry_message: str
+
+Project keys that back call args (U5.6 recipe defaults; a call arg always wins):
+`approval_mode`, `shell_allow`, `timeout_sec`, `preflight_expect`,
+`verify_timeout_sec`, `fixture_globs`, plus `task_suffix` (appended to the task itself,
+so it rides compaction re-injection), `store_briefs: false` (opt out of U5.5 briefs) and
+`autoedit_via_hook` (default ON since probe P1, 2026-07-29; opt out with `false`).
+
+**Additive-evolution clause** (pinned in the `qd/schemas.py` docstring): existing names,
+enums and required lists never change — a caller's working call must keep working. New
+params are OPTIONAL only, and each lands with a spec proving that its ABSENCE leaves
+behavior and receipt identical. Descriptions may change freely; shapes may not.
+
+**C10 — attribution evidence** (produced by `scoped_hook.py`, read by `qd.invoke`,
+relayed by the engine): the hook appends one resolved path per ALLOWED write to
+`QGATE_WRITELOG` and one line per allowed shell command (plus `ungated:<tool>` for an
+allowed unknown tool) to `QGATE_ALLOWLOG`, beside the pre-existing `QGATE_DENYLOG`;
+`QGATE_MODE` is `"scoped"` or `"autoedit"`. `qd/invoke.py` reads all three into
+`meta["writes"]`/`meta["allowed"]`/`meta["blocked"]`; the engine accumulates them across
+attempts and re-expresses writes repo-relative (`ctx["writes"]`, `ctx["attribution"]`).
+
+*Policy — only positively-attributed writes are ever undone.* With a channel active
+(`scoped`, or `auto-edit` under `autoedit_via_hook`), touch-scope and spec violations
+are intersected with `ctx["writes"]`; the unattributed remainder is REPORTED (`SCOPE:` /
+`SPEC CHANGED (unattributed):`), never reverted and never a failed attempt. Caller
+co-work during a live run is recorded (`caller_changed` in the run log), never rolled
+back. With no channel, the receipt says attribution is unknown rather than accusing —
+and `git reset --hard` advice renders only under positive worker attribution.
+
+**C11 — heartbeat sidecar** `.qwen-delegate/progress.json`, written by `qd.limits.Progress`
+as the executor streams:
+
+    {"session": str|null, "records": int, "input_tokens": int, "last_type": str|null,
+     "updated": iso8601, "attempt": int, "state": "running"|"done"}
+
+Callers poll the file; no MCP surface changes. Two conditions are load-bearing: it is
+wired ONLY alongside a burn budget (`limits.compose(burn, progress)`; any `on_line`
+switches the executor to stream-json, and the streaming adapter emits no `stats`, so a
+heartbeat on a `burn_budget: 0` run would silently cost it the tool counts), and it is
+written to the SUBMIT cwd — the path the submit response advertises — behind
+`runlog_dir`'s self-ignoring `.gitignore`. *(Amended by v0.5 phase 6: it was written
+into `work_cwd`, so a worktree run's pulse landed inside its container while the poller
+watched the advertised path — a heartbeat nobody could see.)* `finish()` writes the
+terminal snapshot, or a poller cannot tell an ended run from a wedged one.
+
 ## 6. Concurrency model
 
 One reader thread (parse + lifecycle requests); one worker thread per `tools/call`;
@@ -179,6 +402,22 @@ limitation. For API endpoints the cache question is economic, not temporal — s
 prompt prefixes earn provider cache discounts; the run log's cost field captures it.
 Locked shared state: run-log file append, registry append, worktree table. Everything
 else per-call.
+
+*Amended by v0.5 (2026-07-27) — a submit is an ENQUEUE.* `qwen_delegate` takes no locks
+in the tool call: the endpoint semaphore and the repo lock are acquired INSIDE the
+background daemon thread, so the queue is as real as it ever was, it just no longer runs
+down the caller's clock. Two consequences. (1) The guard skip is a property of the
+HANDLER, not of the tool name — `_run_call` skips `_guards_for` only for a handler
+carrying the `@self_guarded` marker, so any other handler registered under that name (a
+test double, a future synchronous tool) keeps the guards it always had. (2) The same
+move killed a latent self-deadlock: a `batch` used to hold the single endpoint slot for
+the whole call while every item asked for it again. Chain and batch take their guards
+per link and release them before the next, so a chain holds one slot at a time, not one
+for its whole length. Results are files, not responses: every path through the
+background body ends in a receipt (raises included), or the `WATCH:` loop handed to the
+caller polls forever. Daemon threads die with the process — an MCP server whose session
+ends takes its in-flight runs with it, which is what the `running`-record pid check
+(C5) exists to report.
 
 ## 7. Build method — the plugin builds itself
 

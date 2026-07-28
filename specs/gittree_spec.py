@@ -257,5 +257,190 @@ class LinkedWorktree(Fixture):
         self.assertEqual(gittree.snapshot(self.cwd), {})
 
 
+class T0Restore(Fixture):
+    """snapshot_contents + restore_paths: reverts restore T0 BYTES, never touch
+    the index, round-trip binary, and refuse (report) over-cap paths instead of
+    guessing at content."""
+
+    def test_pre_dirty_file_restores_to_t0_not_head(self):
+        put(self.cwd, "roman.py", "T0_DIRTY = 1\n")          # dirty before run
+        pre = gittree.snapshot(self.cwd)
+        t0 = gittree.snapshot_contents(self.cwd, pre, tempfile.mkdtemp())
+        put(self.cwd, "roman.py", "WORKER = 1\n")            # worker tramples
+        rc, out = gittree.git(self.cwd, "rev-parse", "HEAD")
+        restored, unrestored = gittree.restore_paths(
+            self.cwd, ["roman.py"], base=out.strip(), t0=t0)
+        self.assertEqual(restored, ["roman.py"])
+        self.assertEqual(unrestored, [])
+        with open(os.path.join(self.cwd, "roman.py")) as f:
+            self.assertEqual(f.read(), "T0_DIRTY = 1\n")
+
+    def test_restore_never_touches_the_index(self):
+        rc, out = gittree.git(self.cwd, "rev-parse", "HEAD")
+        put(self.cwd, "roman.py", "WORKER = 1\n")
+        gittree.restore_paths(self.cwd, ["roman.py"], base=out.strip(), t0={})
+        r = sh(self.cwd, "git", "diff", "--cached", "--name-only")
+        self.assertEqual(r.stdout.strip(), "")
+        with open(os.path.join(self.cwd, "roman.py")) as f:
+            self.assertIn("to_roman", f.read())
+
+    def test_binary_round_trip(self):
+        blob = bytes(range(256)) * 3
+        with open(os.path.join(self.cwd, "blob.bin"), "wb") as f:
+            f.write(blob)
+        pre = gittree.snapshot(self.cwd)
+        t0 = gittree.snapshot_contents(self.cwd, pre, tempfile.mkdtemp())
+        with open(os.path.join(self.cwd, "blob.bin"), "wb") as f:
+            f.write(b"clobbered")
+        gittree.restore_paths(self.cwd, ["blob.bin"], t0=t0)
+        with open(os.path.join(self.cwd, "blob.bin"), "rb") as f:
+            self.assertEqual(f.read(), blob)
+
+    def test_over_cap_file_reported_not_reverted(self):
+        put(self.cwd, "big.txt", "x")
+        pre = gittree.snapshot(self.cwd)
+        saved_cap = gittree.SNAPSHOT_FILE_CAP
+        gittree.SNAPSHOT_FILE_CAP = 0
+        try:
+            t0 = gittree.snapshot_contents(self.cwd, pre, tempfile.mkdtemp())
+        finally:
+            gittree.SNAPSHOT_FILE_CAP = saved_cap
+        self.assertEqual(t0["big.txt"], ("toobig", None))
+        put(self.cwd, "big.txt", "worker content")
+        restored, unrestored = gittree.restore_paths(
+            self.cwd, ["big.txt"], t0=t0)
+        self.assertEqual(restored, [])
+        self.assertEqual(unrestored, ["big.txt"])
+        with open(os.path.join(self.cwd, "big.txt")) as f:
+            self.assertEqual(f.read(), "worker content")     # untouched
+
+    def test_deleted_at_t0_restores_by_removal(self):
+        os.remove(os.path.join(self.cwd, "roman.py"))
+        pre = gittree.snapshot(self.cwd)                     # 'D roman.py'
+        t0 = gittree.snapshot_contents(self.cwd, pre, tempfile.mkdtemp())
+        put(self.cwd, "roman.py", "RESURRECTED = 1\n")       # worker recreates
+        gittree.restore_paths(self.cwd, ["roman.py"], t0=t0)
+        self.assertFalse(os.path.exists(os.path.join(self.cwd, "roman.py")))
+
+
+class UntrackedExpansion(Fixture):
+    """`git status --porcelain` collapses a new directory into one `dir/`
+    entry. Right for a CHANGED summary, wrong for every per-file rule."""
+
+    def test_a_new_directory_is_expanded_to_its_files(self):
+        put(self.cwd, "pkg/a.py", "a = 1\n")
+        put(self.cwd, "pkg/sub/b.py", "b = 1\n")
+        self.assertEqual(gittree.status_map(self.cwd), {"pkg/": "??"})
+        self.assertEqual(sorted(gittree.untracked_files(self.cwd)),
+                         ["pkg/a.py", "pkg/sub/b.py"])
+
+    def test_tracked_edits_are_not_untracked(self):
+        put(self.cwd, "roman.py", "CHANGED = 1\n")
+        self.assertEqual(gittree.untracked_files(self.cwd), [])
+
+
+class DodgeMarkers(Fixture):
+    """U4.2: skip/xfail markers ADDED to test-ish files during a run.
+
+    The failure mode is not a worker that cannot fix a test -- it is one that
+    can, by skipping it, and hands back a green gate for the trouble. Only
+    ADDED lines count: a marker already in the file is somebody's considered
+    decision, and a receipt that cries wolf on those is one nobody reads."""
+
+    def base(self):
+        rc, out = gittree.git(self.cwd, "rev-parse", "HEAD")
+        return out.strip()
+
+    def test_an_added_marker_is_reported_with_its_file(self):
+        put(self.cwd, "test_roman.py", "def test_one():\n    assert True\n")
+        commit_all(self.cwd, "tests")
+        sha = self.base()
+        put(self.cwd, "test_roman.py",
+            "import unittest\n\n\n@unittest.skip('later')\n"
+            "def test_one():\n    assert True\n")
+        self.assertEqual(gittree.dodge_markers(self.cwd, sha),
+                         {"test_roman.py": ["@unittest.skip"]})
+
+    def test_a_marker_already_in_the_file_is_not_this_runs_doing(self):
+        put(self.cwd, "test_roman.py",
+            "import unittest\n\n\n@unittest.skip('old')\n"
+            "def test_one():\n    assert True\n")
+        commit_all(self.cwd, "tests")
+        sha = self.base()
+        put(self.cwd, "test_roman.py",
+            "import unittest\n\n\n@unittest.skip('old')\n"
+            "def test_one():\n    assert True\n\n\ndef test_two():\n"
+            "    assert True\n")
+        self.assertEqual(gittree.dodge_markers(self.cwd, sha), {})
+
+    def test_prose_and_ordinary_words_do_not_fire(self):
+        put(self.cwd, "test_roman.py", "def test_one():\n    pass\n")
+        commit_all(self.cwd, "tests")
+        sha = self.base()
+        put(self.cwd, "test_roman.py",
+            "# we skipped the slow ones; skiplist is elsewhere\n"
+            "SKIPPED = 0\ndef test_one():\n    pass\n")
+        self.assertEqual(gittree.dodge_markers(self.cwd, sha), {})
+
+    def test_every_marker_form_the_field_uses(self):
+        put(self.cwd, "test_roman.py", "def test_one():\n    pass\n")
+        commit_all(self.cwd, "tests")
+        sha = self.base()
+        put(self.cwd, "test_roman.py",
+            "@skip\n@unittest.skip\n@pytest.mark.xfail\n"
+            "@unittest.expectedFailure\n@pytest.mark.skipif(True)\n"
+            "def test_one():\n    pass\n")
+        found = gittree.dodge_markers(self.cwd, sha)["test_roman.py"]
+        for marker in ("@skip", "@unittest.skip", "pytest.mark.xfail",
+                       "expectedFailure"):
+            self.assertIn(marker, found)
+
+    def test_ordinary_source_is_not_scanned(self):
+        sha = self.base()
+        put(self.cwd, "roman.py", "@skip\ndef to_roman(n):\n    return 'I'\n")
+        self.assertEqual(gittree.dodge_markers(self.cwd, sha), {})
+
+    def test_a_committed_dodge_is_still_caught(self):
+        # Same hole the spec guard closes: diffing to HEAD after the worker
+        # commits sees nothing at all.
+        put(self.cwd, "test_roman.py", "def test_one():\n    pass\n")
+        commit_all(self.cwd, "tests")
+        sha = self.base()
+        put(self.cwd, "test_roman.py",
+            "import unittest\n@unittest.skip('x')\ndef test_one():\n    pass\n")
+        commit_all(self.cwd, "dodge")
+        self.assertIn("test_roman.py", gittree.dodge_markers(self.cwd, sha))
+
+    def test_a_brand_new_test_file_is_read_whole(self):
+        sha = self.base()
+        put(self.cwd, "tests/test_new.py",
+            "import unittest\nclass T(unittest.TestCase):\n"
+            "    @unittest.expectedFailure\n    def test_x(self): pass\n")
+        self.assertEqual(gittree.dodge_markers(self.cwd, sha),
+                         {"tests/test_new.py": ["expectedFailure"]})
+
+    def test_an_untracked_file_that_predates_the_run_is_left_alone(self):
+        # It is new to git at pre_sha but not new to this run, and blaming a
+        # run for what was already on disk is the false-accusation class.
+        sha = self.base()
+        put(self.cwd, "test_scratch.py", "import unittest\n@unittest.skip\n"
+                                         "def test_x(): pass\n")
+        pre = gittree.snapshot(self.cwd)
+        self.assertEqual(gittree.dodge_markers(self.cwd, sha, pre), {})
+        self.assertIn("test_scratch.py", gittree.dodge_markers(self.cwd, sha))
+
+    def test_a_dodge_inside_a_brand_new_directory_is_found(self):
+        # `git status --porcelain` collapses a new directory to one `dir/`
+        # entry -- without -uall the file carrying the dodge never appears,
+        # and a worker could hide every skip behind one fresh folder.
+        sha = self.base()
+        put(self.cwd, "tests/inner/test_new.py",
+            "import unittest\n\n\n@unittest.skip('hidden')\n"
+            "def test_n():\n    assert True\n")
+        found = gittree.dodge_markers(self.cwd, sha)
+        self.assertIn("tests/inner/test_new.py", found)
+        self.assertEqual(found["tests/inner/test_new.py"], ["@unittest.skip"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

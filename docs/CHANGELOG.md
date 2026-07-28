@@ -1,5 +1,209 @@
 # Changelog
 
+## 0.5.0-dev — the field-report round
+
+Forty-five real delegations produced a field report: seven gotchas and ten wishes,
+ranked by what each one cost the caller. Every gotcha was confirmed in the code, and
+looking for them turned up several bugs nobody had reported — two of which destroyed
+work. One principle organises the whole round: **the receipt is read by the most
+expensive model in the system, so it should be optimized like a prompt, not written
+like a log.**
+
+Two commits: phases 0–4 (safety, receipt diet, attribution, gate hygiene, features) and
+phase 5 (async by default, result contracts, `retry_of`, a self-updating capability
+map). The local endpoint was busy throughout, so all of it was built against the
+hermetic spec harness — 706 tests — and the eight things that need a live worker are
+named at the end and ship dark until they are answered. Version stays 0.4.1 until
+release; this section is `dev` because the bump happens in the release PR.
+
+### A revert could destroy uncommitted work that was never the worker's
+
+The out-of-scope revert ran `git checkout <sha> -- <path>`, which does two wrong things
+at once: it restores what HEAD holds — not what the tree held before the run — and it
+**stages** the result, so the destruction does not show in `git diff`. A caller's
+uncommitted fix, sitting in a file the worker then touched, was overwritten and the
+evidence tidied away.
+
+Reverts now restore bytes. Every dirty file is copied at T0 (8 MB per file, 64 MB per
+run) and restored from that copy; T0-clean files come back from the commit. The index is
+never touched. Files over the cap are **reported and left alone** — `SCOPE: ... NOT
+auto-reverted` — because guessing at content is worse than saying so.
+
+The same guard also had its tense wrong: violations were classified against files
+tracked *now*, so a worker that created a file and `git add`ed it turned its own new
+file into a "violation" whose revert then silently did nothing. It now asks what was
+tracked at the pre-run sha.
+
+### `touch_scope` was silently unenforced without a gate
+
+The loop broke out on "no verify command" *before* it checked the scope, so a run
+without a gate promised a blast radius it never enforced. The order is fixed, and a
+scope violation on the final attempt now reports `scope_violation` instead of
+`verify_failed` — it was reporting the wrong failure to the one reader who has to decide
+what to do about it.
+
+### The receipt stopped accusing the worker of the caller's work
+
+`COMMITTED: Qwen moved HEAD during this run. It was told not to.` fired whenever HEAD
+moved for any reason — including the human committing in another terminal, roughly eight
+times per project in the field, each one an investigation that found nothing. Worse, it
+recommended `git reset --hard`.
+
+There is now an attribution channel: the PreToolUse hook logs every write it allows and
+every shell command it allows, and the engine reads those logs back. With a channel
+active, **only positively attributed writes are ever reverted**. Files that changed
+during the run with no logged worker write are reported as co-work — `SCOPE: changed
+during the run but NOT by a logged worker write ... reported, never reverted` — and a
+changed spec file with no worker write is left alone with a gate-integrity caveat rather
+than reverted over somebody's edit. `HEAD MOVED:` is neutral about who did it (in
+`scoped` mode it knows the worker *can't* have: commits are hard-denied), and
+`reset --hard` advice appears only under positive worker evidence.
+
+### Receipts that tell the truth about themselves
+
+- **The 3,000-character cap was not enforced.** It dropped optional blocks and then gave
+  up; 4 of 18 receipts in this repo's own log exceeded it, the largest at 4,721. It now
+  drops blocks by a pinned priority, then trims the worker's result, then the verify
+  output — with floors, so the two things worth reading survive.
+- **`GRAPH:` said "refresh running" when nothing was going to refresh** — on failed runs
+  and worktree runs, which is most of the ones you would check it on. It says so only
+  when a refresh is actually scheduled, and now also reports ` · used <n>x this run`, so
+  a graph the worker never consulted is visible instead of invisible.
+- **The tree facts came from the wrong tree.** The renderer re-read the *main* repo even
+  for worktree runs, and did it after the work had been committed or the worktree
+  deleted. The engine captures them from the tree the run actually used, at the moment
+  before that happens.
+- **12 near-identical `SHELL APPROVAL NEEDED` lines** (~40% of a red receipt) became
+  `n blocked in k group(s)` with one example per reason; the full list moved to the run
+  log.
+- **New fixed line: `RUN:`** — attempts, peak context, wall time, output tokens,
+  denials, strays. The numbers a caller used to reassemble from four sections.
+- **`BURN:` gained time and cache sense.** On a local endpoint the money is always
+  $0.0000, so the cost axis is GPU minutes; and on a caching endpoint the HEAVY warning
+  now binds on the un-cached remainder, because a raw multi-million input count was
+  sending callers to diagnose perfectly healthy runs.
+- **`LEDGER:`** finally reads the run log nothing had ever read: run number, lifetime
+  ok/red/stopped, peak-context record.
+- **`RESUME:`** — session resume has existed all along and all 45 field delegations
+  started cold, because nothing ever mentioned it. The line now says so on a healthy
+  run, and says the opposite on a failed one: a session that failed carries its
+  confusion forward, so the repair path is a cold re-run, not an argument.
+
+### The gate is a thing that can fail too
+
+- **`verify_timeout_sec`** (default 300, clamped 10..3600) replaces a bare literal, and
+  a pre-flight that times out **refuses the run before any attempt is burned**
+  (`GATE UNUSABLE`). The field case: a gate that hit the network timed out before and
+  after the run, and a perfectly good delivery was filed as `gate_suspect`. The timeout
+  is now its own return value rather than something inferred from the output text, so a
+  gate that *prints* the word cannot refuse its own run.
+- **`preflight_expect`** says what the gate should say beforehand. `"red"` (greenfield)
+  refuses a gate that already passes — it cannot prove the work happened. `"green"`
+  (revision work on a passing suite) stops `success_but_preflight_passed` crying wolf on
+  every task whose suite was green by premise. That demotion also moved into the engine,
+  so chains and the run log see the same status the receipt shows.
+- **`GATE SLOW:`** when the pre-flight eats more than half its budget — rendered on
+  green too, because the run that passed is the cheapest one to fix it on.
+- **`advisory_gates`** are loose checks (conformance, placement, design drift) that run
+  once at the end and *indicate* rather than gate: they never touch `STATUS`, never
+  enter a retry prompt, and never reach the worker. Red ones sit at the top of the
+  receipt and cannot be dropped by the cap — an indicator whose absence reads as green
+  is worse than no indicator.
+
+### Work that isn't "make this command pass"
+
+- **`chain`** runs dependent steps in one call, in order, on the same tree, halting at
+  the first link that does not come back green (the rest return one-line `SKIPPED`
+  receipts). `batch` remains the independent one; sending both is refused by name.
+- **`report_dont_fix`** buys a diagnosis instead of a repair: one attempt, one gate run,
+  status `reported`, and a `FINDINGS:` line from the worker. A red gate is the
+  deliverable — it is the reproduction.
+- **`TEST DODGE:`** flags a `skip` / `xfail` / `expectedFailure` added to the very tests
+  being delivered. It renders on green and cannot be dropped, because that is exactly
+  the case where an honest red and a quiet green look identical.
+- **`STRAYS:`** names files the run created that the task never mentioned — the scratch
+  script, the second copy of a module, the debug dump.
+- **`fixture_provenance`** (opt-in) requires created fixtures to carry a
+  `captured-from:` line, or a `.src` sidecar for binaries. Imagined fixtures were the
+  field report's worst defect class, and a gate written against invented bytes passes
+  forever.
+
+### Delegating no longer means waiting
+
+`qwen_delegate` **submits**. The call comes back in milliseconds with a run id, the path
+its receipt will land at, a heartbeat file and a shell one-liner that waits for it; the
+delegation continues on a background thread and files the receipt when it is done.
+Blocking for minutes bought the caller nothing it could not get from a file and cost it
+everything it could have done meanwhile. `wait: true` restores the old call byte for
+byte, and `qwen_query` was left synchronous — there, the answer *is* the deliverable.
+
+Consequences worth knowing:
+
+- Refusals that can be decided from the call alone — a bad `trust`, a dirty spec file, a
+  `retry_of` with no stored brief — are answered in the response, not filed as a receipt
+  nobody is waiting on yet. Anything that costs real time (the pre-flight gate) is part
+  of the run and lands in the receipt.
+- A chain or batch writes a `.partial.md` beside its receipt, rewritten as each link
+  lands, so an eight-step chain can be read while it runs. (Its links are prechecked
+  individually as they run, so their refusals arrive as receipts; only a lone
+  delegation's preconditions are answered in the submit response.)
+- A submit takes no locks; the endpoint and repo guards are acquired inside the
+  background thread, which makes a submit an enqueue — and incidentally fixed a latent
+  self-deadlock where a batch held the single endpoint slot while each of its items
+  asked for it again.
+- The run log gains an open `running` record with the owning pid. Background threads die
+  with the process, so a run whose pid is gone died with its session — that is now a
+  question the log can answer instead of a mystery.
+- `.qwen-delegate/progress.json` gets a live snapshot (records, input tokens, attempt,
+  state) while the run streams, so "is it hung?" costs a file read rather than a turn.
+
+### Getting a value back, and correcting a run without retyping it
+
+- **`result_schema`** asks for a shape, not prose: the worker is told to end with a
+  fenced JSON block, a small validator checks it against a subset of JSON Schema
+  (type/required/properties/items/enum) and feeds every violation back by path like a
+  failed gate. The conforming block is rendered verbatim in the receipt body — never in
+  the droppable region, never in the truncated tail. It is on `qwen_query` too, where
+  there is no retry loop, so the check is simply reported.
+- **`retry_of`** re-runs an earlier delegation's stored brief with `retry_message`
+  appended as a correction, and runs it **cold** on purpose. Briefs live in
+  `.qwen-delegate/briefs/`; `"store_briefs": false` opts out. Corrections stack across
+  retries, and the stored task never accumulates the project's standing suffix.
+- **Recipe defaults.** `.qwen-delegate.json` can now set `approval_mode`, `shell_allow`,
+  `timeout_sec`, `preflight_expect` and `verify_timeout_sec` once instead of every call
+  repeating them (a call argument always wins), plus **`task_suffix`** — the standing
+  worker discipline, appended to the task server-side, where it survives a compaction
+  that would have eaten it out of `QWEN.md`.
+
+### How a capability reaches the agent that would use it
+
+Not through this file. A changelog is read by people; the agents doing the delegating
+learn what the plugin can do from two places only — the managed block in a project's
+`CLAUDE.md` and the receipt itself. So that block is now **managed**: version-stamped,
+rewritten in place from the template once per plugin version, byte-identical no-op when
+current, and a strict no-op when the file or its markers are absent. The rule the round
+adopted: every new capability lands either as one line in that block or as a receipt
+affordance (the way `RESUME:` did) — never only in long-form docs, which is how a
+feature stays undiscovered for 45 delegations.
+
+### Known gaps
+
+- Eight live probes are deferred until the endpoint is free, and the features that
+  depend on them ship dark: attribution outside `scoped` mode (`autoedit_via_hook`,
+  off), fixture provenance (opt-in), the cached-token branch of `BURN`, and the
+  heartbeat's write cadence. `docs/PENDING.md` lists all eight with what each gates.
+- Delete handling — `allow_delete` and stray auto-clean — is designed and **not built**:
+  strays are reported only. A delete parser guessing at command phrasings is the one bug
+  class with no rollback, so it waits for the probe.
+- `workers` (best-of-N) is still advertised in the schema and the skill and still not
+  implemented. Untouched deliberately: closing it is a build or a deletion, not a
+  documentation pass.
+- The heartbeat is written only when a burn budget is live (the default), because any
+  streaming callback costs the run its richer batch-mode statistics — the same 0.4.0
+  trade, unresolved.
+- A submitted run is a thread of this MCP server, so ending the session kills it. The
+  log reports that honestly; a detached runner that survives is not built.
+
 ## 0.4.1 — the other truncation
 
 0.4.0 opened with "a day of debugging one truncated query" and fixed the

@@ -7,6 +7,12 @@ tool/param does, nothing more. The measured guidance they used to carry lives in
 skills/delegation/SKILL.md, loaded only when a session actually delegates. The
 input SHAPES (names, params, enums, required) are frozen here; only description
 text may change.
+
+Additive evolution (C9): existing names, enums and required lists never change
+-- a caller's working call must keep working. New OPTIONAL params may be added
+by a C9 amendment, each landing with a spec proving that its ABSENCE leaves
+behavior and receipt identical, so the freeze holds for everyone who never
+passes it.
 """
 
 import json
@@ -14,13 +20,13 @@ import json
 TOOL = json.loads(r'''
 {
   "name": "qwen_delegate",
-  "description": "Delegate a coding task to the local Qwen worker on free tokens. It builds in `cwd`; this server runs `verify` after each attempt, feeds failures back, and returns a short receipt. The worker's self-report is never evidence -- the gate decides. Before first use, load the `delegation` skill: it carries the discipline (gates, approval modes, timeouts, fan-out, sessions).",
+  "description": "Delegate a coding task to the local Qwen worker on free tokens. The call SUBMITS and answers in seconds with a run id, the file path its receipt will land at, a heartbeat file and a shell one-liner to wait on it -- do other work, then read that file (`wait: true` blocks and returns the receipt instead). The run builds in `cwd`; this server runs `verify` after each attempt and feeds failures back. The worker's self-report is never evidence -- the gate decides. Before first use, load the `delegation` skill: it carries the discipline (gates, approval modes, timeouts, fan-out, sessions).",
   "inputSchema": {
     "type": "object",
     "properties": {
       "task": {
         "type": "string",
-        "description": "Concrete task: exact paths, symbols, expected end state. Vague tasks get invented scope -- route those through approval_mode 'plan'."
+        "description": "Concrete task: exact paths, symbols, expected end state. Vague tasks get invented scope -- route those through approval_mode 'plan'. A project's .qwen-delegate.json `task_suffix` is appended to every task server-side, so standing discipline does not have to be retyped here."
       },
       "cwd": {
         "type": "string",
@@ -56,7 +62,7 @@ TOOL = json.loads(r'''
         "items": {
           "type": "string"
         },
-        "description": "scoped mode only: extra allowed command regexes -- how you approve a command a prior run surfaced as SHELL APPROVAL NEEDED."
+        "description": "scoped mode only: extra allowed command regexes -- how you approve a command a prior run surfaced as SHELL APPROVAL NEEDED. Project default: .qwen-delegate.json `shell_allow`."
       },
       "shell_feedback": {
         "type": "string",
@@ -72,11 +78,11 @@ TOOL = json.loads(r'''
           "yolo",
           "scoped"
         ],
-        "description": "'auto-edit' = write, no shell (default for code) | 'plan' = read-only (any vague task) | 'scoped' = auto-edit + allowlisted shell | 'yolo' = full shell (only when shell IS the work). 'default'/'auto' deny everything headless. Details: delegation skill."
+        "description": "'auto-edit' = write, no shell (default for code) | 'plan' = read-only (any vague task) | 'scoped' = auto-edit + allowlisted shell | 'yolo' = full shell (only when shell IS the work). 'default'/'auto' deny everything headless. Project default: .qwen-delegate.json `approval_mode`. Details: delegation skill."
       },
       "timeout_sec": {
         "type": "integer",
-        "description": "Per-attempt kill, seconds (default 900, max 7200). Size up for large tasks -- timing model in the delegation skill."
+        "description": "Per-attempt kill, seconds (default 900, or project .qwen-delegate.json `timeout_sec`; max 7200). Size up for large tasks -- timing model in the delegation skill."
       },
       "worktree": {
         "type": "string",
@@ -107,6 +113,69 @@ TOOL = json.loads(r'''
           "type": "object"
         },
         "description": "N independent delegations in ONE call (same fields per item), fanned across worktrees with per-item receipts -- the reliable fan-out; separate tool calls serialize."
+      },
+      "chain": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        },
+        "description": "DEPENDENT steps in ONE call (same fields per item), run in order on the same tree; the first link that does not come back green halts the rest, which render as one-line SKIPPED receipts. Mutually exclusive with `batch` -- that one is for INDEPENDENT work."
+      },
+      "report_dont_fix": {
+        "type": "boolean",
+        "description": "Diagnose, do not repair: one attempt, one `verify` run, no retry loop, status 'reported'. The gate output is the deliverable (a red gate is the reproduction) plus a FINDINGS line from the worker."
+      },
+      "fixture_provenance": {
+        "type": "boolean",
+        "description": "Require every fixture file the run creates (under fixtures/testdata/golden/snapshots/cassettes, or project `fixture_globs`) to carry a `captured-from: <url or command> <date>` line in its first 10 lines -- a `<path>.src` sidecar for binaries. Violations are fed back by name; the last attempt ends 'fixture_unproven'. Imagined fixtures pass any gate written against them."
+      },
+      "verify_timeout_sec": {
+        "type": "integer",
+        "description": "Kill time for ONE `verify` run, seconds (default 300, or project .qwen-delegate.json `verify_timeout_sec`; clamped 10..3600). A pre-flight that times out refuses the run before any attempt is burned."
+      },
+      "preflight_expect": {
+        "type": "string",
+        "enum": [
+          "red",
+          "green",
+          "any"
+        ],
+        "description": "What `verify` should say BEFORE the worker runs. 'red' (greenfield): a pre-flight that passes refuses the run -- the gate could not prove the work. 'green' (revision work on an already-passing suite): no success_but_preflight_passed demotion. 'any' (default): today's behavior. Project default: .qwen-delegate.json `preflight_expect`."
+      },
+      "result_schema": {
+        "type": "object",
+        "description": "The SHAPE you need back. The worker is told to end its reply with a fenced ```json block conforming to this (subset: type, required, properties, items, enum); the server validates it, feeds every violation back by path like a failed gate, and ends the run 'result_invalid' if the attempts run out. The receipt carries the block verbatim -- you parse a value instead of prose."
+      },
+      "brief_file": {
+        "type": "string",
+        "description": "Repo-relative markdown playbook to use as the brief: its body becomes the task (your `task` rides along as an addendum), `---` front matter supplies verify/touch_scope/approval_mode/timeouts where the call does not, and {{slot}}s fill from `vars`. Front matter `chain: true` compiles `## Step <n>` sections into a chain. The receipt pins `BRIEF: path @ digest`; the worker editing the document is reverted like a spec edit. Versioned by git -- send the name, not the text."
+      },
+      "vars": {
+        "type": "object",
+        "description": "Values for the {{slot}} placeholders in brief_file. An unfilled slot and a key matching no slot are both refused by name."
+      },
+      "amend_brief": {
+        "type": "boolean",
+        "description": "With retry_of: append retry_message to the playbook itself as a dated `## Amendments` line (git versions the correction) INSTEAD of a CORRECTION on the task text. The amendment lands before the run's snapshot, so it reads as pre-existing dirt, never worker change."
+      },
+      "retry_of": {
+        "type": "string",
+        "description": "session_id of an earlier delegation in this cwd: re-run its STORED brief (task, gate, scope, mode, trust) with `retry_message` appended, COLD -- no session resume, because a session that failed argues with the correction. Pass `task: \"\"` to reuse the stored task; any argument you do pass beats the stored one. Briefs live in .qwen-delegate/briefs/ (project key `store_briefs: false` opts out)."
+      },
+      "retry_message": {
+        "type": "string",
+        "description": "One line of correction for a `retry_of` run, appended to the stored task as CORRECTION. Say what the last attempt got wrong -- not the task again."
+      },
+      "wait": {
+        "type": "boolean",
+        "description": "Block until the run finishes and return the receipt in this response, instead of submitting. Default false: a call SUBMITS and answers at once with a run id, the receipt path it will land at, and a WATCH one-liner. Only pass this when you have nothing else to do with the wait."
+      },
+      "advisory_gates": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        },
+        "description": "Loose gates [{name, cmd}] run once after the final attempt in the run's tree. They NEVER affect status, never enter a retry prompt, never reach the worker -- red ones just glow in the receipt (architecture/conformance seams)."
       }
     },
     "required": [
@@ -151,6 +220,10 @@ QUERY_TOOL = json.loads(r'''
       "timeout_sec": {
         "type": "integer",
         "description": "Kill the query after this many seconds (default 900)."
+      },
+      "result_schema": {
+        "type": "object",
+        "description": "The SHAPE you need back: the worker is asked to end its answer with a fenced ```json block conforming to this (subset: type, required, properties, items, enum). A query has no retry loop, so the check is REPORTED -- one `RESULT:` line above the answer says valid, or names the first violation."
       }
     },
     "required": [

@@ -27,6 +27,16 @@ def git(cwd, *a):
         return 1, ""
 
 
+def git_bytes(cwd, *a):
+    """git() with raw stdout bytes -- for file CONTENT (`git show`), which must
+    round-trip binary exactly and must not have its trailing newlines stripped."""
+    try:
+        p = subprocess.run(["git", *a], cwd=cwd, capture_output=True, timeout=30)
+        return p.returncode, p.stdout or b""
+    except Exception:
+        return 1, b""
+
+
 def is_git_repo(cwd):
     rc, out = git(cwd, "rev-parse", "--is-inside-work-tree")
     return rc == 0 and out == "true"
@@ -47,6 +57,21 @@ def status_map(cwd):
         if len(line) > 3:
             m[line[3:].strip()] = line[:2].strip()
     return m
+
+
+def untracked_files(cwd):
+    """Every untracked PATH, directories expanded (`-uall`).
+
+    `git status --porcelain` collapses a brand-new directory into a single
+    `dir/` entry. That is the right summary for CHANGED, and useless to any
+    rule about individual files: a fixture check reading it would police a
+    directory name, and a stray line would print one.
+    """
+    rc, out = git(cwd, "status", "--porcelain", "-uall")
+    if rc != 0 or not out:
+        return []
+    return [line[3:].strip() for line in out.splitlines()
+            if line[:2].strip() == "??" and len(line) > 3]
 
 
 def file_sha(cwd, path):
@@ -73,6 +98,97 @@ def snapshot(cwd):
     fact rewritten the file.
     """
     return {p: (code, file_sha(cwd, p)) for p, code in status_map(cwd).items()}
+
+
+# Byte-snapshot caps. Per-file mirrors file_sha's big-file threshold; the total
+# bounds one run's disk cost. A path over either cap is recorded as
+# NON-RESTORABLE and later reported instead of auto-reverted -- restoring it
+# from a commit would destroy pre-run edits, which is worse than leaving an
+# out-of-scope change on disk for review.
+SNAPSHOT_FILE_CAP = 8_000_000
+SNAPSHOT_TOTAL_CAP = 64_000_000
+
+
+def snapshot_contents(cwd, status, dest_dir):
+    """Save the BYTES of every dirty path so a later revert can restore the
+    tree exactly as it was at T0 -- not as HEAD had it.
+
+    `git checkout <sha> -- p` restores the COMMITTED content: for a file that
+    was already dirty before the run, that destroys the pre-run edits (measured
+    in the field: a caller's uncommitted fix, reverted and staged, gone).
+    Returns {path: ("file", saved_abs) | ("absent", None) | ("toobig", None)};
+    "absent" marks a path dirty-by-deletion at T0, whose restoration is removal.
+    """
+    saved = {}
+    total = 0
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception:
+        return {p: ("toobig", None) for p in status}
+    for p in status:
+        full = os.path.join(cwd, p)
+        try:
+            if not os.path.isfile(full):
+                saved[p] = ("absent", None)
+                continue
+            size = os.path.getsize(full)
+            if size > SNAPSHOT_FILE_CAP or total + size > SNAPSHOT_TOTAL_CAP:
+                saved[p] = ("toobig", None)
+                continue
+            dst = os.path.join(
+                dest_dir,
+                hashlib.sha256(p.encode("utf-8", "replace")).hexdigest()[:24])
+            with open(full, "rb") as src, open(dst, "wb") as out:
+                out.write(src.read())
+            total += size
+            saved[p] = ("file", dst)
+        except Exception:
+            saved[p] = ("toobig", None)  # unreadable: same policy as too big
+    return saved
+
+
+def restore_paths(cwd, paths, base=None, t0=None):
+    """Restore `paths` to their T0 state WITHOUT touching the index.
+
+    T0-dirty paths come back byte-for-byte from the `snapshot_contents` map;
+    T0-clean paths from `git show base:path`. The old `git checkout <sha> -- p`
+    form did both jobs wrong: it restored the committed content over pre-run
+    edits AND staged the result, so the destruction was invisible to a later
+    `git diff`. Returns (restored, unrestored) path lists.
+    """
+    restored, unrestored = [], []
+    for p in paths or []:
+        full = os.path.join(cwd, p)
+        try:
+            ent = (t0 or {}).get(p)
+            if ent is not None:
+                kind, src = ent
+                if kind == "file":
+                    with open(src, "rb") as f:
+                        data = f.read()
+                    with open(full, "wb") as out:
+                        out.write(data)
+                elif kind == "absent":
+                    if os.path.exists(full):
+                        os.remove(full)
+                else:  # non-restorable: report, never guess at content
+                    unrestored.append(p)
+                    continue
+                restored.append(p)
+                continue
+            rc, data = git_bytes(cwd, "show", f"{base or 'HEAD'}:{p}")
+            if rc != 0:
+                unrestored.append(p)
+                continue
+            d = os.path.dirname(full)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(full, "wb") as out:
+                out.write(data)
+            restored.append(p)
+        except Exception:
+            unrestored.append(p)
+    return restored, unrestored
 
 
 def _project_config(cwd):
@@ -154,14 +270,16 @@ def violated_specs(cwd, base=None):
     return [p for p in out.splitlines() if p.strip()]
 
 
-def revert_specs(cwd, paths, base=None):
+def revert_specs(cwd, paths, base=None, t0=None):
     """Restore spec files from `base` (default: HEAD).
 
     Base matters for the same reason: if the worker committed its edit, HEAD now holds
     the WEAKENED spec, so restoring from HEAD would faithfully restore the sabotage.
+    Routed through restore_paths so the revert never touches the index -- the old
+    `git checkout <sha> --` form also STAGED what it restored.
     """
     if paths:
-        git(cwd, "checkout", *([base] if base else []), "--", *paths)
+        restore_paths(cwd, paths, base=base, t0=t0)
 
 
 def committed_during_run(cwd, pre_sha):
@@ -261,19 +379,77 @@ def new_public_symbols(cwd):
     return out
 
 
-def blast_radius(cwd, pre):
-    """
-    What changed during the run. Qwen reports what it *says* it did; this reports
-    what the filesystem says. Run 3 of the scope-creep test claimed '104 tests pass'
-    (true) while silently adding an unrequested public API -- the tool result gave no
-    hint of the sprawl. This closes that.
-    """
-    post = snapshot(cwd)
-    touched = sorted(p for p in post if post.get(p) != pre.get(p))
-    gone = sorted(p for p in pre if p not in post)
-    if not touched and not gone:
-        return "CHANGED: nothing (Qwen wrote no files)"
+# Test-dodge markers. Case-sensitive and anchored on the DECORATOR/attribute
+# forms on purpose: a bare `skip` match also fires on "skipped 3 files" in a
+# docstring, and a receipt line that cries wolf on prose is one nobody reads.
+# The three alternatives cover `@skip`/`@unittest.skip` (attribute after one
+# dot), `pytest.mark.skip|xfail` (two dots, so the first alternative cannot
+# reach it), and unittest's `expectedFailure`, which is a name, not a call.
+_DODGE = re.compile(r"@\w*\.?(?:skip|xfail)|pytest\.mark\.(?:skip|xfail)"
+                    r"|expectedFailure")
 
+
+def dodge_markers(cwd, pre_sha, pre_status=None):
+    """{path: [markers]} for skip/xfail markers ADDED to test-ish files.
+
+    A green gate and a delivered `@unittest.skip` on the failing test are the
+    same receipt today. Only ADDED lines count: a marker that was already in
+    the file at `pre_sha` is somebody's considered decision, while one that
+    appears in the same run as the delivery can hide the very failure the task
+    was about.
+
+    `pre_status` (the T0 dirty snapshot) is what keeps an UNTRACKED test file
+    that was already sitting in the tree from being scanned whole: it is new to
+    git at pre_sha but not new to this run, and a false accusation is the class
+    of receipt bug this project has spent a phase removing.
+    """
+    out = {}
+    base = [pre_sha] if pre_sha else []
+    rc, changed = git(cwd, "diff", "--name-only", *base)
+    for path in (changed.splitlines() if rc == 0 else []):
+        if not path.strip() or not any(t in path for t in _TESTY):
+            continue
+        rc2, diff = git(cwd, "diff", *base, "--", path)
+        if rc2 != 0:
+            continue
+        found = []
+        for line in diff.splitlines():
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            for m in _DODGE.finditer(line[1:]):
+                if m.group(0) not in found:
+                    found.append(m.group(0))
+        if found:
+            out[path] = found
+    # A brand-new untracked test file has no diff to read: every line in it is
+    # an added line. Read through untracked_files, because a new test DIRECTORY
+    # reaches `git status` as one `tests/` entry and the files inside it -- the
+    # ones a dodge would live in -- never appear at all.
+    pre = pre_status or {}
+    for path in untracked_files(cwd):
+        if not any(t in path for t in _TESTY) or path in out:
+            continue
+        if path in pre or any(path.startswith(d) for d in pre if d.endswith("/")):
+            continue
+        full = os.path.join(cwd, path)
+        try:
+            if not os.path.isfile(full) or os.path.getsize(full) > 2_000_000:
+                continue
+            found = []
+            with open(full, errors="replace") as f:
+                for line in f:
+                    for m in _DODGE.finditer(line):
+                        if m.group(0) not in found:
+                            found.append(m.group(0))
+            if found:
+                out[path] = found
+        except Exception:
+            pass
+    return out
+
+
+def numstat_map(cwd):
+    """{path: (added, removed)} from `git diff --numstat`."""
     rc, numstat = git(cwd, "diff", "--numstat")
     lines = {}
     if rc == 0 and numstat:
@@ -281,6 +457,27 @@ def blast_radius(cwd, pre):
             parts = row.split("\t")
             if len(parts) == 3:
                 lines[parts[2]] = (parts[0], parts[1])
+    return lines
+
+
+def blast_radius(cwd, pre):
+    """
+    What changed during the run. Qwen reports what it *says* it did; this reports
+    what the filesystem says. Run 3 of the scope-creep test claimed '104 tests pass'
+    (true) while silently adding an unrequested public API -- the tool result gave no
+    hint of the sprawl. This closes that.
+    """
+    return blast_lines(pre, snapshot(cwd), numstat_map(cwd))
+
+
+def blast_lines(pre, post, lines):
+    """The CHANGED report from captured facts -- so the engine can snapshot the
+    run's OWN tree before a worktree commit/release makes it unreadable, and the
+    renderer never re-reads a tree the run didn't use."""
+    touched = sorted(p for p in post if post.get(p) != pre.get(p))
+    gone = sorted(p for p in pre if p not in post)
+    if not touched and not gone:
+        return "CHANGED: nothing (Qwen wrote no files)"
 
     out = [f"CHANGED: {len(touched) + len(gone)} file(s)"]
     for p in gone:

@@ -242,11 +242,17 @@ class GraphLine(Fixture):
                          f"GRAPH: fresh @ {self.c1[:7]}")
 
     def test_stale(self):
+        # "refresh running" may only be claimed when a refresh is actually
+        # about to be scheduled (will_refresh) -- on failed and worktree runs
+        # nothing refreshes, and the line used to lie about it.
         self.seed(self.c1)
         self._commit("b.py", "y = 2\n", "c2")
-        line = graph.graph_line(self.cwd)
         self.assertEqual(
-            line, f"GRAPH: stale (1 files since {self.c1[:7]}) — refresh running")
+            graph.graph_line(self.cwd),
+            f"GRAPH: stale (1 files since {self.c1[:7]}) — run graphify update")
+        self.assertEqual(
+            graph.graph_line(self.cwd, will_refresh=True),
+            f"GRAPH: stale (1 files since {self.c1[:7]}) — refresh running")
 
     def test_indexing(self):
         self.seed(self.c1, status="indexing")
