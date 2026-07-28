@@ -1,7 +1,7 @@
 {
   "name": "token-saver",
   "description": "A fungible engine for supervised delegation to a free local model: a smart model orchestrates and verifies, a free model executes, gates keep the result trustworthy without reading it. Ships with a code use-case (managers + design-principle skills); the engine itself is domain-agnostic (task + a pluggable gate).",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "author": {
     "name": "latentlok"
   }
