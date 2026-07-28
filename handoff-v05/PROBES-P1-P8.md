@@ -44,6 +44,13 @@ exists outside `scoped` mode. Off today; opt-in via `.qwen-delegate.json`.
 to default-on (config recipe + a spec pinning the default). If the hook perturbs the run →
 keep opt-in, record why.
 
+**RESULT (2026-07-29, commit `c50aa64`): PASSED, default flipped ON.** Flag-ON matched
+flag-OFF on outcome/gate/attempts (~1s overhead) and added attribution
+(`writes_attributed` 0→1). Default now ON in `qd/engine.py` (`cfg.get(..., True)`), opt-out
+per-project with `false`; spec pins it (`test_default_on` + `test_explicit_off`); harness
+pinned to opt-out via `QWEN_DELEGATE_CONFIG`. Caveat recorded: one trivial task on a free
+GPU — complex multi-file edits are a wider live-coverage gap.
+
 ---
 
 ## P2 — PreToolUse deny for MCP-namespaced tools
@@ -179,9 +186,10 @@ friction isn't worth default-on, record the failure mode.
 
 **Gates:** advertising the heartbeat as a liveness check with a *stated interval*. The
 sidecar's shape is spec'd (C11, `limits.py:122-243`); how often a real stream actually
-writes it is unmeasured. (Note: the heartbeat *loop* — `ScheduleWakeup` reading the
-sidecar — is already live-tested on a non-Claude model via a synthetic fixture; this probe
-measures the *write* side, which the loop assumes.)
+writes it is unmeasured. (Note: the heartbeat *loop* is already live-tested on a non-Claude
+model via a synthetic fixture, and the recipe is now push+poll — a background `until` on the
+receipt for completion + a `ScheduleWakeup` watchdog on `progress.json` for liveness. This
+probe measures the *write* side, which both primitives assume.)
 
 **Run:** any streaming delegation (a limit forces stream → `Progress` is wired as
 `on_line`, `limits.py:158-170`). Watch `progress.json` `updated` timestamps as it runs.
