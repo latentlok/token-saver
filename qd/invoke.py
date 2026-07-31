@@ -513,10 +513,14 @@ def accum_stats(cum, st):
         cum[k] = (cum.get(k) or 0) + (st.get(k) or 0)
     for k in ("tool_names", "models"):
         cum[k] = sorted(set(cum.get(k) or []) | set(st.get(k) or []))
-    # Worst case wins: one blended attempt makes the whole run's main/overhead split
-    # unreliable, so the run must not claim a clean bySource provenance.
+    # Worst case wins: the run label is the COARSEST provenance any attempt had.
+    # "usage" is coarser than "blended" (a top-level sum, no per-model split at
+    # all); it was missing from this ladder, so a streamed run collapsed to
+    # "none" -- a measured run indistinguishable from an unmeasured one (live
+    # vLLM, 2026-07-31, every streamed run).
     seen = {cum.get("token_source", "none"), st.get("token_source", "none")}
-    cum["token_source"] = ("blended" if "blended" in seen
+    cum["token_source"] = ("usage" if "usage" in seen
+                           else "blended" if "blended" in seen
                            else "bySource" if "bySource" in seen else "none")
     cum["attempts"] = (cum.get("attempts") or 0) + 1
     return cum

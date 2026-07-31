@@ -672,6 +672,20 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(cum["attempts"], 2)
         self.assertEqual(cum["tokens"]["total"], 11)
 
+    def test_accum_preserves_usage_provenance(self):
+        # Live vLLM (2026-07-31): every delegation streams, so tokens arrive
+        # via the result's top-level usage. The ladder dropped that label to
+        # "none" -- a measured run indistinguishable from an unmeasured one.
+        cum = invoke.cum_zero()
+        invoke.accum_stats(cum, {"token_source": "usage",
+                                 "tokens": {"prompt": 50, "completion": 5,
+                                            "total": 55, "cached": 0,
+                                            "thoughts": 0}})
+        self.assertEqual(cum["token_source"], "usage")
+        # Coarsest wins: a usage attempt poisons even a bySource run's split.
+        invoke.accum_stats(cum, {"token_source": "bySource"})
+        self.assertEqual(cum["token_source"], "usage")
+
     def test_peak_context_is_max_not_sum(self):
         self.assertEqual(invoke.peak_context(RESULT_JSON), 20285)
         self.assertEqual(invoke.peak_context("garbage"), 0)
