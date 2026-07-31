@@ -4,8 +4,11 @@ The P1–P8 probe round is DONE (all recorded — see `PROBES-P1-P8.md`).
 **Sections A and B are DONE (2026-07-31) — all green, recorded in
 `VLLM-ROUND.md`** (two runtime fixes fell out: `2808cbc` executor ledger
 label, `90645c2` usage token-provenance). The cutover config is standing:
-vllm-snowy machine default, parallel_max 2, dispatch parallel. Only §C
-remains; none of it is vLLM-gated.
+vllm-snowy machine default, parallel_max 2, dispatch parallel.
+**C1 is RESOLVED (2026-08-01)** — the new worker called the MCP tool, the
+scoped fence let it through on shape, and the deny-by-default `mcp_allow`
+fence was built (`8ca9c54`; details in `VLLM-ROUND.md`). Only C2–C5 remain;
+none is vLLM-gated.
 
 ## A. vLLM cutover gates (run first — everything in B depends on them)
 

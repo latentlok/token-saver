@@ -151,5 +151,28 @@ A green + B green. What stays configured on this machine:
   fan-out isolates via worktrees, in-tree co-location serializes via the
   machine-wide repo lock regardless of dispatch.
 
-Carried items C1–C5 (LIVE-TESTS-NEXT §C) remain open — none is vLLM-gated;
+## C1 — MCP-namespaced tool fencing (carried P2): RESOLVED
+
+**RESULT (2026-08-01): gap CONFIRMED live, fence BUILT (`8ca9c54`).** The
+new worker (unlike the Ollama-era one that declined twice) called the MCP
+tool on request — and scoped mode allowed it: `firecrawl_scrape`'s input is
+`{url}`, no effect-shaped key, so the shape policy waved through a live
+network fetch (evidence: fresh `scrapeId` from the local firecrawl service
+in the probe file, `denials: 0`). Two facts pinned on the way: qwen-code
+0.19.11 names MCP tools `mcp__<server>__<tool>` (verified via `-o json`
+stats), and the worker discovers them dynamically through a `tool_search`
+meta-tool.
+
+The build, per P2's pre-agreed decision rule: scoped mode now denies
+`mcp__*` by default, allowlist via `mcp_allow` name regexes (call arg >
+project `.qwen-delegate.json`, stored in briefs, C9-additive schema param).
+Observed auto-edit keeps record-don't-gate, byte-identical. Receipts give
+MCP denials their own `MCP APPROVAL NEEDED` block naming `mcp_allow` (the
+first live denial rendered under `SHELL APPROVAL NEEDED`, pointing at a
+knob that does nothing for MCP). Field pair on vLLM: unlisted → denied by
+name, surfaced, result marked suspect; `mcp_allow: ["^mcp__firecrawl__"]`
+→ real scrape landed. Specs: scoped_hook_spec `MCPTools`, engine_spec
+plumb-through, verdict_spec routing.
+
+Carried items C2–C5 (LIVE-TESTS-NEXT §C) remain open — none is vLLM-gated;
 C4 (streaming stats gap) got fresh live confirmation this round.
