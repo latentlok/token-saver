@@ -1,8 +1,11 @@
 # Live test queue — next session with the Qwen endpoint
 
-The P1–P8 probe round is DONE (all recorded — see `PROBES-P1-P8.md`). This is
-what remains that only a live endpoint can answer, ordered so the vLLM cutover
-gates come first (they block the parallel round) and carried follow-ups last.
+The P1–P8 probe round is DONE (all recorded — see `PROBES-P1-P8.md`).
+**Sections A and B are DONE (2026-07-31) — all green, recorded in
+`VLLM-ROUND.md`** (two runtime fixes fell out: `2808cbc` executor ledger
+label, `90645c2` usage token-provenance). The cutover config is standing:
+vllm-snowy machine default, parallel_max 2, dispatch parallel. Only §C
+remains; none of it is vLLM-gated.
 
 ## A. vLLM cutover gates (run first — everything in B depends on them)
 
