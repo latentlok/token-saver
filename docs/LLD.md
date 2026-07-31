@@ -269,6 +269,8 @@ EOF drain. **Mutation:** remove the write lock under load → red (a torn line).
 ## Spec inventory (all in `specs/`)
 
     new:     profile_spec · worktree_spec · graphstate_spec · refs_spec · dispatch_spec
+             · serialize_spec (CI-run serialization half of dispatch_spec — cross-process
+               endpoint + repo locks, serial policy, guard shape)
     seam:    engine_spec (prefilter truth table, trust stub, C3) · verdict_spec (C2 + golden v1)
     ported:  runlog_spec · bootstrap_spec · setup_spec · bestofn_spec · reflexion_spec
              · headguard_spec · compaction_spec · config_spec (+ scoped hook specs)

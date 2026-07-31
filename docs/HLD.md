@@ -403,6 +403,16 @@ prompt prefixes earn provider cache discounts; the run log's cost field captures
 Locked shared state: run-log file append, registry append, worktree table. Everything
 else per-call.
 
+*Amended 2026-07-31 — the repo lock is machine-wide.* The per-repo mutex above is now,
+like the endpoint slot, a two-layer guard: in-process lock + a flock file keyed on the
+repo realpath's hash. Per-process it held only while every session queued on the
+single-slot local endpoint; two sessions reaching one repo through different endpoints
+(second profile, or parallel dispatch) would have overlapped in-tree. The worktree
+decision it keys on is resolved by `engine.worktree_mode` (call arg > project config >
+off) — the one resolver the engine, the receipt logic and `_guards_for` all consult.
+CI-enforced by `specs/serialize_spec.py` (the load-robust serialization half of
+dispatch_spec's claims; the overlap half stays excluded).
+
 *Amended by v0.5 (2026-07-27) — a submit is an ENQUEUE.* `qwen_delegate` takes no locks
 in the tool call: the endpoint semaphore and the repo lock are acquired INSIDE the
 background daemon thread, so the queue is as real as it ever was, it just no longer runs
