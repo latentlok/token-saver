@@ -374,6 +374,34 @@ class Worktree(Fixture):
         wl = self.git_main("worktree", "list")
         self.assertNotIn("qwen/", wl.replace(self.cwd, ""))
 
+    def test_project_config_auto_isolates_without_the_arg(self):
+        # "worktree": "auto" in .qwen-delegate.json is the standing default
+        # for a repo where co-work is the norm; a call that says nothing gets
+        # the isolation.
+        self.commit_cfg({"worktree": "auto"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertIsNotNone(r["ctx"]["worktree"])
+        self.assertFalse(os.path.exists(os.path.join(self.cwd, "out.py")))
+
+    def test_arg_off_beats_project_config_auto(self):
+        self.commit_cfg({"worktree": "auto"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(worktree="off")
+        self.assertEqual(r["status"], "success")
+        self.assertIsNone(r["ctx"]["worktree"])
+        self.assertTrue(os.path.exists(os.path.join(self.cwd, "out.py")))
+
+    def test_config_typo_reads_as_off_never_isolates(self):
+        # Same policy as dispatch: an unrecognised value must not silently
+        # move work out of the tree the caller expected it to land in.
+        self.commit_cfg({"worktree": "Auto"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertIsNone(r["ctx"]["worktree"])
+
 
 class TouchScope(Fixture):
     """M4 seam: per-task allowlist -- modify only named pre-existing files;
