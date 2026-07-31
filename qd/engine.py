@@ -526,6 +526,28 @@ def expand_playbook(args):
     return args, None
 
 
+def worktree_mode(args, cwd=None):
+    """The effective worktree mode for a call: arg > project config > "off".
+
+    The ONE resolver for every reader -- the engine's acquisition, run()'s
+    in_tree, and the server's repo-lock decision all ask this, because a
+    config default the lock path did not consult would take the repo lock
+    for a run that then isolates itself (harmless), or worse, skip it for
+    one that stays in-tree. "auto" and "off" are the only recognised values;
+    anything else reads as "off" -- a typo must not silently isolate work
+    the caller expected to land in the tree, nor vice versa: "off" is the
+    long-standing default, so unrecognised input degrades to v1 behavior.
+
+    Config, not front matter: .qwen-delegate.json is the CALLER's standing
+    file, so a repo where co-work is the norm states "worktree": "auto"
+    once. A brief document stays unable to choose where it runs (U6).
+    """
+    mode = args.get("worktree")
+    if not mode:
+        mode = _project_config(cwd or args.get("cwd") or ".").get("worktree")
+    return "auto" if mode == "auto" else "off"
+
+
 def _refusal(text, max_iter=_DEFAULT_MAX_ITER):
     """A refusal in delegate()'s return shape. ctx is EMPTY by contract: run()
     routes refusals around the renderer, which needs a populated one."""
@@ -783,7 +805,7 @@ def _delegate(args, t0_dir):
     on_compaction = args.get("on_compaction") or "refuse"
     if on_compaction not in ("refuse", "reinject", "discard"):
         on_compaction = "refuse"
-    worktree_mode = args.get("worktree")
+    wt_mode = worktree_mode(args, cwd)
     touch_scope = args.get("touch_scope")
     # U3.2: what the gate is expected to say BEFORE the worker runs. "red"
     # (greenfield) refuses a gate that already passes; "green" (revision work)
@@ -816,7 +838,7 @@ def _delegate(args, t0_dir):
     # --- Worktree acquisition (M4 seam 1) ---
     work_cwd = cwd
     wt = None
-    if worktree_mode == "auto":
+    if wt_mode == "auto":
         wt = worktrees.acquire(cwd)
         work_cwd = wt["path"]
 
@@ -1679,7 +1701,7 @@ def run(args):
     """
     d = delegate(args)
     cwd = args["cwd"]
-    in_tree = (args.get("worktree") or "off") != "auto"
+    in_tree = worktree_mode(args, cwd) != "auto"
 
     # Refusals carry their explanation in result_text and an EMPTY ctx; the
     # renderer needs a populated ctx, so routing them through it replaced every
