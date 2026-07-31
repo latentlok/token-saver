@@ -45,5 +45,8 @@ truth). Load the `delegation` skill before first use.
   folds corrections in). Value back → `result_schema`.
 - Prefer `auto-edit`; `touch_scope=[...]` bounds edits to named files (new files
   stay allowed); `scoped` is a shell allowlist, not a sandbox.
+- **Co-work expected? Isolate.** `worktree="auto"` (or `"worktree": "auto"` in
+  `.qwen-delegate.json` as the standing default) builds on a `qwen/<id>` branch;
+  the receipt carries the `MERGE:` line. Worktrees branch from HEAD — commit first.
 
 <!-- qwen-delegate:end -->

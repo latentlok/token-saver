@@ -81,10 +81,11 @@ Carried from the release notes so they stay visible:
   removing elsewhere.
 - **The `usage` fallback has never run for real.** Spec-covered only; it gets its
   first live exercise the moment a delegation attaches a limit and streams.
-- **dispatch_spec is excluded from CI.** Its assertions are wall-clock based and
-  flake under load, so the cross-process endpoint locking added in 0.4.0 is not
-  covered by the automated suite. Either make the assertions load-independent or
-  split the timing tests out from the protocol ones.
+- **dispatch_spec is excluded from CI** — narrowed, no longer a coverage hole. The
+  load-robust serialization claims (cross-process endpoint slot, cross-process repo
+  lock, serial policy, guard shape) were split into `specs/serialize_spec.py`, which
+  CI runs. What stays excluded is only the OVERLAP half ("these two genuinely ran
+  concurrently"), which a loaded box can fail honestly.
 - **`workers` (best-of-N) is advertised and not implemented.** It is in the tool
   schema and documented in the delegation skill; `qd/engine.py` never reads it.
   Either build it or remove the claim — an advertised parameter that silently does
