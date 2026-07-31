@@ -459,6 +459,24 @@ class Accounting(Fixture):
         self.assertIn("STATUS: success", out)
         self.assertIn("--- qwen result ---", out)
 
+    def test_ledger_names_the_resolved_default_profile(self):
+        # vLLM cutover (2026-07-31): with a machine-file default and no call
+        # arg, the ledger labeled every run "qwen-local" whatever profile
+        # actually served it -- routing forensics off by an entire endpoint.
+        mp = os.environ["QWEN_DELEGATE_EXECUTORS"]
+        with open(mp) as f:
+            m = json.load(f)
+        m["default"] = "stub"
+        with open(mp, "w") as f:
+            json.dump(m, f)
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        engine.run({"task": "build out.py with MARKER", "cwd": self.cwd,
+                    "verify": "grep -q MARKER out.py",
+                    "approval_mode": "auto-edit"})
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            rec = json.loads(f.read().splitlines()[-1])
+        self.assertEqual(rec["executor"], "stub")
+
 
 class MutationHardening(Fixture):
     """Closures for survivors of the Qwen adversarial mutation pilot (7/8 of

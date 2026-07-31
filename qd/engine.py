@@ -1008,7 +1008,11 @@ def _delegate(args, t0_dir):
         "graph_line": None,
         "refs_added": [],
         "cost_usd": 0.0,
-        "executor": args.get("executor"),
+        # The RESOLVED name, not the call arg: with a machine-file default the
+        # arg is None, and the ledger labeled every default-routed run
+        # "qwen-local" whatever profile actually served it (seen at vLLM
+        # cutover, 2026-07-31).
+        "executor": profile["name"],
         "trust": trust,
         "unrestorable": [],
         # C10 attribution. Empty + "none" is the honest reading of a run with
