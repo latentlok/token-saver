@@ -12,6 +12,10 @@ single-tool block: a denied `touch` becomes a write_file to the same path):
                       plus a read-only/test allowlist. Reject compound/redirect/
                       substitution outright -- a pipeline can smuggle a denied command.
   write_file/edit   : allow only inside the project cwd. No escaping the repo.
+  mcp__* (scoped)   : allow only names matching the QGATE_MCP allowlist -- an MCP
+                      tool is arbitrary capability behind a benign-shaped input
+                      (a {url} input fetched the network live, C1 2026-07-31),
+                      so shape cannot judge it; it is gated by name like shell.
   known read tools  : allow (read_file, glob, grep, list_directory).
   everything else   : allow ONLY if its input carries no effect-shaped key --
                       see decide().
@@ -47,6 +51,10 @@ try:
     EXTRA = json.loads(os.environ.get("QGATE_EXTRA", "[]"))  # extra regex patterns
 except Exception:
     EXTRA = []
+try:
+    MCP_ALLOW = json.loads(os.environ.get("QGATE_MCP", "[]"))  # mcp__* name regexes
+except Exception:
+    MCP_ALLOW = []
 
 # read-only / test commands that are safe by default
 DEFAULT_ALLOW = [
@@ -138,6 +146,16 @@ def decide(tool, ti):
             log_write(ap)
             return True, "write inside project"
         return False, "write outside the project"
+    if tool.startswith("mcp__") and MODE != "autoedit":
+        # Namespaced MCP tools carry arbitrary capability behind inputs the
+        # shape check reads as harmless -- a scoped worker's {url} input
+        # performed a live network fetch (C1, 2026-07-31). Gated by NAME like
+        # shell; observed auto-edit keeps its record-don't-gate contract and
+        # falls through to the shape policy below, byte-identical to before.
+        if any(re.search(p, tool) for p in MCP_ALLOW):
+            log_allow(f"mcp:{tool}")
+            return True, "MCP tool on the mcp allowlist"
+        return False, "MCP tool not on the mcp allowlist"
     if tool in READ_ONLY:
         return True, "read-only tool"
     if any(k in ti for k in EFFECT_KEYS):

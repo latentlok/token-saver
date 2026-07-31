@@ -68,6 +68,13 @@ TOOL = json.loads(r'''
         "type": "string",
         "description": "scoped mode only: the reason for a denied command, shown to the worker up front so it stops retrying."
       },
+      "mcp_allow": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "scoped mode only: allowed MCP tool-name regexes (names look like mcp__<server>__<tool>). Unlisted MCP tools are denied and surfaced by name -- approve by re-delegating with the pattern added. Project default: .qwen-delegate.json `mcp_allow`."
+      },
       "approval_mode": {
         "type": "string",
         "enum": [

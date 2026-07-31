@@ -396,6 +396,7 @@ def _retry_prompt(session_id, task, verify, v_out, on_compaction, repeated=False
 # identity.
 BRIEF_KEYS = (
     "task", "verify", "touch_scope", "approval_mode", "shell_allow",
+    "mcp_allow",
     "shell_feedback", "trust", "max_iterations", "timeout_sec",
     "verify_timeout_sec", "preflight_expect", "worktree", "executor",
     "report_dont_fix", "fixture_provenance", "advisory_gates",
@@ -774,6 +775,7 @@ def _delegate(args, t0_dir):
     approval_mode = args.get("approval_mode") or cfg.get("approval_mode") \
         or "auto-edit"
     shell_allow = args.get("shell_allow") or cfg.get("shell_allow")
+    mcp_allow = args.get("mcp_allow") or cfg.get("mcp_allow")
     # Default: project config, else 3; clamped 1..10 -- the schema has promised
     # both since v1, and the engine port had silently dropped them.
     max_iter = (args.get("max_iterations")
@@ -1172,6 +1174,7 @@ def _delegate(args, t0_dir):
             timeout=timeout, session_id=session_id,
             verify=verify,
             shell_allow=shell_allow,
+            mcp_allow=mcp_allow,
             suffix=suffix,
             compaction_policy=on_compaction,
             on_line=on_line,

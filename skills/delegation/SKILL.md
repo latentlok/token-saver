@@ -178,6 +178,9 @@ edits auto-revert); new files stay free. Use it to bound a change to its intende
 **on the command alone**; approve by adding its pattern to `shell_allow` and re-delegating
 with the same `session_id`, or deny with the reason in `shell_feedback` (a reasonless
 denial just makes it guess). Compound/redirect/network commands are rejected regardless.
+The worker's MCP tools (`mcp__<server>__<tool>`) are gated the same way: denied unless a
+`mcp_allow` name regex matches — their input shape says nothing about what the server
+does with it, so the name is the only judgeable surface.
 
 **Vague work, two-phase:** `approval_mode="plan"` (no verify needed) → options + SESSION →
 user/you pick one → re-delegate that item warm (`session_id`) with `auto-edit` + a real
@@ -278,8 +281,8 @@ the worker reads on demand.
   sidecar for binaries); imagined fixtures pass any gate written against them.
 - **Project `.qwen-delegate.json`** — `task_suffix` appends your standing worker discipline
   to every task server-side (compaction-safe, unlike QWEN.md); `approval_mode` /
-  `shell_allow` / `timeout_sec` / `preflight_expect` / `verify_timeout_sec` are defaults a
-  call arg still beats.
+  `shell_allow` / `mcp_allow` / `timeout_sec` / `preflight_expect` / `verify_timeout_sec`
+  are defaults a call arg still beats.
 - **`.qwen-delegate/progress.json`** — heartbeat: records, input tokens, attempt, state.
   Answers "is it hung?" for a file read instead of a turn.
 

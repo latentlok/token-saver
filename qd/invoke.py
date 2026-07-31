@@ -282,8 +282,9 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
 
 
 def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
-                 verify=None, shell_allow=None, suffix="", compaction_policy=None,
-                 on_line=None, stall_after=None, observe_hook=False):
+                 verify=None, shell_allow=None, mcp_allow=None, suffix="",
+                 compaction_policy=None, on_line=None, stall_after=None,
+                 observe_hook=False):
     """Invoke the Qwen Code executor and parse the result.
 
     Return (text, denials, session_id, err, meta).
@@ -362,6 +363,7 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
         env["QGATE_WRITELOG"] = writelog
         env["QGATE_ALLOWLOG"] = allowlog
         env["QGATE_EXTRA"] = json.dumps(shell_allow or [])
+        env["QGATE_MCP"] = json.dumps(mcp_allow or [])
         env["QGATE_MODE"] = "scoped" if mode == "scoped" else "autoedit"
 
     # Resolve timeout

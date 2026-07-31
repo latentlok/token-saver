@@ -204,6 +204,53 @@ class UnknownTools(Fixture):
         self.assertEqual(self.lines(self.allow), [])   # reads are not run noise
 
 
+class MCPTools(Fixture):
+    """mcp__* names in scoped mode: gated by NAME, deny-by-default.
+
+    Proven live (C1, 2026-07-31): a scoped worker called
+    mcp__firecrawl__firecrawl_scrape -- input {url}, no effect-shaped key, so
+    the shape policy allowed a live network fetch the manager never approved.
+    An MCP tool is arbitrary capability behind whatever input shape its server
+    chose; only its name says anything, so scoped mode treats it like shell."""
+
+    def test_unlisted_mcp_tool_is_denied_by_name(self):
+        decision, why = self.fire("mcp__firecrawl__firecrawl_scrape",
+                                  {"url": "https://x"})
+        self.assertEqual(decision, "deny")
+        self.assertEqual(why, "MCP tool not on the mcp allowlist")
+        self.assertEqual(self.lines(self.allow), [])
+        self.assertTrue(any("mcp__firecrawl__firecrawl_scrape" in ln
+                            for ln in self.lines(self.deny)))
+
+    def test_allowlisted_mcp_tool_passes_and_is_logged(self):
+        decision, why = self.fire(
+            "mcp__firecrawl__firecrawl_scrape", {"url": "https://x"},
+            QGATE_MCP=json.dumps([r"^mcp__firecrawl__"]))
+        self.assertEqual(decision, "allow")
+        self.assertEqual(why, "MCP tool on the mcp allowlist")
+        self.assertEqual(self.lines(self.allow),
+                         ["mcp:mcp__firecrawl__firecrawl_scrape"])
+
+    def test_allowlist_is_a_name_match_not_a_prefix_grant(self):
+        decision, _ = self.fire(
+            "mcp__othertool__do_thing", {"url": "https://x"},
+            QGATE_MCP=json.dumps([r"^mcp__firecrawl__"]))
+        self.assertEqual(decision, "deny")
+
+    def test_autoedit_mode_keeps_recording_instead_of_gating(self):
+        # Observed auto-edit exists to attribute, not to gate: byte-identical
+        # to the pre-fence behavior -- metadata-only MCP calls stay
+        # ungated-logged, effect-shaped ones stay shape-denied.
+        decision, _ = self.fire("mcp__firecrawl__firecrawl_scrape",
+                                {"url": "https://x"}, QGATE_MODE="autoedit")
+        self.assertEqual(decision, "allow")
+        self.assertEqual(self.lines(self.allow),
+                         ["ungated:mcp__firecrawl__firecrawl_scrape"])
+        decision, _ = self.fire("mcp__x__writer", {"file_path": "/etc/hosts"},
+                                QGATE_MODE="autoedit")
+        self.assertEqual(decision, "deny")
+
+
 class ObservedAutoEdit(Fixture):
     """QGATE_MODE=autoedit: the hook is installed for ATTRIBUTION only, so there
     is no manager-approved shell allowlist behind it."""

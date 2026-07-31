@@ -63,7 +63,7 @@ open(os.path.join(sdir, "task_%d.txt" % (n + 1)), "w").write(task)
 open(os.path.join(sdir, "argv_%d.txt" % (n + 1)), "w").write(" ".join(sys.argv))
 # The gate env the hook reads: allowlist and mode are decisions too.
 open(os.path.join(sdir, "env_%d.json" % (n + 1)), "w").write(json.dumps(
-    {k: os.environ.get(k) for k in ("QGATE_EXTRA", "QGATE_MODE")}))
+    {k: os.environ.get(k) for k in ("QGATE_EXTRA", "QGATE_MODE", "QGATE_MCP")}))
 for rel, content in (step.get("write") or {}).items():
     p = os.path.join(os.getcwd(), rel)
     os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(rel) else None
@@ -2188,6 +2188,21 @@ class RecipeDefaults(Fixture):
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         self.delegate(approval_mode="scoped", shell_allow=["^make$"])
         self.assertEqual(self.env_seen(2)["QGATE_EXTRA"], '["^make$"]')
+
+    def test_mcp_allow_default_reaches_the_gate_and_yields_to_the_arg(self):
+        # C9 absence half: no arg, no config -> the gate still sees "[]", i.e.
+        # deny-by-default for mcp__* with nothing else about the run changed.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(approval_mode="scoped")
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(self.env_seen(1)["QGATE_MCP"], "[]")
+        self.commit_cfg({"mcp_allow": ["^mcp__firecrawl__"]})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(approval_mode="scoped")
+        self.assertEqual(self.env_seen(2)["QGATE_MCP"], '["^mcp__firecrawl__"]')
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(approval_mode="scoped", mcp_allow=["^mcp__graph__"])
+        self.assertEqual(self.env_seen(3)["QGATE_MCP"], '["^mcp__graph__"]')
 
     def test_the_task_suffix_reaches_the_worker_on_attempt_one(self):
         self.commit_cfg({"task_suffix": "MANDATORY: run the linter."})
