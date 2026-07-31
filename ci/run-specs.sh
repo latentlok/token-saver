@@ -3,7 +3,10 @@
 # Kept out of the workflow YAML on purpose -- a committed script can't trip GitHub's
 # workflow-file validator the way an embedded heredoc/loop block scalar can.
 #
-# Excluded: dispatch_spec -- its batch assertion is wall-clock-timing based and flaky.
+# Excluded: dispatch_spec -- its OVERLAP assertions ("these ran concurrently") are
+# wall-clock claims a loaded box can fail honestly. The load-robust half -- the
+# SERIALIZATION claims, which load separates further rather than interleaves --
+# lives in serialize_spec.py and runs here like any other spec.
 # verdict_spec reads a context window from ~/.qwen/settings.json for its compaction test,
 # so we write a minimal stub (the dev window, 196608) to make that assertion bind.
 set -uo pipefail

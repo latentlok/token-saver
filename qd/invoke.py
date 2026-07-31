@@ -282,8 +282,9 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
 
 
 def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
-                 verify=None, shell_allow=None, suffix="", compaction_policy=None,
-                 on_line=None, stall_after=None, observe_hook=False):
+                 verify=None, shell_allow=None, mcp_allow=None, suffix="",
+                 compaction_policy=None, on_line=None, stall_after=None,
+                 observe_hook=False):
     """Invoke the Qwen Code executor and parse the result.
 
     Return (text, denials, session_id, err, meta).
@@ -362,6 +363,7 @@ def run_executor(profile, task, cwd, mode, timeout=None, session_id=None,
         env["QGATE_WRITELOG"] = writelog
         env["QGATE_ALLOWLOG"] = allowlog
         env["QGATE_EXTRA"] = json.dumps(shell_allow or [])
+        env["QGATE_MCP"] = json.dumps(mcp_allow or [])
         env["QGATE_MODE"] = "scoped" if mode == "scoped" else "autoedit"
 
     # Resolve timeout
@@ -513,10 +515,14 @@ def accum_stats(cum, st):
         cum[k] = (cum.get(k) or 0) + (st.get(k) or 0)
     for k in ("tool_names", "models"):
         cum[k] = sorted(set(cum.get(k) or []) | set(st.get(k) or []))
-    # Worst case wins: one blended attempt makes the whole run's main/overhead split
-    # unreliable, so the run must not claim a clean bySource provenance.
+    # Worst case wins: the run label is the COARSEST provenance any attempt had.
+    # "usage" is coarser than "blended" (a top-level sum, no per-model split at
+    # all); it was missing from this ladder, so a streamed run collapsed to
+    # "none" -- a measured run indistinguishable from an unmeasured one (live
+    # vLLM, 2026-07-31, every streamed run).
     seen = {cum.get("token_source", "none"), st.get("token_source", "none")}
-    cum["token_source"] = ("blended" if "blended" in seen
+    cum["token_source"] = ("usage" if "usage" in seen
+                           else "blended" if "blended" in seen
                            else "bySource" if "bySource" in seen else "none")
     cum["attempts"] = (cum.get("attempts") or 0) + 1
     return cum

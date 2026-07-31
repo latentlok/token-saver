@@ -195,8 +195,10 @@ def _project_config(cwd):
     """Parsed <cwd>/.qwen-delegate.json (the per-project override file), or {}.
 
     Recognised keys: `spec_globs` (list), `max_iterations` (int, the retry budget),
-    `executor` (profile name), `min_tests` (int, self-gate floor), and `trust`
-    (`"self"`|`"verified"`|`"auto"` — the project's default slider position).
+    `executor` (profile name), `min_tests` (int, self-gate floor), `trust`
+    (`"self"`|`"verified"`|`"auto"` — the project's default slider position), and
+    `worktree` (`"auto"` — the standing isolation default for a repo where
+    co-work is the norm; a call arg still beats it).
     A missing or corrupt file is treated as no overrides, never an error."""
     try:
         p = os.path.join(cwd, PROJECT_CONFIG)

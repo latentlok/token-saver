@@ -148,6 +148,7 @@ both — the config is what a call *falls back to*, never what overrides it.
 | `store_briefs` | true | Whether runs store their brief for `retry_of`. |
 | `fixture_globs` | `fixtures`/`testdata`/`golden`/`snapshots`/`cassettes` | Directory segments policed by `fixture_provenance`. |
 | `dispatch` | unset (already serial) | `serial` pins every endpoint to one in-flight request whatever its `parallel_max` says; `parallel` honours the declared capacity. |
+| `worktree` | unset (in-tree) | `auto` makes isolation the standing default: every delegation here builds in its own git worktree unless the call says `worktree: "off"`. Set it where co-work is the norm. Only `auto` is recognised — a typo reads as in-tree. |
 | `burn_budget` | 10,000,000 | Cumulative input tokens one delegation may spend before it is stopped. `0` disables (also disables the heartbeat — it rides the same stream). |
 | `decode_tps` | 15 | Your model's decode rate. The silence budget is derived from it and the declared max output — state the rate, not the seconds. |
 | `stall_seconds` | derived | Absolute override for the silence budget, if you'd rather state the answer directly. |
@@ -502,7 +503,18 @@ explicitly is stored and beats the front matter, exactly like a live call.
 
 ## Co-working while a delegation runs
 
-You can keep editing the same tree while a run is in flight — the guards attribute
+**The norm: if other agents (or you) will touch the tree while a run is live, put
+the delegation in a worktree.** Set `"worktree": "auto"` once in the project's
+`.qwen-delegate.json` and every delegation isolates by default — the worker builds
+on its own `qwen/<id>` branch, nobody's edits can collide with anybody's, and the
+receipt hands you the `MERGE:` line. A call arg (`worktree: "off"`) still forces
+in-tree for the case that wants it: a quiet, committed tree, or work that must land
+directly. The one cost to know: **a worktree branches from HEAD**, so the worker
+never sees uncommitted co-work — commit first, or the merge lands against a base
+that moved (`classify_merge` probes for that read-only and the receipt says
+`conflict` rather than corrupting anything).
+
+In-tree co-work is still safe in the attributing modes — the guards attribute
 before they act, and the receipt reports what it couldn't attribute instead of
 guessing:
 
@@ -518,8 +530,9 @@ guessing:
 - In plain `auto-edit` there is no write log, so nothing is attributable and the old
   rule stands: treat it as **one writer per tree**, and re-read any file the worker
   touched before editing it.
-- A worktree run (`worktree="auto"`) sidesteps all of it: the worker builds on its
-  own branch and the receipt hands you a `MERGE:` line.
+- A worktree run (`worktree="auto"`, or the project config default) sidesteps all
+  of it: the worker builds on its own branch and the receipt hands you a `MERGE:`
+  line.
 
 ## Recipes
 

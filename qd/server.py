@@ -5,7 +5,11 @@ each tools/call runs on its own worker thread. Three locks make that safe:
 
   - a global write lock: one complete JSON line per response, never torn;
   - per-repo locks: in-tree delegations into the same repo serialize
-    ("one actor per tree", enforced structurally, worktree runs skip it);
+    ("one actor per tree", enforced structurally, worktree runs skip it).
+    Machine-wide, same two-layer shape as the endpoint slot: the in-process
+    half alone held only within one MCP server process, which was masked
+    while every session queued on the single-slot local endpoint and opens
+    the moment two sessions reach one repo through different endpoints;
   - per-endpoint semaphores: every executor-invoking call (delegations AND
     queries) holds its endpoint's slot for the whole handler, so on a
     single-slot local endpoint two sessions' turns never interleave and the
@@ -35,6 +39,7 @@ under-prove. At M6 cutover the root server.py becomes a two-line shim
 importing main() from here; .mcp.json never changes.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -171,9 +176,25 @@ def respond(rid, result=None, error=None):
 
 
 def _repo_lock(cwd):
+    """One actor per tree, machine-wide: a one-slot EndpointGuard keyed on
+    the repo's realpath.
+
+    A plain threading.Lock held only within this process -- which was masked
+    while every session queued on the single-slot local endpoint, and stops
+    holding the moment two sessions reach one repo through different
+    endpoints (a second executor profile, or parallel dispatch). The name
+    hashes the realpath because FileSlots flattens path separators, and
+    "/a/b-c" colliding with "/a/b_c" would serialize strangers.
+    """
     key = os.path.realpath(cwd or "")
     with _repo_locks_guard:
-        return _repo_locks.setdefault(key, threading.Lock())
+        guard = _repo_locks.get(key)
+        if guard is None:
+            name = (f"repo-{os.path.basename(key) or 'root'}-"
+                    f"{hashlib.sha256(key.encode()).hexdigest()[:8]}")
+            guard = EndpointGuard(name, 1)
+            _repo_locks[key] = guard
+        return guard
 
 
 def _endpoint_sem(cwd, executor):
@@ -192,11 +213,17 @@ def _endpoint_sem(cwd, executor):
 
 def _guards_for(name, args):
     """The locks a call must hold, in acquisition order: endpoint first
-    (the scarce hardware), then the repo (cheap, uncontended across repos)."""
+    (the scarce hardware), then the repo (cheap, uncontended across repos).
+
+    The worktree decision goes through engine.worktree_mode -- the one
+    resolver -- because a project config default the lock path did not
+    consult would skip the repo lock for a run the engine then keeps
+    in-tree."""
+    from qd import engine
     guards = []
     if name in ("qwen_delegate", "qwen_query", "qwen_investigate"):
         guards.append(_endpoint_sem(args.get("cwd"), args.get("executor")))
-    if name == "qwen_delegate" and (args.get("worktree") or "off") == "off":
+    if name == "qwen_delegate" and engine.worktree_mode(args) == "off":
         guards.append(_repo_lock(args.get("cwd")))
     return guards
 

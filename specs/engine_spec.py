@@ -63,7 +63,7 @@ open(os.path.join(sdir, "task_%d.txt" % (n + 1)), "w").write(task)
 open(os.path.join(sdir, "argv_%d.txt" % (n + 1)), "w").write(" ".join(sys.argv))
 # The gate env the hook reads: allowlist and mode are decisions too.
 open(os.path.join(sdir, "env_%d.json" % (n + 1)), "w").write(json.dumps(
-    {k: os.environ.get(k) for k in ("QGATE_EXTRA", "QGATE_MODE")}))
+    {k: os.environ.get(k) for k in ("QGATE_EXTRA", "QGATE_MODE", "QGATE_MCP")}))
 for rel, content in (step.get("write") or {}).items():
     p = os.path.join(os.getcwd(), rel)
     os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(rel) else None
@@ -374,6 +374,34 @@ class Worktree(Fixture):
         wl = self.git_main("worktree", "list")
         self.assertNotIn("qwen/", wl.replace(self.cwd, ""))
 
+    def test_project_config_auto_isolates_without_the_arg(self):
+        # "worktree": "auto" in .qwen-delegate.json is the standing default
+        # for a repo where co-work is the norm; a call that says nothing gets
+        # the isolation.
+        self.commit_cfg({"worktree": "auto"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertIsNotNone(r["ctx"]["worktree"])
+        self.assertFalse(os.path.exists(os.path.join(self.cwd, "out.py")))
+
+    def test_arg_off_beats_project_config_auto(self):
+        self.commit_cfg({"worktree": "auto"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(worktree="off")
+        self.assertEqual(r["status"], "success")
+        self.assertIsNone(r["ctx"]["worktree"])
+        self.assertTrue(os.path.exists(os.path.join(self.cwd, "out.py")))
+
+    def test_config_typo_reads_as_off_never_isolates(self):
+        # Same policy as dispatch: an unrecognised value must not silently
+        # move work out of the tree the caller expected it to land in.
+        self.commit_cfg({"worktree": "Auto"})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertIsNone(r["ctx"]["worktree"])
+
 
 class TouchScope(Fixture):
     """M4 seam: per-task allowlist -- modify only named pre-existing files;
@@ -430,6 +458,24 @@ class Accounting(Fixture):
                           "approval_mode": "auto-edit", "executor": "stub"})
         self.assertIn("STATUS: success", out)
         self.assertIn("--- qwen result ---", out)
+
+    def test_ledger_names_the_resolved_default_profile(self):
+        # vLLM cutover (2026-07-31): with a machine-file default and no call
+        # arg, the ledger labeled every run "qwen-local" whatever profile
+        # actually served it -- routing forensics off by an entire endpoint.
+        mp = os.environ["QWEN_DELEGATE_EXECUTORS"]
+        with open(mp) as f:
+            m = json.load(f)
+        m["default"] = "stub"
+        with open(mp, "w") as f:
+            json.dump(m, f)
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        engine.run({"task": "build out.py with MARKER", "cwd": self.cwd,
+                    "verify": "grep -q MARKER out.py",
+                    "approval_mode": "auto-edit"})
+        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+            rec = json.loads(f.read().splitlines()[-1])
+        self.assertEqual(rec["executor"], "stub")
 
 
 class MutationHardening(Fixture):
@@ -2142,6 +2188,21 @@ class RecipeDefaults(Fixture):
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         self.delegate(approval_mode="scoped", shell_allow=["^make$"])
         self.assertEqual(self.env_seen(2)["QGATE_EXTRA"], '["^make$"]')
+
+    def test_mcp_allow_default_reaches_the_gate_and_yields_to_the_arg(self):
+        # C9 absence half: no arg, no config -> the gate still sees "[]", i.e.
+        # deny-by-default for mcp__* with nothing else about the run changed.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(approval_mode="scoped")
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(self.env_seen(1)["QGATE_MCP"], "[]")
+        self.commit_cfg({"mcp_allow": ["^mcp__firecrawl__"]})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(approval_mode="scoped")
+        self.assertEqual(self.env_seen(2)["QGATE_MCP"], '["^mcp__firecrawl__"]')
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(approval_mode="scoped", mcp_allow=["^mcp__graph__"])
+        self.assertEqual(self.env_seen(3)["QGATE_MCP"], '["^mcp__graph__"]')
 
     def test_the_task_suffix_reaches_the_worker_on_attempt_one(self):
         self.commit_cfg({"task_suffix": "MANDATORY: run the linter."})

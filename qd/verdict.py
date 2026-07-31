@@ -290,6 +290,21 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # granularity, and the raw list ran to 12 lines of near-duplicates (~40% of
     # a red receipt). The full list is in the run log.
     blocked = ctx.get("meta", {}).get("blocked") or []
+    # MCP denials get their own block: the approval route is mcp_allow, and a
+    # receipt that says "approve via shell_allow" for them sends the manager to
+    # a knob that does nothing (seen on the first live denial, C1 2026-08-01).
+    mcp_blocked = [b for b in blocked
+                   if b.endswith("(MCP tool not on the mcp allowlist)")]
+    if mcp_blocked:
+        blocked = [b for b in blocked if not
+                   b.endswith("(MCP tool not on the mcp allowlist)")]
+        names = sorted({b.split(":", 1)[0] for b in mcp_blocked})
+        body.append(
+            f"MCP APPROVAL NEEDED: {len(mcp_blocked)} call(s) to "
+            f"{len(names)} tool(s) (judge on the tool name; approve via a "
+            "mcp_allow name regex and re-delegate; full list in "
+            ".qwen-delegate/runs.jsonl):\n"
+            + "\n".join(f"  - {n}" for n in names[:6]))
     if blocked:
         groups = {}
         for b in blocked:

@@ -410,6 +410,25 @@ class ReceiptDiet(Fixture):
                 meta={"stats": {}, "blocked": blocked})
         self.assertEqual(self.read_log()[-1]["blocked_commands"], blocked)
 
+    def test_mcp_denials_route_to_mcp_allow_not_shell_allow(self):
+        # The approval knob differs by denial kind; the first live MCP denial
+        # (C1, 2026-08-01) rendered under SHELL APPROVAL NEEDED and pointed the
+        # manager at shell_allow, which does nothing for an MCP tool.
+        blocked = [
+            "mcp__firecrawl__firecrawl_scrape: ?  "
+            "(MCP tool not on the mcp allowlist)",
+            "run_shell_command: make  (not on the shell allowlist)",
+        ]
+        out = self.v2(status="verify_failed",
+                      trail=["attempt 1: verify failed"],
+                      meta={"stats": {}, "blocked": blocked})
+        self.assertIn("MCP APPROVAL NEEDED: 1 call(s) to 1 tool(s)", out)
+        self.assertIn("mcp_allow", out)
+        self.assertIn("  - mcp__firecrawl__firecrawl_scrape", out)
+        self.assertIn("SHELL APPROVAL NEEDED: 1 blocked", out)
+        # The MCP line must not sit inside the shell block's count.
+        self.assertNotIn("2 blocked", out)
+
     def test_run_line_on_green_and_red(self):
         self.assertIn("RUN: 1 attempt(s)", self.v2())
         out = self.v2(status="verify_failed",

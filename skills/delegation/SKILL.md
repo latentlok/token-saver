@@ -152,9 +152,9 @@ Only worth it on real capacity (`parallel_max > 1` and `dispatch` not serial);
 otherwise these queue and buy nothing. Pin the contracts, then either:
 - **`batch=[{task, verify, ...}, ...]`** — N delegations in ONE call, fanned across
   worktrees server-side. The reliable way to parallelize from one session.
-- **`worktree="auto"`** per call — isolates each build on a `qwen/<id>` branch; the
-  receipt carries the exact `MERGE:` command. A merge conflict is a design signal (two
-  units' contracts overlapped) — escalate, don't force.
+- **`worktree="auto"`** per call (or the project config default) — isolates each build
+  on a `qwen/<id>` branch; the receipt carries the exact `MERGE:` command. A merge
+  conflict is a design signal (two units' contracts overlapped) — escalate, don't force.
 Cap is per-endpoint (your hardware); more workers = raise it in the executor profile.
 
 ## touch_scope
@@ -178,6 +178,9 @@ edits auto-revert); new files stay free. Use it to bound a change to its intende
 **on the command alone**; approve by adding its pattern to `shell_allow` and re-delegating
 with the same `session_id`, or deny with the reason in `shell_feedback` (a reasonless
 denial just makes it guess). Compound/redirect/network commands are rejected regardless.
+The worker's MCP tools (`mcp__<server>__<tool>`) are gated the same way: denied unless a
+`mcp_allow` name regex matches — their input shape says nothing about what the server
+does with it, so the name is the only judgeable surface.
 
 **Vague work, two-phase:** `approval_mode="plan"` (no verify needed) → options + SESSION →
 user/you pick one → re-delegate that item warm (`session_id`) with `auto-edit` + a real
@@ -229,6 +232,16 @@ make the criticality call on every delegation.
 **Hygiene:** re-read any file Qwen touched before editing it yourself (your cached copy
 is stale); parallel delegations need separate worktrees — `batch` handles that for you.
 
+**Co-work is the norm — isolate by default.** When anyone (you, subagents, the user)
+may touch the tree while a run is live, delegate into a worktree: `worktree="auto"`
+per call, or `"worktree": "auto"` once in the project's `.qwen-delegate.json` to make
+it the standing default (a call arg still forces `"off"`). The worker builds on its
+own `qwen/<id>` branch and the receipt carries the `MERGE:` line. One cost: a worktree
+branches from HEAD, blind to uncommitted co-work — **commit first** is load-bearing
+here. In-tree co-work stays safe in the attributing modes (`scoped`, hook-observed
+`auto-edit`): a changed file with no logged worker write is reported, never reverted.
+Plain `yolo` has no attribution — one writer per tree there.
+
 ## Playbooks (briefs as repo files)
 
 A recurring or heavyweight brief belongs in the repo, not retyped per call:
@@ -268,8 +281,8 @@ the worker reads on demand.
   sidecar for binaries); imagined fixtures pass any gate written against them.
 - **Project `.qwen-delegate.json`** — `task_suffix` appends your standing worker discipline
   to every task server-side (compaction-safe, unlike QWEN.md); `approval_mode` /
-  `shell_allow` / `timeout_sec` / `preflight_expect` / `verify_timeout_sec` are defaults a
-  call arg still beats.
+  `shell_allow` / `mcp_allow` / `timeout_sec` / `preflight_expect` / `verify_timeout_sec`
+  are defaults a call arg still beats.
 - **`.qwen-delegate/progress.json`** — heartbeat: records, input tokens, attempt, state.
   Answers "is it hung?" for a file read instead of a turn.
 

@@ -220,7 +220,7 @@ Or call the tool directly for something already specified:
     server.py              thin MCP entry (stdio JSON-RPC, zero deps) over qd/
     qd/                    the engine: async submit, gate loop, trust dial, playbooks,
                            worktrees, graph, run log
-    specs/                 the engine's own gate suite (21 spec files, 775 tests)
+    specs/                 the engine's own gate suite (22 spec files, ~800 tests)
     scoped_hook.py         allowlist hook for scoped mode
     agents/                qwen-manager (isolation container) · architect (L5 loop)
     skills/                delegation · architect (L5) · lld-principles · graphify-setup
