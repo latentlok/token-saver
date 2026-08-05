@@ -108,14 +108,32 @@ Do NOT build anything yet. Read the code first and answer only this:
 
 CHALLENGE: none
   -- or --
-CHALLENGE: <one line: what in the brief the code contradicts, or what is
-   ambiguous enough that two readings give different programs>
+CHALLENGE: <one line: the FALSE claim, or the ambiguity>
 EVIDENCE: <repo-relative path[:line] that shows it>
 
-Say `CHALLENGE: none` if the brief is buildable as written. Do not object to
-style, naming, or anything you would merely have done differently -- only to
-what would make the delivered work WRONG. EVIDENCE must be a real path in this
-repository; an objection you cannot point at will be discarded.
+ONE TEST, and it is the only one: can you build something that satisfies this
+brief as written? If yes, answer `CHALLENGE: none` -- even if you would have
+designed it differently.
+
+Object ONLY when one of these is true:
+  1. The brief states something about this code that is FALSE. (It says values
+     are stored in dollars; they are stored in cents.)
+  2. The brief is ambiguous enough that two honest readings produce programs
+     that BEHAVE differently at runtime -- not that look different.
+
+These are NOT objections. Every one of them is still buildable:
+  - a name you would have chosen differently, or that implies more than it does
+  - the work duplicating or overlapping something that already exists
+  - a simpler, cleaner or more general design you would prefer
+  - missing tests, missing docs, style, structure, layering
+  - anything you would raise in code review rather than refuse to start
+
+You are answering "is this buildable?", not "is this how I would do it?".
+A wrong objection costs a whole run and teaches the caller to switch this
+question off, which loses the objections that mattered.
+
+EVIDENCE must be a real path in this repository; an objection you cannot point
+at will be discarded.
 """
 
 # The machine-read tail of a reply. FINDINGS joins the handoff keys rather than

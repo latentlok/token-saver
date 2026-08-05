@@ -53,9 +53,28 @@ class WireFormat(unittest.TestCase):
         self.assertIn("Do NOT build anything yet", verdict.CHALLENGE_SUFFIX)
 
     def test_it_scopes_objections_away_from_taste(self):
+        # Tightened after a live false positive: the pass blocked a buildable
+        # brief because `total_for` implies aggregation over a dict holding one
+        # value per key. Defensible, evidence-backed, and still a block on work
+        # that could have been built exactly as asked. The prompt now leads with
+        # ONE test -- is it buildable? -- and names the non-reasons explicitly.
         low = verdict.CHALLENGE_SUFFIX.lower()
-        self.assertIn("style", low)
-        self.assertIn("wrong", low)
+        self.assertIn("can you build something that satisfies this", low)
+        for non_reason in ("name you would have chosen differently",
+                           "duplicating or overlapping",
+                           "simpler, cleaner or more general",
+                           "code review rather than refuse to start"):
+            self.assertIn(non_reason, low)
+
+    def test_it_names_the_two_things_that_do_qualify(self):
+        low = verdict.CHALLENGE_SUFFIX.lower()
+        self.assertIn("false", low)          # the brief claims something untrue
+        self.assertIn("behave differently", low)   # ambiguity with runtime teeth
+
+    def test_it_says_what_a_wrong_objection_costs(self):
+        # The model should know the downside of over-firing, not just the rule.
+        # A pass that cries wolf gets switched off, taking the real objections.
+        self.assertIn("switch this", verdict.CHALLENGE_SUFFIX.lower())
 
     def test_the_block_round_trips_through_the_shared_parser(self):
         reply = ("prose\n\nCHALLENGE: cents vs dollars\nEVIDENCE: billing/x.py:12\n")

@@ -1,7 +1,8 @@
 # Handover — the modularity restructure
 
-**State: clean. Branch `v0.6`, 23 commits ahead of `origin/v0.6`, nothing pushed.**
-`bash ci/run-specs.sh` → exit 0, **992 tests**.
+**State: clean. Branch `v0.6`, ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
+`bash ci/run-specs.sh` → exit 0, **994 tests**. Version is **0.6.0**; the
+remaining release steps (PR → CI → squash-merge → tag) are the user's, not yours.
 
 Your job is the restructure. Everything else is parked and mapped.
 
@@ -172,17 +173,23 @@ If you want a quick win before starting, those are it.
 
 ---
 
-## Decisions the user still owes
+## Decisions — all closed
 
 - ~~**Version.**~~ **Decided: 0.6.0.** Bumped in `.claude-plugin/plugin.json`
   and `qd/server.py` `SERVER_INFO` (they must stay equal), changelog entry
   written. Remaining per `docs/RELEASING.md`: PR → CI → squash-merge → tag
   `v0.6.0` on master → GitHub release.
-- **`reset_worktree()`** in `qd/gittree.py` — called only by its own spec since
-  best-of-N was removed. Keep or drop.
-- **`challenge_brief` false positives.** Observed live: it blocked a buildable
-  brief because `total_for` implies aggregation over a dict holding one value
-  per key. Defensible, evidence-backed, still a block. The evidence check
-  filters citations nobody can verify; it does not filter pedantry.
+- ~~**`reset_worktree()`**~~ **Decided: keep.** Two lines, spec'd, costs
+  nothing. Its spec pins `clean -fd` and NEVER `-fdx` -- the `-x` would
+  delete gitignored files, i.e. someone's `venv/`. Deleting the function
+  deletes that warning with it.
+- ~~**`challenge_brief` false positives.**~~ **Decided: tighten the prompt.**
+  It blocked a buildable brief because `total_for` implies aggregation over a
+  dict holding one value per key -- defensible, evidence-backed, still a block
+  on work that could have been built as asked. The prompt now leads with one
+  test (*can you build something that satisfies this brief?*) and names the
+  non-reasons explicitly: naming, duplication, a design you would prefer,
+  anything you would raise in review rather than refuse to start. Verified
+  live: the false claim still blocks, the name quibble now builds.
 
-**Nothing is pushed.** 23 commits sit on `v0.6` ahead of the remote.
+**Nothing is pushed, on purpose.** Commit freely on `v0.6`; do not push.

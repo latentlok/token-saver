@@ -242,8 +242,10 @@ which is exactly where A21 happened.
   and `qd/server.py` `SERVER_INFO` (they must stay equal), changelog entry
   written. Remaining per `docs/RELEASING.md`: PR → CI → squash-merge → tag
   `v0.6.0` on master → GitHub release.
-- **`reset_worktree()`** in `qd/gittree.py` — called only by its own spec since best-of-N
-  was removed. Keep or drop.
+- ~~**`reset_worktree()`**~~ **Decided: keep.** Two lines, spec'd, costs
+  nothing. Its spec pins `clean -fd` and NEVER `-fdx` -- the `-x` would
+  delete gitignored files, i.e. someone's `venv/`. Deleting the function
+  deletes that warning with it.
 - **`qd/doctor.py` Ollama advice** — `OLLAMA_NUM_PARALLEL`, CONTEXT off `ollama ps`.
   Ollama will not be used again; clean out when next touching doctor.
 - **Machine config, outside git:** `~/.qwen-delegate/executors.json` now has

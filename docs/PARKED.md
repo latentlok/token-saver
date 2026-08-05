@@ -142,13 +142,18 @@ tier map addresses the symptom, not the detectors).
   and `qd/server.py` `SERVER_INFO` (they must stay equal), changelog entry
   written. Remaining per `docs/RELEASING.md`: PR → CI → squash-merge → tag
   `v0.6.0` on master → GitHub release.
-- **`reset_worktree()`** in `qd/gittree.py` — called only by its own spec since
-  best-of-N was removed. Keep or drop.
-- **`challenge_brief` false positives.** Observed live: it blocked a buildable
-  brief on the grounds that `total_for` implies aggregation over a dict holding
-  one value per key. Defensible, evidence-backed, still a block. The evidence
-  check filters citations nobody can verify; it does not filter pedantry. Decide
-  whether that rate is acceptable at default-on.
+- ~~**`reset_worktree()`**~~ **Decided: keep.** Two lines, spec'd, costs
+  nothing. Its spec pins `clean -fd` and NEVER `-fdx` -- the `-x` would
+  delete gitignored files, i.e. someone's `venv/`. Deleting the function
+  deletes that warning with it.
+- ~~**`challenge_brief` false positives.**~~ **Decided: tighten the prompt.**
+  It blocked a buildable brief because `total_for` implies aggregation over a
+  dict holding one value per key -- defensible, evidence-backed, still a block
+  on work that could have been built as asked. The prompt now leads with one
+  test (*can you build something that satisfies this brief?*) and names the
+  non-reasons explicitly: naming, duplication, a design you would prefer,
+  anything you would raise in review rather than refuse to start. Verified
+  live: the false claim still blocks, the name quibble now builds.
 
 ---
 
