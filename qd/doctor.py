@@ -56,9 +56,10 @@ def normalize_model(name):
     """qwen-code's normalize(), the part that decides a model's token limits.
 
     The load-bearing line is `s.split(":").pop()` -- it keeps only what follows
-    the LAST colon. An Ollama tag is `family:variant`, so `qwen3.6:27b-agent-q8-maxctx`
-    normalizes to `27b-agent-q8-maxctx`, matches nothing, and silently takes the 32k
-    default output cap instead of the 64k its family would have got.
+    the LAST colon. Any registry that tags a model `family:variant` therefore
+    loses the family: `qwen3.6:27b-agent-q8-maxctx` normalizes to
+    `27b-agent-q8-maxctx`, matches nothing, and silently takes the 32k default
+    output cap instead of the 64k its family would have got.
     """
     s = (name or "").lower().strip()
     s = re.sub(r"^.*/", "", s)
@@ -80,11 +81,12 @@ def output_limit(name):
 def verified_window():
     """The context window someone confirmed the endpoint actually serves, or None.
 
-    Recorded in ~/.qwen-delegate/config.json by `--verified N` after reading it off
-    the server (`ollama ps` reports CONTEXT for the loaded model). Nothing here can
-    observe the endpoint, so this is the only way the declared number stops being a
-    claim. Kept separate from the declaration on purpose: if either changes, they
-    stop matching and the finding comes back.
+    Recorded in ~/.qwen-delegate/config.json by `--verified N` after reading the
+    window the SERVER reports (vLLM: `--max-model-len`, or the `max_model_len`
+    field on /v1/models). Nothing here can observe the endpoint, so this is the
+    only way the declared number stops being a claim. Kept separate from the
+    declaration on purpose: if either changes, they stop matching and the
+    finding comes back.
     """
     try:
         path = os.environ.get("QWEN_DELEGATE_CONFIG") or os.path.expanduser(
@@ -211,10 +213,12 @@ def check(settings):
                        f"agree. " if seen else ". ")
                     + f"This plugin computes every CONTEXT / compaction line from "
                     f"it and cannot verify it -- if the endpoint actually serves "
-                    f"less (Ollama's num_ctx, or a context split across "
-                    f"OLLAMA_NUM_PARALLEL slots), a receipt reads 'safe, well "
-                    f"under compaction' while the endpoint is truncating. Read "
-                    f"CONTEXT off `ollama ps` on the box, then record it: "
+                    f"less -- a server started with a smaller "
+                    f"`--max-model-len`, or a window divided across concurrent "
+                    f"slots -- a receipt reads 'safe, well under compaction' "
+                    f"while the endpoint is truncating. Read the window the "
+                    f"server reports (vLLM: `--max-model-len`, or `max_model_len` "
+                    f"on /v1/models) and record it: "
                     f"`python3 -m qd.doctor --verified <N>`."),
             })
     else:

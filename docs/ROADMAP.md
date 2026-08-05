@@ -243,13 +243,45 @@ which is exactly where A21 happened.
 
 ---
 
+## 6b. The active work: modularity
+
+Everything not listed here is **parked** in [PARKED.md](PARKED.md) — specified,
+designed, not being built until the structure can hold it.
+
+**The measurement.** Two functions hold ~2,000 of the ~9,000 lines, and they are
+the two every feature must pass through:
+
+| file | lines | longest function |
+|---|---|---|
+| `qd/engine.py` | 2,134 | **`_delegate` — 1,111**, 105 distinct locals |
+| `qd/verdict.py` | 1,042 | **`render` — 888**, 20 inline receipt branches |
+| `qd/server.py` | 937 | `submit_delegate` — 88 |
+| `qd/invoke.py` | 836 | `_stream_process` — 130 |
+| `qd/gittree.py` | 707 | `mocked_seams` — 58 |
+
+Module *layering* is sound and is not the problem — the import graph is acyclic
+(`server → engine → {bootstrap, gittree, invoke, profiles, runlog, verdict}`),
+and every other module's longest function is under 130 lines.
+
+**The problem is that a FEATURE has no home.** Adding `challenge_brief` took
+five edits across four modules — engine (constant, resolver, an inserted block,
+a ctx key, an accumulator call), verdict (wire format, parser key, receipt
+branch), schemas (param), runlog (telemetry). Nothing groups them, nothing can
+enumerate them, and removing one means rediscovering all five.
+
+**And it compounds.** Today alone: `_delegate` 1,041 → 1,111, `engine.py`
+1,947 → 2,134, `delegate()` 58 → 61 graph edges. Each feature makes the next
+one harder to add and to remove.
+
+---
+
 ## 7. Suggested order
 
 0. ~~**A11 transport**~~ — **done** (`f1527b0`), concurrency unblocked
 1. **D1** (§2.2) — live hole, waits on nothing, one regex
 2. ~~**A23 `challenge_brief`**~~ — **done** (`e7db573`)
 3. ~~**Chain plumbing**~~ — **done** (`4af4936`), plus batch-of-chains (`95278a7`)
-4. **Extract `_delegate`'s post-run block** (§3.2) — 183 lines of independent analyses in a
-   1041-line function the design adds four more things to. **Next up.**
-5. **Design mechanism, then policy** (§3.2–3.3)
-6. **Skill pass** (§4.1) — last, after the prose it deletes is gone
+4. **The modularity restructure** (§6b) — **active**. Everything else is parked
+   in [PARKED.md](PARKED.md) until the structure can hold it.
+5. ~~Design mechanism, then policy~~ → [PARKED.md](PARKED.md) §A
+6. ~~Skill pass~~ → [PARKED.md](PARKED.md) §C

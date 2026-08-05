@@ -109,7 +109,12 @@ class Findings(unittest.TestCase):
                   "context-window-unverified")
         self.assertEqual(f["severity"], "high")
         self.assertIn("196,608", f["text"])
-        self.assertIn("ollama ps", f["text"])
+        # The finding has to tell the reader HOW to check the number, not just
+        # that it is unchecked -- an unactionable "high" is noise. Asserted as
+        # "names the recording command", not as a vendor's shell incantation:
+        # the old assertion pinned `ollama ps`, so retiring Ollama broke a spec
+        # that was never about Ollama.
+        self.assertIn("--verified", f["text"])
 
     def test_a_verified_window_stops_being_a_high_finding(self):
         cfg = os.path.join(tempfile.mkdtemp(), "config.json")

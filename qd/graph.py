@@ -104,7 +104,7 @@ def bootstrap_line():
             "instead of reading files."
         )
     return (
-        "Tip: graphify isn't installed. Installing it (`uv tool install \"graphifyy[ollama]\"`) "
+        "Tip: graphify isn't installed. Installing it (`uv tool install graphifyy`) "
         "lets the worker locate code without reading it -- optional; the graphify-setup "
         "skill sets it up."
     )

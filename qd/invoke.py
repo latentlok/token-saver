@@ -756,9 +756,9 @@ def parse_qwen_json(stdout):
 
 # Truncation is a CLIENT-side cap, so it is invisible in the endpoint's config:
 # qwen-code always sends max_tokens, defaulting to 32k for a model name it does
-# not recognise (its normalize() keeps only the part after ":", so an Ollama tag
-# like "qwen3.6:27b-agent-q8-maxctx" reads as "27b-agent-q8-maxctx" and matches no
-# known-limits pattern). Thinking tokens count against that cap. When the cut
+# not recognise (its normalize() keeps only the part after ":", so any
+# `family:variant` tag like "qwen3.6:27b-agent-q8-maxctx" reads as
+# "27b-agent-q8-maxctx" and matches no known-limits pattern). Thinking tokens count against that cap. When the cut
 # lands inside a tool call the call is rejected outright, so the run ends with
 # no result -- which used to reach the caller as an empty success.
 _TRUNCATION_HINT = (
