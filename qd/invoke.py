@@ -222,6 +222,17 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
+            # A11, the transport half. The server speaks JSON-RPC over stdio,
+            # so fd 0 IS the protocol input stream -- and Popen without
+            # `stdin=` hands the child that exact fd. The executor's stdin is
+            # a PIPE (never a tty), which is precisely what a CLI checks to
+            # decide it has piped input to read, so it consumes the caller's
+            # NEXT request: the reader thread then sees EOF and main() drains
+            # DRAIN_SECONDS and exits. Field symptom: a second tool call during
+            # an in-flight build failing after 10s with "Connection closed" --
+            # DRAIN_SECONDS to the second. start_new_session does NOT cover
+            # this; it detaches the process group, not the descriptors.
+            stdin=subprocess.DEVNULL,
             # Its own session/process group, so _terminate can reap the whole
             # tree. Without this a timeout or an abort kills the executor and
             # orphans everything it spawned (measured: four separate leaks --

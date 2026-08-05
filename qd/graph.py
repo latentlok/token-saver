@@ -116,7 +116,7 @@ def _do_refresh(cwd, files, prior_sha):
         result = subprocess.run(
             graphify_cmd(cwd, files),
             capture_output=True,
-            text=True,
+            text=True, stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             reason = (result.stderr or "nonzero exit").splitlines()[-1]

@@ -42,7 +42,7 @@ def _main_git_dir(repo):
     """Return the main (common) git dir, resolving linked worktrees."""
     p = subprocess.run(
         ["git", "rev-parse", "--git-common-dir"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         raise WorktreeError(f"Not a git repository: {repo}")
@@ -61,7 +61,7 @@ def _resolve_toplevel(common_dir, repo):
     # Ask git for the actual top-level of the main working tree.
     p = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         # Fallback: try to derive from common_dir
@@ -74,7 +74,7 @@ def _resolve_toplevel(common_dir, repo):
 def _branch_exists(main_dir, branch):
     p = subprocess.run(
         ["git", "-C", main_dir, "rev-parse", "--verify", branch],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     return p.returncode == 0
 
@@ -92,7 +92,7 @@ def acquire(repo):
         # Check HEAD exists (refuse unborn HEAD).
         p = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=main_dir, capture_output=True, text=True,
+            cwd=main_dir, capture_output=True, text=True, stdin=subprocess.DEVNULL,
         )
         if p.returncode != 0:
             raise WorktreeError(
@@ -104,7 +104,7 @@ def acquire(repo):
         # Dirty check on the main tree.
         p = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=main_dir, capture_output=True, text=True,
+            cwd=main_dir, capture_output=True, text=True, stdin=subprocess.DEVNULL,
         )
         dirty = bool(p.stdout.strip())
 
@@ -133,7 +133,7 @@ def acquire(repo):
                 "git", "-C", main_dir,
                 "worktree", "add", wt_path, "-b", branch, "HEAD",
             ],
-            capture_output=True, text=True,
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
         )
         if p.returncode != 0:
             raise WorktreeError(f"git worktree add failed: {p.stderr.strip()}")
@@ -155,13 +155,13 @@ def release(repo, path, branch):
     # git worktree remove --force (best-effort, tolerate missing)
     subprocess.run(
         ["git", "-C", main_dir, "worktree", "remove", "--force", path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
 
     # git branch -D (best-effort, tolerate missing)
     subprocess.run(
         ["git", "-C", main_dir, "branch", "-D", branch],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
 
     # Clean up leftover directory
@@ -197,7 +197,7 @@ def classify_merge(repo, branch):
     # Get HEAD of main tree.
     p = subprocess.run(
         ["git", "-C", main_dir, "rev-parse", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         raise WorktreeError("Cannot resolve HEAD for merge classification")
@@ -206,7 +206,7 @@ def classify_merge(repo, branch):
     # Get branch sha.
     p = subprocess.run(
         ["git", "-C", main_dir, "rev-parse", branch],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         raise WorktreeError(f"Cannot resolve branch {branch!r}")
@@ -216,7 +216,7 @@ def classify_merge(repo, branch):
     # Exit 0 = clean merge, nonzero = conflicts.
     p = subprocess.run(
         ["git", "-C", main_dir, "merge-tree", "--write-tree", head_sha, branch_sha],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
 
     return "clean" if p.returncode == 0 else "conflict"

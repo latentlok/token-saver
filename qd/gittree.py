@@ -17,7 +17,7 @@ PROJECT_CONFIG = ".qwen-delegate.json"
 def git(cwd, *a):
     try:
         p = subprocess.run(
-            ["git", *a], cwd=cwd, capture_output=True, text=True, timeout=30
+            ["git", *a], cwd=cwd, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
         )
         # rstrip newlines only -- NEVER .strip(). `status --porcelain` encodes state in
         # leading columns (" M path"), so stripping the whole output eats the first
@@ -31,7 +31,7 @@ def git_bytes(cwd, *a):
     """git() with raw stdout bytes -- for file CONTENT (`git show`), which must
     round-trip binary exactly and must not have its trailing newlines stripped."""
     try:
-        p = subprocess.run(["git", *a], cwd=cwd, capture_output=True, timeout=30)
+        p = subprocess.run(["git", *a], cwd=cwd, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout or b""
     except Exception:
         return 1, b""

@@ -26,6 +26,7 @@ the right answer and did not act on it.
 Run:  python3 specs/teardown_spec.py
 """
 
+import ast
 import os
 import subprocess
 import sys
@@ -322,6 +323,109 @@ class ProjectDoctor(unittest.TestCase):
         # doctor is what a confused caller reaches for; a fault in one check
         # must not deny them the others.
         self.assertIsInstance(doctor.project_check("/nonexistent/path"), list)
+
+
+class TransportIsolation(unittest.TestCase):
+    """A11, the transport half: a spawned child must NOT inherit the server's stdin.
+
+    The server speaks JSON-RPC over stdio, so fd 0 IS the protocol input stream.
+    `subprocess.Popen` with no `stdin=` gives the child that fd. A child that
+    reads it -- a CLI checking for piped input, anything behind `shell=True` --
+    consumes the caller's NEXT request, the reader thread sees EOF, and main()
+    drains for DRAIN_SECONDS and exits. The field symptom was exactly that:
+    a second tool call during an in-flight build failing after 10s with
+    "Connection closed", matching DRAIN_SECONDS to the second.
+
+    `start_new_session=True` (the teardown half of the same finding) does not
+    help: it detaches the process GROUP, not the file descriptors.
+    """
+
+    def test_the_mechanism_is_real(self):
+        # The bug this pins, demonstrated end to end: a child with an inherited
+        # stdin eats a request the parent had not read yet. Without this, the
+        # DEVNULL assertions below are a style rule with no failure behind them.
+        #
+        # The second request must be written AFTER the child is live. Sent in
+        # one burst it lands in the parent's own read buffer before the spawn
+        # and is never at risk -- which is why the field bug needed a real gap
+        # between two tool calls to show itself.
+        parent = (
+            "import subprocess, sys\n"
+            "sys.stdin.readline()\n"
+            "p = subprocess.Popen([sys.executable, '-c',"
+            " 'import sys; sys.stdin.read()'], start_new_session=True)\n"
+            "sys.stdout.write('SPAWNED\\n'); sys.stdout.flush()\n"
+            "p.wait()\n"
+            "sys.stdout.write(repr(sys.stdin.readline()) + '\\n'); sys.stdout.flush()\n"
+        )
+        p = subprocess.Popen([sys.executable, "-c", parent],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             text=True, bufsize=1)
+        try:
+            p.stdin.write('{"id":1}\n')
+            p.stdin.flush()
+            self.assertEqual(p.stdout.readline().strip(), "SPAWNED")
+            p.stdin.write('{"id":2}\n')      # the second tool call
+            p.stdin.flush()
+            p.stdin.close()                  # lets the child's read() return
+            self.assertEqual(p.stdout.readline().strip(), "''",
+                             "child did not eat the parent's stdin -- the "
+                             "premise of this spec no longer holds")
+        finally:
+            p.kill()
+            p.wait(timeout=10)
+
+    @staticmethod
+    def _spawn_calls(rel, kind=None):
+        """(line, stdin_value_or_None) for real subprocess.Popen/run calls.
+
+        Parsed, not grepped. A text scan matches `subprocess.run(` inside the
+        prose of a comment explaining why this site does not use it -- which is
+        a spec failing on documentation, the least useful kind of red.
+        """
+        import ast
+        tree = ast.parse(open(os.path.join(ROOT, rel)).read())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not (isinstance(f, ast.Attribute)
+                    and isinstance(f.value, ast.Name) and f.value.id == "subprocess"
+                    and f.attr in ("Popen", "run")):
+                continue
+            if kind and f.attr != kind:
+                continue
+            kw = {k.arg: k.value for k in node.keywords if k.arg}
+            yield node.lineno, kw.get("stdin")
+
+    def _assert_devnull(self, rel, msg):
+        calls = list(self._spawn_calls(rel, kind="Popen"))
+        self.assertTrue(calls, f"the spawn site in {rel} moved")
+        _, stdin = calls[0]
+        self.assertIsNotNone(stdin, msg)
+        self.assertEqual(ast.dump(stdin), ast.dump(
+            ast.parse("subprocess.DEVNULL", mode="eval").body), msg)
+
+    def test_the_executor_spawn_detaches_stdin(self):
+        self._assert_devnull("qd/invoke.py",
+                             "the executor inherits the MCP transport's stdin")
+
+    def test_the_gate_spawn_detaches_stdin(self):
+        self._assert_devnull("qd/engine.py",
+                             "the gate command inherits the MCP transport's stdin")
+
+    def test_no_spawn_site_anywhere_inherits_stdin(self):
+        # The two above are the long-running ones, but a `git` or `graphify`
+        # call that reads one byte corrupts the stream just as completely, and
+        # the next person to add a spawn site should inherit the rule.
+        bad = []
+        for name in sorted(os.listdir(os.path.join(ROOT, "qd"))):
+            if not name.endswith(".py") or name.endswith("_qwen.py"):
+                continue
+            for line, stdin in self._spawn_calls(f"qd/{name}"):
+                if stdin is None:
+                    bad.append(f"qd/{name}:{line}")
+        self.assertEqual(bad, [], f"spawn sites inheriting the server's stdin: {bad}")
 
 
 if __name__ == "__main__":

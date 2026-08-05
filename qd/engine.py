@@ -313,6 +313,12 @@ def _run_verify_timed(cmd, cwd, timeout):
     proc = subprocess.Popen(
         cmd, cwd=cwd, shell=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        # A11 transport half, and this site is the worse of the two: `shell=True`
+        # means ANY command in the project's gate can read fd 0, which under the
+        # MCP server is the JSON-RPC input stream. One stray read eats the
+        # caller's next request and the transport dies DRAIN_SECONDS later.
+        # A gate has no legitimate use for the server's stdin.
+        stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
     try:
@@ -1559,7 +1565,7 @@ def _delegate(args, t0_dir):
                         f"{tc} {' '.join(qwen_files)}",
                         cwd=work_cwd, shell=True,
                         capture_output=True, text=True, timeout=60,
-                        env=os.environ,
+                        env=os.environ, stdin=subprocess.DEVNULL,
                     )
                     prefilter_out = (
                         ((pv.stdout or "") + (pv.stderr or "")).strip()
