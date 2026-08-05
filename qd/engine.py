@@ -379,6 +379,28 @@ def _created(cwd, changed, pre_status, pre_tracked, writes, hooked):
     return sorted(out)
 
 
+def _detect(fn):
+    """Run one detector. Its failure costs its own finding and nothing more.
+
+    These are greps over a tree another process was writing moments ago, so any
+    of them can raise. What that USED to cost was wildly unequal: the three seam
+    greps shared one `try`, so one failing took the other two with it, and
+    `dodge_markers`/`_strays` sat inside the handler that sets
+    `tree_facts = None` -- so one failed grep discarded EVERY fact, and the
+    receipt lost CHANGED and COMMITTED and fell back to the v1 re-read path with
+    nothing anywhere saying why. Pinned by specs/detectors_spec.py.
+
+    Returns None on failure rather than an empty result. A finding that could
+    not be computed and one that came back empty are different facts about the
+    run (PRINCIPLES §IV), and collapsing them makes every empty finding
+    worthless as evidence -- the reader cannot tell "clean" from "unmeasured".
+    """
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
 def _strays(created, task, touch_scope):
     """Created files the task never names (U4.3).
 
@@ -1968,27 +1990,32 @@ def _delegate(args, t0_dir):
         # move out in step 2.
         ctx["tree_facts"] = facts.collect(work_cwd, pre_status, pre_sha_full)
         final_changed = ctx["tree_facts"]["changed"]
+    except Exception:
+        ctx["tree_facts"] = None
+    # Only the FACTS collection can cost the facts. Each detector below runs
+    # under its own guard (`_detect`) because a failed grep is evidence about
+    # that grep and about nothing else -- see specs/detectors_spec.py.
+    if ctx["tree_facts"] is not None:
+        tf = ctx["tree_facts"]
         # Seam risk (v0.6). Three greps over what the run already changed --
         # nothing executes. A unit gate cannot assert "this is wired to that",
         # so these do not verify the seam; they name the places a green
         # receipt is silent about.
-        try:
-            tf = ctx["tree_facts"]
-            tf["uncalled"] = uncalled_symbols(work_cwd, tf["pubs"])
-            tf["mocked_seams"] = mocked_seams(work_cwd, final_changed)
-            tf["never_executed"] = never_executed(work_cwd, final_changed, verify)
-        except Exception:
-            pass
+        tf["uncalled"] = _detect(
+            lambda: uncalled_symbols(work_cwd, tf["pubs"]))
+        tf["mocked_seams"] = _detect(
+            lambda: mocked_seams(work_cwd, final_changed))
+        tf["never_executed"] = _detect(
+            lambda: never_executed(work_cwd, final_changed, verify))
         # U4.2/U4.3, captured from the same tree and the same moment as the
         # facts above -- after a worktree run's commit/release there is nothing
         # left to scan.
-        ctx["dodge"] = dodge_markers(work_cwd, pre_sha_full, pre_status)
-        ctx["strays"] = _strays(
+        ctx["dodge"] = _detect(
+            lambda: dodge_markers(work_cwd, pre_sha_full, pre_status))
+        ctx["strays"] = _detect(lambda: _strays(
             _created(work_cwd, final_changed, pre_status, pre_tracked,
                      ctx.get("writes"), hooked),
-            task, touch_scope)
-    except Exception:
-        ctx["tree_facts"] = None
+            task, touch_scope))
     ctx["work_cwd"] = work_cwd
     # Extracted here rather than at render time so the one line a report run
     # exists to produce survives the receipt's result-text truncation.
