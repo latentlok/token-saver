@@ -26,14 +26,14 @@ All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9
 | A0 | DEALBREAKER | **done** | doctor: gate-near-timeout check |
 | A0a / A0c | DEALBREAKER | **done** | `start_new_session` + `killpg`, mutation-checked |
 | A0b | BUG | **done** | endpoints honoured at profile Level 4 |
-| A0d | BUG | **partial** | doctor *reports* stale servers; nothing kills one → §3.4 |
+| A0d | BUG | **partial** | doctor now names the pids and the exact `kill` command; the self-terminating-predecessor half is still open |
 | A0e | BUG | **done** | freshness computed live, never read from disk |
 | A1 | FRICTION | open | skill 326 → ~100 lines → §4.1 |
 | A2 | BUG (docs) | open | skill contradicts USAGE.md on graphify → §4.1 |
 | A3 | FRICTION | open | graphify needs `scoped`, said nowhere → §4.1 |
 | A4 | — | **done** | resolved during the ledger session |
 | A5 | WISH | open | no `PAID:` line → §4.3 |
-| A7 | WISH | open | *the instrument already exists* — `advisory_gates` is exactly the self-grading measurement, and is undocumented → §4.3 |
+| A7 | WISH | **done** | `advisory_gates` documented in USAGE.md — green STATUS + red advisory is a measured blindspot |
 | A7b | BUG | **done** | run id stamped at submit |
 | A8 | — | **done** | resolved during the ledger session |
 | A9 | BUG | **done** | doctor check; the tier map (DESIGN §2.2) makes it structural |
@@ -53,7 +53,9 @@ All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9
 | A22 | DEALBREAKER | **done** | `UNCALLED:` |
 | A23 | DEALBREAKER | **done** | `challenge_brief`, evidence-verified → §3.0 |
 
-**Score: 19 done, 1 partial, 3 open, 1 designed, 1 methodological.**
+**Score: 20 done, 1 partial, 2 open, 1 designed, 1 methodological.**
+
+Open: A1/A2/A3/A10 (the skill pass, one job) and A5 (`PAID:` line).
 
 Plus five defects found while *designing* the A14 replacement (DESIGN §9). Three exist
 today and are not in the ledger at all: **D1** the vacuous-pass guard counts skipped

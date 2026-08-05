@@ -47,7 +47,7 @@ elsewhere:
 | **A8** contract lifecycle check | a doctor check; doctor is not being restructured |
 | **C** the skill pass | prose. *Best done after* the restructure so it is rewritten once, not twice — a scheduling choice, not a dependency |
 | **D** server lifecycle (A0d) | server startup; untouched by this work |
-| **D** document `advisory_gates` | documentation of something already shipped |
+
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |
 | **F** decisions owed | version bump, `reset_worktree()`, the `challenge_brief` false-positive rate |
 
@@ -112,15 +112,14 @@ Three content bugs to fix while in there:
 
 ## D. Smaller open items
 
-**Server lifecycle (A0d, partial).** Doctor reports stale servers; nothing kills
-one. Write pid+version at startup, have a new server terminate a stale
-predecessor.
+**Server lifecycle (A0d, partial).** Doctor now names the pids and the exact
+`kill` command. Still open: a server that writes pid+version at startup and
+terminates a stale predecessor — a behaviour change to process management that
+wants live testing rather than a spec.
 
-**Measurement (A5/A7).** A `PAID:` receipt line. And **document
-`advisory_gates`** — A7 asked "did self-grading catch what a real gate would?"
-and the instrument already shipped: attach an owner-held spec as advisory, run
-`trust="self"`, and green STATUS + red advisory *is* a measured blindspot. Pairs
-with the `*_qwen` marker (A6) as the other half of grading worker tests.
+**Measurement (A5).** A `PAID:` receipt line. *(A7 is closed —
+`advisory_gates` is documented in USAGE.md. It pairs with the `*_qwen` marker
+(A6) as the other half of grading worker tests.)*
 
 **Per-call telemetry, next step.** `ExecutorCall` exists. Not yet: gate runs and
 subprocess work are not calls in the log, so wall-clock attribution stops at the

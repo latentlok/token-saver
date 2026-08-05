@@ -1,7 +1,8 @@
 # Handover — the modularity restructure
 
 **State: clean. Branch `v0.6`, ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,008 tests**. **Step 1 is DONE** — start at step 2. Version is **0.6.0**; the
+`bash ci/run-specs.sh` → exit 0, **1,013 tests**. **Step 1 is DONE** — start at step 2.
+Ledger: 20 of 23 findings closed. Version is **0.6.0**; the
 remaining release steps (PR → CI → squash-merge → tag) are the user's, not yours.
 
 Your job is the restructure. Everything else is parked and mapped.
@@ -14,7 +15,7 @@ Your job is the restructure. Everything else is parked and mapped.
 |---|---|
 | **[docs/DESIGN-modular-architecture.md](docs/DESIGN-modular-architecture.md)** | **the plan.** The problem measured, the target shape, the 8 steps, the patterns, the risks. Start here |
 | [docs/PARKED.md](docs/PARKED.md) | everything NOT being built, and which step unblocks each item |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | the ledger scoreboard: 19 of 23 field findings closed, what remains |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | the ledger scoreboard: 20 of 23 field findings closed, what remains |
 | [docs/README-walkthroughs.md](docs/README-walkthroughs.md) | how delegate / chain / query behave, end to end, in plain language |
 | [docs/PRINCIPLES.md](docs/PRINCIPLES.md), [docs/HLD.md](docs/HLD.md) | the standing doctrine and the architecture as it is today |
 
