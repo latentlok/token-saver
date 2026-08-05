@@ -31,7 +31,6 @@ thing and this list stays another.
 | **A3** tier map | step 6 | `core/plan.py` (it is config resolution) |
 | **A4** clause coverage as link 1's gate | step 4 | `features/gates/` |
 | **A5** `SEAM CROSSED` | steps 1–3 | a detector reading existing facts |
-| **A6** `*_qwen` naming check | steps 1–2 | a detector |
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
@@ -49,6 +48,7 @@ elsewhere:
 |---|---|
 | **A7** the two playbooks | markdown documents |
 | **A8** contract lifecycle check | a doctor check; doctor is not being restructured |
+| **A6** `*_qwen` naming check | **unblocked by step 2** — it is a detector, and `qd/features/detectors/` now exists. Copy any of the five: a file with `KIND` and `detect(facts, inputs)`, plus one line in `DETECTORS` |
 | **C** the skill pass | prose. *Best done after* the restructure so it is rewritten once, not twice — a scheduling choice, not a dependency |
 | **D** server lifecycle (A0d), remaining half | server startup; untouched by this work. The reporting half shipped in `29b62e6` |
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |

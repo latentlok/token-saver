@@ -200,7 +200,19 @@ the status it hands over is FINAL.* Added keys:
                                    # captured from work_cwd BEFORE any worktree
                                    # commit/release. None => verdict recomputes from
                                    # ctx["cwd"] -- the pinned v1 fallback the
-                                   # differential oracle depends on
+                                   # differential oracle depends on.
+                                   # v0.6 step 2: READ-ONLY. Observations only --
+                                   # a write raises. Judgements about the tree are
+                                   # `detections`, and the split is load-bearing
+                                   # (DESIGN-modular-architecture.md §4)
+    detections: [Finding(kind, data)]      # what the detectors observed. kinds:
+                                   # uncalled, mocked_seams, never_executed (seam
+                                   # risk), dodge (added skip/xfail in test-ish
+                                   # files), strays (created, attributed, unnamed
+                                   # in the task). A kind absent = that detector
+                                   # ran and found nothing
+    detections_failed: [kind]      # detectors that RAISED. Distinct from absent:
+                                   # absent means clean, here means unmeasured
     meta: {blocked, writes, allowed, ...}   # all three ACCUMULATE across attempts
                                    # (order-preserving dedupe); each QGATE log is
                                    # fresh per attempt, so binding the last one alone
@@ -210,9 +222,8 @@ the status it hands over is FINAL.* Added keys:
     scope_unattributed: [path]     # changed, no logged worker write -> reported
     spec_unattributed: [path]      # spec changed, unattributed -> never reverted
     unrestorable: [path]           # over the snapshot cap, not auto-reverted
-    strays: [path]                 # created, attributed, unnamed in the task
-    dodge: {path: [marker]}        # added skip/xfail/expectedFailure in test-ish files
-    findings: str | None           # extracted pre-truncation
+    findings: str | None           # extracted pre-truncation. The WORKER'S OWN
+                                   # reported findings -- not `detections` below
     advisory: [{name, ok, ms, head}] | absent      # absent unless gates were supplied
     advisory_skipped: int          # malformed gate entries, counted not raised on
     gate_ms: int, gate_slow: bool, verify_timeout_sec: int, preflight_expect: str

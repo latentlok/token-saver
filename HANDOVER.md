@@ -1,7 +1,7 @@
 # Handover — the modularity restructure
 
 **State: clean. Branch `v0.6`, ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,013 tests**. **Step 1 is DONE** — start at step 2.
+`bash ci/run-specs.sh` → exit 0, **1,029 tests**. **Steps 1 and 2 are DONE** — start at step 3.
 Ledger: 20 of 23 findings closed. Version is **0.6.0**; the
 remaining release steps (PR → CI → squash-merge → tag) are the user's, not yours.
 
@@ -50,8 +50,8 @@ ingest source.
 | For | Read |
 |---|---|
 | the plan | the design doc's §4 (facts vs findings) and §8 (the steps) |
-| step 1 | `qd/engine.py` from `# --- Tree facts (C3) ---` to `# --- Advisory gates ---` — about 50 lines |
-| what the detectors expect | the public signatures in `qd/gittree.py` — `grep '^def ' qd/gittree.py` |
+| steps 1–2, the finished shape | `qd/core/facts.py`, `qd/core/findings.py`, `qd/features/detectors/__init__.py` — about 150 lines, and the pattern step 3 copies |
+| what step 3 must not break | `specs/detectors_spec.py` — the three `ReachesTheReceipt` tests are the only thing asserting a finding reaches the caller |
 | the shape a spec takes | one existing spec, e.g. `specs/challenge_spec.py` |
 
 **Locate code without reading it.** The repo has a structural graph
@@ -100,7 +100,7 @@ Full detail in the design doc §8. Summary:
 | # | Step | One line |
 |---|---|---|
 | 1 | ~~**Facts**~~ | **done** — `qd/core/facts.py` + `specs/facts_spec.py` |
-| 2 | **Findings** | detectors return findings instead of writing into `ctx` |
+| 2 | ~~**Findings**~~ | **done** — `qd/core/findings.py` + `qd/features/detectors/` + `specs/detectors_spec.py` |
 | 3 | **Receipt as a list** | the report builds from registered blocks, not 20 hardcoded branches |
 | 4 | **Gates** | the things that can refuse a run get one shape |
 | 5 | **Scope** | one owner for worktree + session + call log |
@@ -119,22 +119,47 @@ steps immediately dismantle.
 
 ---
 
-## Step 1 is done — read it before starting step 2
+## Steps 1 and 2 are done — read them before starting step 3
 
-`qd/core/facts.py` + `specs/facts_spec.py`. Read both; they are short, and step 2
-is the other half of the same idea.
+`qd/core/facts.py`, `qd/core/findings.py`, `qd/features/detectors/`, and their
+two specs. They are short, and together they are the pattern step 3 copies.
 
-**What step 1 proved.** The extraction made visible something invisible while it
-was one inline block: **the detectors write their results back INTO the facts
-record** (`tf["uncalled"] = ...` in `qd/engine.py`). That is exactly the
-facts/findings confusion design §4 describes. It is why `collect()` returns a
-plain dict rather than a frozen type — the freeze lands in step 2, with them.
+**What step 2 settled.** Facts are observations (`changed`, `pubs`); findings
+are judgements reached by reading them (`UNCALLED`, `MOCKED SEAM`). Detectors
+now RETURN findings and the facts record is frozen, so the old
+`tf["uncalled"] = ...` write-back raises instead of quietly working. Detectors
+have no ordering between them and `DETECTORS` can be listed, so adding one is a
+file plus a line.
 
-**What step 2 is.** Move `uncalled_symbols`, `mocked_seams`, `never_executed`,
-`dodge_markers` and the strays check out of `_delegate` so they *return* findings
-instead of writing into facts. Then freeze the facts record.
+**Three things step 2 cost, worth knowing before step 3 repeats them.**
 
-**One lesson from step 1's mutation pass, worth repeating.** Breaking the
+1. **A green suite hid a real bug.** The detectors sat in two unequal `try`
+   blocks, and one failed grep discarded EVERY fact — the receipt lost CHANGED
+   and COMMITTED and fell back to the v1 path, silently. Nothing raises on a
+   healthy tree, so 1,013 passing tests never showed it. It was fixed BEFORE the
+   move (`177530b`) on purpose: a registry loop isolates detectors naturally, so
+   moving first would have hidden a behaviour change inside a refactor.
+
+2. **I was wrong about which specs were the net.** The plan said pin TEST DODGE
+   at the receipt first; it had been pinned since `engine_spec:1689`. The
+   unpinned ones were the three SEAM findings — `seams_spec` calls the gittree
+   functions directly, so it proves the greps work and proves nothing renders
+   what they return. **Step 3 rewrites the renderer, so check this first:
+   which findings have a test asserting on rendered text?** For anything that
+   does not, the renderer can stop printing it and the whole suite stays green.
+
+3. **`facts → Finding` was not the real signature.** Five of five detectors need
+   `verify`, `task` or `touch_scope` — the brief, not the tree.
+   `DetectorInputs` carries them, frozen and closed, each field annotated with
+   the step that takes it away. Expect the same gap in step 3 and resist the
+   same temptation: a general bag handed to every feature is `ctx` renamed.
+
+**`_delegate` grew.** 1,106 → 1,111 lines, while `engine.py` shrank 2,132 →
+2,116. The detector logic left; seven named inputs cost more lines than five
+terse calls. Step 2 bought enumerability, not size, and the size comes back in
+steps 5–6 when `DetectorInputs` dissolves. Do not report it as a size win.
+
+**One lesson from step 1's mutation pass, still worth repeating.** Breaking the
 changed-set derivation SURVIVED the first spec: a deleted file still shows up in
 the post status, so the obvious test did not bind. The case that actually breaks
 is a file dirty at T0 that the run puts back — it disappears from the post status

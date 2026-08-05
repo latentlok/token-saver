@@ -329,14 +329,46 @@ Contiguity is a property of the file. It is not a seam.
 
 | # | Step | Why here |
 |---|---|---|
-| 1 | ~~**`Facts` record**~~ **DONE** (`e97e70e`) — `qd/core/facts.py` + `specs/facts_spec.py` | it proved the seam *and* the design: the extraction made visible that the detectors write their results back INTO the facts record (`tf["uncalled"] = ...`), which is the §4 confusion, invisible while it was one inline block. That is why `collect()` returns a plain dict — the freeze lands with step 2 |
-| 2 | **`Finding` record + detector registry** — detectors return findings instead of writing `ctx` | the detectors already have the right signatures |
+| 1 | ~~**`Facts` record**~~ **DONE** (`e97e70e`) — `qd/core/facts.py` + `specs/facts_spec.py` | it proved the seam *and* the design: the extraction made visible that the detectors write their results back INTO the facts record (`tf["uncalled"] = ...`), which is the §4 confusion, invisible while it was one inline block. `collect()` returned a plain dict for exactly as long as that was true; **the freeze landed with step 2** (`f5b78d3`) |
+| 2 | ~~**`Finding` record + detector registry**~~ **DONE** (`177530b`, `eafd5ae`, `f497eb4`, `f5b78d3`) — `qd/core/findings.py` + `qd/features/detectors/` + `specs/detectors_spec.py` | the detectors already had the right signatures, and the move exposed one bug and one wrong assumption. See below |
 | 3 | **Receipt as a list** — `render`'s 20 branches become registered blocks | kills the second god function; after this, adding a feature never touches the renderer |
 | 4 | **Gate strategy** — the gates behind one interface | gives the parked red gate a socket |
 | 5 | **`RunScope`** — container + session + call log under one lifetime | absorbs today's chain-worktree handling *and* the worktree disposition left behind by step 1 |
 | 6 | **`RunPlan` builder** | biggest change, smallest risk once 1–5 have drained the function |
 | 7 | **Composite runnable** — Run / ChainOfRuns | late, because it is the only step that changes an external shape |
 | 8 | **Fold `query` in** — `container=none, gate=none, loop=single, facts=none` | last on purpose: the smallest and best-behaved caller, safest to migrate once the shape is proven, and the first to benefit (it has no per-call telemetry today) |
+
+**What step 2 turned up.**
+
+*A bug the suite could not see.* The detectors sat in two unequal `try` blocks:
+the three seam greps shared one, and `dodge_markers`/`_strays` sat in the OUTER
+handler that sets `tree_facts = None`. So **one failed grep discarded every
+fact** — the receipt lost CHANGED and COMMITTED and fell back to the v1 re-read
+path, silently. Nothing raises on a healthy tree, so a green suite could never
+show it. Fixed in `177530b`, deliberately BEFORE the move: a registry loop
+isolates each detector naturally, so doing the move first would have smuggled
+the fix in disguised as a refactor and no bisect could separate them.
+
+*An assumption that was wrong.* The plan called for pinning TEST DODGE at the
+receipt before moving anything. It had been pinned since `engine_spec:1689`.
+The unpinned findings were the three SEAM ones — asserted only in `seams_spec`,
+which calls the gittree functions directly and therefore proves the greps work
+while proving nothing renders what they return. Those pins (`eafd5ae`) are what
+made the move verifiable: written against rendered text, they passed unchanged
+throughout it.
+
+*A signature the design did not have.* §5 says a detector is `facts → Finding`.
+Five of five need more: `verify` is the gate command and `task`/`touch_scope`
+are the brief — inputs, not observations. `DetectorInputs` carries the seven,
+frozen and closed, each field annotated with the step that takes it (5 or 6).
+It is scaffolding with an expiry, and it is named as such, because a
+general-purpose bag handed to every feature is `ctx` with a nicer name.
+
+*Honest measurement.* `_delegate` **grew** 1,106 → 1,111 lines; `engine.py`
+shrank 2,132 → 2,116. Step 2's benefit is not size — it is that the detectors
+are now enumerable (`DETECTORS`) and that adding or removing one is a file plus
+a line. The call-site lines come back in steps 5–6, when `DetectorInputs`
+dissolves into scope and plan.
 
 Steps 1–3 deliver most of the benefit. After step 3 a feature can be added
 without touching the renderer; after step 4 there is a template to copy. The
