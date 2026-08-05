@@ -223,26 +223,47 @@ silently move it. **Verify, do not generate.**
 
 ## 6. Task types
 
-| type | container | features |
-|---|---|---|
-| **delegate** | its own worktree, or the repo lock under `worktree: "off"` | the full set |
-| **chain** | **one worktree shared by all links** | delegate's set + shared container, handoff forwarding, challenge-once-at-head |
-| **batch** | one per item, isolated from each other | per item, by that item's own type |
-| **query** | none — read-only | **stays outside this design** |
+A task type is not a different *kind* of thing. It is the same run with a
+different **capability vector**:
 
-**`query` is deliberately excluded.** `queries.py` is 193 lines, one function,
-and shares exactly one thing with delegate — the executor adapter. No gate, no
-container, no attempt loop, no retry, different receipt. Forcing it into this
-pipeline would make it a run with nearly every feature switched off: an
-abstraction paying rent for nobody. It is also the one part of this system that
-has never been hard to change.
+| type | container | gate | loop | tree facts |
+|---|---|---|---|---|
+| **query** | none | none | single call | none |
+| **delegate** | own worktree, or the repo lock under `worktree: "off"` | strategy | retry to `max_iterations` | yes |
+| **chain** | **one worktree shared by all links** | per link | per link | yes |
+| **batch** | one per item, isolated | per item | per item | per item |
 
-Selection is a **table**, not a class hierarchy:
+Features then attach by **capability**, not by type name — a detector that needs
+tree facts simply is not selected for a run that has none. Nothing has to know
+what a "query" is.
 
 ```python
 DELEGATE = [trust_self, spec_guard, touch_scope, strays, fixtures, seams, dodge]
 CHAIN    = DELEGATE + [shared_container, handoff, challenge_at_head]
+QUERY    = [schema_check, denials, context_peak]
 ```
+
+### Why `query` is in, having first been left out
+
+The first draft excluded it: 193 lines, one function, sharing only the executor
+adapter — pulling it in looked like an abstraction paying rent for nobody.
+
+That argument measured SIZE and ignored DUPLICATION. `queries.py` re-implements
+five things `delegate` already does: profile resolution, `result_schema`
+handling and validation, telemetry assembly (`_log_query` rebuilds what
+`leverage_record` assembles), the `CONTEXT: peak` line, and denial reporting.
+
+The evidence that settles it came from this repo's own history. Per-call
+telemetry (`CallLog`) was added to the delegate path; `grep -c CallLog` returns
+**2 in `engine.py`, 0 in `queries.py`**. A capability every run should have was
+added once and silently reached one caller, because there was no shared pipeline
+to add it to. That is the exact failure mode this whole document exists to fix,
+and leaving `query` outside would preserve it by design.
+
+So: `query` is a run whose container is `none`, whose gate is `none`, whose loop
+runs once, and whose facts are not tree-derived. It gains per-call telemetry,
+one telemetry path and one receipt renderer for free, and stops being the place
+improvements forget to go.
 
 ---
 
@@ -303,6 +324,7 @@ Ordered so each step is independently valuable and independently revertable.
 | 6 | **`RunScope`** — container + session + call log under one lifetime | absorbs today's chain-worktree handling |
 | 7 | **`RunPlan` builder** | biggest change, smallest risk once 1–6 have drained the function |
 | 8 | **Composite runnable** — Run / ChainOfRuns | last, because it is the only step that changes an external shape |
+| 9 | **Fold `query` in** — a run with `container=none, gate=none, loop=single, facts=none` | last on purpose: it is the smallest and best-behaved caller, so it is the safest thing to migrate once the shape is proven, and the first to benefit (it has no per-call telemetry today) |
 
 Steps 1–4 deliver most of the benefit. After step 4 a feature can be added
 without touching the renderer; after step 5 there is a template to copy.
