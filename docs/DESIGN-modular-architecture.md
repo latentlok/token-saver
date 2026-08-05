@@ -1,7 +1,7 @@
 # Design — modular architecture: a run is an object, a feature is a unit
 
-**Status: design, nothing built.** Supersedes nothing; the parked queue
-([PARKED.md](PARKED.md)) lands *into* this once it exists.
+**Status: step 1 built, steps 2–8 designed.** The parked queue
+([PARKED.md](PARKED.md)) lands *into* this as the steps land.
 
 The goal in one sentence: **adding or removing a feature should be a local
 change**, and today it is not.
@@ -329,7 +329,7 @@ Contiguity is a property of the file. It is not a seam.
 
 | # | Step | Why here |
 |---|---|---|
-| 1 | **`Facts` record** — lift the fact computation into a read-only record | §4, and everything downstream reads it. Still the safest opening move: it is the part with no branching and no writes — but it lands in the shape we keep |
+| 1 | ~~**`Facts` record**~~ **DONE** (`e97e70e`) — `qd/core/facts.py` + `specs/facts_spec.py` | it proved the seam *and* the design: the extraction made visible that the detectors write their results back INTO the facts record (`tf["uncalled"] = ...`), which is the §4 confusion, invisible while it was one inline block. That is why `collect()` returns a plain dict — the freeze lands with step 2 |
 | 2 | **`Finding` record + detector registry** — detectors return findings instead of writing `ctx` | the detectors already have the right signatures |
 | 3 | **Receipt as a list** — `render`'s 20 branches become registered blocks | kills the second god function; after this, adding a feature never touches the renderer |
 | 4 | **Gate strategy** — the gates behind one interface | gives the parked red gate a socket |

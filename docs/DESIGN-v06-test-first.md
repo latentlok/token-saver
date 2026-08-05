@@ -718,7 +718,8 @@ real lifecycle: `BurnLimit` and `Progress` (`limits.py`), `FileSlots` and `Endpo
 and returning data — `never_executed(cwd, changed, verify_cmd) -> list`.
 
 That is not an oversight to correct. It is why the spec suite is hermetic: a pure function
-needs no fixture, no mock and no teardown, and 875 tests run in ~80s because of it. The
+needs no fixture, no mock and no teardown, and the suite (875 tests when this was
+written, 1,013 now) runs in ~80s because of it. The
 domain is *read git → parse output → return a verdict*, which is transformation, not
 entities with state.
 

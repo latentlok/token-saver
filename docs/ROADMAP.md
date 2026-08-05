@@ -198,18 +198,28 @@ skill's own measurement refutes (A2), the unsaid `scoped` requirement (A3), and 
 Do this **after** the doctor checks and the design's receipt lines land — each of those
 deletes skill prose, and rewriting first means rewriting twice.
 
-### 4.2 Server lifecycle (A0d)
+### 4.2 Server lifecycle (A0d) — half done
 
-Write pid+version at startup; a new server terminates a stale predecessor. Doctor
-already reports the condition.
+**Done** (`29b62e6`): the finding names the pids and the exact `kill` command,
+oldest first and never the process you are talking to. It used to say "kill the
+stale ones" and name none, so a caller had to re-derive the same `pgrep` the check
+had just run — and get the pattern right, which is what made this detector
+observer-dependent in the first place.
 
-### 4.3 Measurement (A5, A7)
+**Still open:** a server that writes pid+version at startup and terminates a stale
+predecessor. That is a behaviour change to process management, and terminating
+another server is not something to ship on a spec alone — it wants live testing.
 
-`PAID:` receipt line. And **document `advisory_gates` as the self-grading measurement
-instrument** — A7 asks "did self-grading catch what a real gate would?", and the answer
-already shipped: attach an owner-held spec as advisory, run `trust="self"`, and green
-STATUS + red advisory *is* a measured blindspot. This pairs directly with the design's
-`_qwen` provenance marker (DESIGN §2.5), which is the other half of grading worker tests.
+### 4.3 Measurement (A5) — ~~A7 done~~
+
+**A5, open:** a `PAID:` receipt line. Needs the receipt registry from restructure
+step 3.
+
+~~**A7**~~ **done** (`29b62e6`): `advisory_gates` is documented in `USAGE.md`. The
+instrument had already shipped and lived only in the schema and `HLD.md` — attach an
+owner-held spec as advisory, run `trust="self"`, and **green STATUS + red advisory is
+a measured blindspot**, obtainable no other way. Pairs with the `_qwen` provenance
+marker (DESIGN §2.5) as the other half of grading worker tests.
 
 ### 4.4 Carried from PENDING (unchanged, listed so they are not lost)
 
