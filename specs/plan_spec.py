@@ -98,5 +98,37 @@ class Narrowing(unittest.TestCase):
         self.assertEqual(setting("shell_allow", {}, project), ["^pytest"])
 
 
+class MergedLayersLoseInformation(unittest.TestCase):
+    """Why layers are passed separately instead of pre-merged into one dict.
+
+    The engine used to build `cfg = dict(machine); cfg.update(project)` and
+    resolve against that. It gives the right answer for ordinary configs, and it
+    was equivalent to the layered form everywhere it mattered -- but merging
+    throws away WHICH layer answered, and one case needs that: a project config
+    holding an explicit `null`.
+
+    Under a merge, that null overwrites the machine's real value and the setting
+    falls all the way to the builtin. Under layers, `null` means "this layer has
+    no opinion" and the machine's value stands -- which is what the module's one
+    rule says it should mean.
+
+    Narrow, but it is the difference between a rule and a rule-of-thumb, and
+    keeping the layers separate costs nothing.
+    """
+
+    def test_an_explicit_null_defers_rather_than_erasing(self):
+        self.assertEqual(
+            setting("expect", {}, {"expect": None}, {"expect": "green"}),
+            "green")
+
+    def test_a_merged_dict_would_have_lost_that(self):
+        # Stated as the contrast it exists for, so the reason survives the
+        # next person who thinks one dict would be simpler.
+        merged = dict({"expect": "green"})
+        merged.update({"expect": None})
+        self.assertIsNone(merged.get("expect"))
+        self.assertEqual(setting("expect", {}, merged, default="any"), "any")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

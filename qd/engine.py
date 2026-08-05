@@ -139,11 +139,8 @@ def _warm_challenge(args, cfg):
     would fall through it to the next layer -- the same trap the challenge flag
     itself had.
     """
-    for src in (args.get("challenge_warm"), cfg.get("challenge_warm"),
-                _global_config().get("challenge_warm")):
-        if src is not None:
-            return bool(src)
-    return False
+    return bool(setting("challenge_warm", args, cfg, _global_config(),
+                        default=False))
 
 # Minted per process, never leaving it. The tool schema does not carry
 # PRECHECK_ARG, but nothing stops a client from sending one anyway -- and
@@ -859,19 +856,16 @@ def _preconditions(args):
     # Config-aware for the same reason the engine is (U5.6): a project that
     # declares its gate expectation in .qwen-delegate.json must hit the same
     # contradiction check as one that passes it per call.
-    preflight_expect = (args.get("preflight_expect")
-                        or _project_config(cwd).get("preflight_expect")
-                        or _global_config().get("preflight_expect") or "any")
+    preflight_expect = setting("preflight_expect", args, _project_config(cwd),
+                               _global_config(), default="any")
 
     # --- Precondition: trust (R3: the slider) ---
     # Position resolves like `executor`: call arg > project .qwen-delegate.json
     # 'trust' > machine ~/.qwen-delegate/config.json 'trust' > builtin ("self"/L5).
     # The resolved value is validated below, so a bad config value is refused by
     # name exactly like a bad call arg.
-    trust = (args.get("trust")
-             or _project_config(cwd).get("trust")
-             or _global_config().get("trust")
-             or "self")
+    trust = setting("trust", args, _project_config(cwd), _global_config(),
+                    default="self")
     if trust == "auto":
         # "auto" has no gate of its own -- the server cannot judge criticality.
         # Refuse the bare call so the orchestrator classifies THIS task and passes
@@ -1013,6 +1007,10 @@ def _delegate(args, t0_dir):
     # Default: project config, else 3; clamped 1..10 -- the schema has promised
     # both since v1, and the engine port had silently dropped them.
     max_iter = (args.get("max_iterations")
+                # NOT migrated to setting() on purpose: `or` here treats 0 as
+                # unspecified, and making 0 a real answer would mean a call
+                # could ask for zero attempts and get a run that never invokes
+                # the worker. That is a behaviour change, not a consolidation.
                 or _project_config(cwd).get("max_iterations")
                 or _DEFAULT_MAX_ITER)
     try:
@@ -1058,8 +1056,12 @@ def _delegate(args, t0_dir):
     # green by definition. An unrecognised value falls back to today's behavior
     # rather than refusing -- same policy as on_compaction, and the schema enum
     # is the front line.
-    preflight_expect = (args.get("preflight_expect")
-                        or cfg.get("preflight_expect") or "any")
+    # The SAME call as in _preconditions, deliberately: this value is resolved
+    # in both places and a drifting second copy would be silent. Layers are
+    # passed separately rather than as the merged `cfg` because a merge cannot
+    # tell "the project said nothing" from "the project said null".
+    preflight_expect = setting("preflight_expect", args, _project_config(cwd),
+                               _global_config(), default="any")
     if preflight_expect not in ("red", "green", "any"):
         preflight_expect = "any"
     # U5.1: the shape the caller needs OUT of the run. A non-object is treated
@@ -1072,10 +1074,8 @@ def _delegate(args, t0_dir):
     # Past the precheck (top of this function) this is a fact, not a
     # question: a non-repo cwd was refused there.
     guard_on = True
-    trust = (args.get("trust")
-             or _project_config(cwd).get("trust")
-             or _global_config().get("trust")
-             or "self")
+    trust = setting("trust", args, _project_config(cwd), _global_config(),
+                    default="self")
 
     # --- Resolve executor profile ---
     profile = resolve(cwd, args.get("executor"))
@@ -1364,13 +1364,8 @@ def _delegate(args, t0_dir):
     # Resolved with explicit None checks rather than `or`: `false` is a real
     # answer, and `or` chaining would fall through it to the next layer and
     # silently re-enable what the caller just switched off.
-    challenge = args.get("challenge_brief")
-    if challenge is None:
-        challenge = cfg.get("challenge_brief")
-    if challenge is None:
-        challenge = _global_config().get("challenge_brief")
-    if challenge is None:
-        challenge = True
+    challenge = setting("challenge_brief", args, cfg, _global_config(),
+                        default=True)
     # A diagnosis is exempt. `report_dont_fix` asks "why does this fail?" -- a
     # brief that makes no claim about the code, so there is nothing for the
     # code to contradict. One attempt is the whole shape of a report run, and
