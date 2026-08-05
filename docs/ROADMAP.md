@@ -64,14 +64,24 @@ tests as evidence, **D2** `preflight_expect="red"` cannot tell FAIL from ERROR, 
 
 ### 2.1 ~~A11 transport~~ — **FIXED** (`f1527b0`)
 
-Root-caused and closed. It was never a protocol or single-flight limitation: **every
-spawned child inherited the server's stdin**, which under stdio transport is the
-JSON-RPC input stream. The executor's stdin was a pipe rather than a tty — exactly what
-a CLI checks to decide it has piped input worth reading — so it consumed the caller's
-next request, the reader thread saw EOF, and `main()` drained `DRAIN_SECONDS` and exited.
+It was never a protocol or single-flight limitation: **every spawned child inherited the
+server's stdin**, which under stdio transport is the JSON-RPC input stream. Verified
+directly — the `qwen` CLI consumes inherited stdin *even when given `-p`*. So pre-fix the
+executor was in a read race with the server's own reader thread for protocol bytes.
 
-`DRAIN_SECONDS = 10.0`, and the field log failed at **10s to the second**. That was the
-drain, not a timeout.
+**Corrected from the first write-up of this fix.** I claimed the failure path was
+`child eats request → reader sees EOF → main() drains DRAIN_SECONDS → exits`, on the
+strength of `DRAIN_SECONDS = 10.0` matching the field log's 10s exactly. That mechanism is
+wrong: a child stealing bytes causes **silent request loss, not EOF** — measured, the
+parent blocks forever with no EOF at all. The 10s was therefore almost certainly the
+*client's* timeout on a request that vanished, and the `DRAIN_SECONDS` match a
+coincidence. Same defect, same fix, wrong story about the last step.
+
+**Not reproduced on demand.** Four live attempts against snowy (two gaps × with/without
+the fix) all passed: the server's reader thread is parked in a blocking read and normally
+wins the race. So this is a real race on the protocol stream that is now closed, but it is
+*not* proven to be the field incident's cause. Treat the field report as unexplained
+unless it recurs.
 
 The teardown round did not cover it: `start_new_session=True` detaches the process
 *group*, not the file descriptors. Fix is `stdin=subprocess.DEVNULL` at all 17 spawn
@@ -80,10 +90,10 @@ demonstrates the mechanism itself, so the spec fails if the premise ever stops h
 and one asserting *no* spawn site in `qd/` inherits stdin, so the next one added
 inherits the rule rather than the bug.
 
-**Consequence for the design:** concurrent delegations from one session now work, and
-DESIGN §8.4 is back to what it originally said — N pipelines cost N async submits,
-linear and acceptable. A batch-of-chains shape would still be nicer; it is no longer
-load-bearing.
+**Concurrency verified live** (snowy, `parallel_max 4`): two `qwen_query` calls, the
+second issued while the first was in flight — both answered, server alive, replies 3.0s
+apart, overlapped. So DESIGN §8.4 stands: N pipelines cost N async submits, linear and
+acceptable. A batch-of-chains shape would still be nicer; it is not load-bearing.
 
 *Remaining under A11's original scope:* nothing for the transport. `STATUS: busy`
 (refusing a second call cleanly) was only ever a workaround for this defect, and is no
