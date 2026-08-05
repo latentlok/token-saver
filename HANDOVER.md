@@ -1,0 +1,186 @@
+# Handover — the modularity restructure
+
+**State: clean. Branch `v0.6`, 23 commits ahead of `origin/v0.6`, nothing pushed.**
+`bash ci/run-specs.sh` → exit 0, **992 tests**.
+
+Your job is the restructure. Everything else is parked and mapped.
+
+---
+
+## Read these, in this order
+
+| Doc | What it gives you |
+|---|---|
+| **[docs/DESIGN-modular-architecture.md](docs/DESIGN-modular-architecture.md)** | **the plan.** The problem measured, the target shape, the 8 steps, the patterns, the risks. Start here |
+| [docs/PARKED.md](docs/PARKED.md) | everything NOT being built, and which step unblocks each item |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | the ledger scoreboard: 19 of 23 field findings closed, what remains |
+| [docs/README-walkthroughs.md](docs/README-walkthroughs.md) | how delegate / chain / query behave, end to end, in plain language |
+| [docs/PRINCIPLES.md](docs/PRINCIPLES.md), [docs/HLD.md](docs/HLD.md) | the standing doctrine and the architecture as it is today |
+
+Do **not** read `docs/archive/plugin-improvement.md` unless you need a finding's
+original cost. It is evidence, it is long, and the roadmap quotes what matters.
+
+---
+
+## The problem, in one paragraph
+
+Adding one feature (`challenge_brief`) took five edits across four modules with
+nothing to group or enumerate them. The pressure lands on two functions —
+`_delegate` (1,111 lines, 105 locals) and `verdict.render` (888 lines, 20 inline
+receipt branches) — whose interface is an untyped dict: engine writes 28 keys,
+verdict reads 57. It compounds: in one day `_delegate` grew 1,041 → 1,111 and
+`delegate()` went 58 → 61 graph edges. **The goal is that adding or removing a
+feature becomes a local change.**
+
+What is **not** wrong, and must not be "fixed": the import graph is acyclic,
+every module outside those two functions has a longest function under 130 lines,
+and the detectors are already pure functions with honest signatures. **The logic
+is not tangled — the wiring is.**
+
+---
+
+## The eight steps
+
+Full detail in the design doc §8. Summary:
+
+| # | Step | One line |
+|---|---|---|
+| 1 | **Facts** | lift "what changed" into one read-only record, computed once |
+| 2 | **Findings** | detectors return findings instead of writing into `ctx` |
+| 3 | **Receipt as a list** | the report builds from registered blocks, not 20 hardcoded branches |
+| 4 | **Gates** | the things that can refuse a run get one shape |
+| 5 | **Scope** | one owner for worktree + session + call log |
+| 6 | **Plan** | one place that resolves settings, once |
+| 7 | **Composite** | a run and a chain-of-runs become the same kind of thing |
+| 8 | **Query folded in** | it becomes a run with most capabilities off |
+
+Steps 1–3 deliver most of the benefit. After step 3, adding a feature never
+touches the renderer.
+
+**`_delegate`'s post-run block is not a step.** It is four concerns sharing one
+region (facts, detectors, worktree disposition, cost/refs/brief). It **drains**
+as steps 1, 2 and 5 each take their part. Do not lift it whole — an earlier
+draft said to, and that would build a four-responsibility function that the next
+steps immediately dismantle.
+
+---
+
+## How to do step 1
+
+The one everything else reads, so it is worth doing slowly.
+
+**What moves.** The fact computation currently inline in `_delegate`'s post-run
+region (`qd/engine.py`, from `# --- Tree facts (C3) ---`): changed files,
+`committed_during_run`, `blast_radius`, `new_public_symbols`, the T0 snapshot,
+gate output. **Not** the detectors that read them — those are step 2.
+
+**What it becomes.** `qd/core/facts.py`: one function that computes them in
+dependency order and returns a read-only record. No branching, no writes.
+
+**The rule that makes it worth doing** (design §4): facts are computed once, by
+the pipeline; findings are pure readers; **a feature may never write a fact.**
+That is what removes ordering between features. If two things ever seem to need
+ordering, one of them is writing a fact it should be reading.
+
+**Its spec must cover order and freshness, not just values.** This is the step
+that can fail quietly: a stale or mis-ordered fact leaves receipts green and
+saying the wrong thing, and no amount of green suite catches that.
+
+---
+
+## House rules
+
+These are not optional; the repo is built on them.
+
+1. **Spec first, and the spec must fail before the fix.** Write the spec, watch
+   it go red, then fix. A spec that never failed proves nothing.
+2. **Mutation-check.** After a fix passes, break it deliberately and confirm the
+   spec goes red. A green suite only proves nothing *tested* broke.
+3. **Never delegate a `specs/*_spec.py` file.** They define what correct means.
+   `spec_globs` in `.qwen-delegate.json` auto-reverts worker edits to them.
+4. **Run the full suite before every commit:** `bash ci/run-specs.sh` → exit 0.
+5. **Comments explain WHY, with evidence.** Match the surrounding density. The
+   codebase records measured failures next to the code that prevents them; keep
+   doing that.
+6. **Do not migrate a feature and change it in the same commit.** A moved
+   feature must be behaviourally byte-identical, or a bisect is useless.
+7. **The endpoint (`snowy`) is live.** Live-test anything whose behaviour a
+   hermetic spec cannot prove — and mutation-check the live test too (see below).
+
+---
+
+## Traps, all of them paid for today
+
+**`git checkout <file>` on unstaged work destroys it.** Used to undo a live
+mutation test, it reverted an entire feature's uncommitted changes, and the
+commit that followed shipped half the work. Stage before mutation-testing, or
+copy the file aside.
+
+**A broad `except Exception` will hide your bug.** The first `challenge_brief`
+swallowed a plain `NameError` (engine never imported `verdict`) and every
+challenge silently returned "no objection" — the feature looked like it worked.
+Keep `try` around the call that can legitimately fail, nothing more.
+
+**A live test that passes may not be testing anything.** My first A11 live test
+passed identically with and without the fix. Always run the live test against
+the *mutated* code too.
+
+**Measure before claiming.** `challenge_warm` was designed as "one prefill
+instead of two" and measured at **+50% input tokens** — a resumed session
+re-sends its history every turn. The A/B was only possible because per-call
+telemetry logs the calls separately.
+
+**Check what a shared helper actually does.** `accum_stats` increments
+`cum["attempts"]` on every call; reusing it for a non-attempt call would have
+over-reported every receipt by one.
+
+**Pin behaviour, not incidentals.** A doctor spec asserted the string
+`ollama ps` appeared in a finding, so retiring a vendor broke a spec that was
+never about that vendor.
+
+---
+
+## What is already built and must keep working
+
+Do not regress these; they were expensive.
+
+- **Concurrency.** Separate calls and `batch` both run genuinely in parallel
+  (measured: peak 4 workers on `parallel_max: 4`). Every spawned child gets
+  `stdin=subprocess.DEVNULL` — a child inheriting the server's stdin races the
+  JSON-RPC reader for protocol bytes.
+- **Chains share one worktree**, committing between links, so link 2 sees link
+  1's work — and link N's handoff is forwarded to link N+1.
+- **Batch of chains.** A chain item takes **no** batch-level guard; `run_chain`
+  guards per link, and double-guarding deadlocks a one-slot endpoint.
+- **`challenge_brief`** is default ON, blocks only on evidence naming a path
+  that exists, skips diagnosis runs, and runs once at a chain's head.
+- **Per-call telemetry** (`ExecutorCall` / `CallLog`) lands in `runs.jsonl`,
+  deliberately **not** in the receipt — the receipt is context the caller pays
+  for on every run.
+
+---
+
+## Where the parked work goes
+
+[docs/PARKED.md](docs/PARKED.md) maps every parked item to the step that
+unblocks it. The short version: most of the test-first pipeline waits on steps
+1–4, nothing waits past step 6, and **roughly half the list is not blocked at
+all** (the playbooks, the doctor checks, server lifecycle, the PENDING
+carryovers, the decisions owed).
+
+If you want a quick win before starting, those are it.
+
+---
+
+## Decisions the user still owes
+
+- **Version.** `.claude-plugin/plugin.json` says `0.5.1`; root `CHANGELOG.md`
+  has no `0.6.0` entry. `docs/RELEASING.md` owns the sequence.
+- **`reset_worktree()`** in `qd/gittree.py` — called only by its own spec since
+  best-of-N was removed. Keep or drop.
+- **`challenge_brief` false positives.** Observed live: it blocked a buildable
+  brief because `total_for` implies aggregation over a dict holding one value
+  per key. Defensible, evidence-backed, still a block. The evidence check
+  filters citations nobody can verify; it does not filter pedantry.
+
+**Nothing is pushed.** 23 commits sit on `v0.6` ahead of the remote.
