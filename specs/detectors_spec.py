@@ -209,7 +209,8 @@ class FindingsAreNotFacts(Fixture):
         from qd.features import detectors
         self.assertEqual(
             sorted(d.KIND for d in detectors.DETECTORS),
-            ["dodge", "mocked_seams", "never_executed", "strays", "uncalled"])
+            ["dodge", "mocked_seams", "never_executed", "strays", "uncalled",
+             "unmarked_tests"])
 
 
 class ReachesTheReceipt(Fixture):
@@ -310,6 +311,58 @@ class TheFeatureOwnsItsLine(Fixture):
         for d in detectors.DETECTORS:
             self.assertTrue(callable(getattr(d, "block", None)),
                             f"{d.KIND} has no block()")
+
+
+class UnmarkedWorkerTests(Fixture):
+    """A6: a worker test without the `_qwen` marker has lost its provenance.
+
+    Tier and provenance are orthogonal (DESIGN-v06-test-first.md §2.5): the
+    directory says WHEN a test runs, the suffix says WHOSE it is. Three things
+    already depend on the suffix -- `_strays` stays quiet about `*_qwen.*`,
+    `ci/run-specs.sh` deliberately runs them, and most of all a worker test
+    named like a Claude-authored one is a file nobody can attribute. The gate
+    coming from a different hand is what makes a green receipt mean anything
+    (PRINCIPLES §I).
+
+    This class is also the restructure's headline claim, checked as an artifact
+    rather than asserted in a design doc: A6 is ONE new file plus ONE line in
+    DETECTORS. Nothing in the engine or the renderer changed to accept it.
+    """
+
+    def test_a_worker_test_without_the_marker_is_named(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "test_thing.py": "def test_a():\n    pass\n"}}])
+        r = self.delegate()
+        self.assertEqual(detectors.find(r["ctx"]["detections"], "unmarked_tests"),
+                         ["test_thing.py"])
+
+    def test_the_sanctioned_convention_is_silent(self):
+        # The control that stops this firing on every correct run.
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "test_thing_qwen.py": "def test_a():\n    pass\n"}}])
+        r = self.delegate()
+        self.assertIsNone(
+            detectors.find(r["ctx"]["detections"], "unmarked_tests"))
+
+    def test_ordinary_source_is_not_a_test(self):
+        # Deliberately narrow: a file is a test only if its NAME says so.
+        # Inferring from content would fire on fixtures and helpers, and a
+        # detector that cries wolf gets switched off wholesale -- the lesson
+        # TEST DODGE paid for, wrong 4 times out of 4 on an ordinary refactor.
+        self.steps([{"write": {"out.py": "MARKER\nimport unittest\n"}}])
+        r = self.delegate()
+        self.assertIsNone(
+            detectors.find(r["ctx"]["detections"], "unmarked_tests"))
+
+    def test_it_reaches_the_receipt(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "test_thing.py": "def test_a():\n    pass\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "challenge_brief": False})
+        self.assertIn("UNMARKED TEST:", out)
+        self.assertIn("test_thing.py", out)
 
 
 if __name__ == "__main__":

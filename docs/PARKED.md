@@ -45,7 +45,6 @@ elsewhere:
 |---|---|
 | **A7** the two playbooks | markdown documents |
 | **A8** contract lifecycle check | a doctor check; doctor is not being restructured |
-| **A6** `*_qwen` naming check | **unblocked by step 2** — it is a detector, and `qd/features/detectors/` now exists. Copy any of the five: a file with `KIND` and `detect(facts, inputs)`, plus one line in `DETECTORS` |
 | **C** the skill pass | prose. *Best done after* the restructure so it is rewritten once, not twice — a scheduling choice, not a dependency |
 | **D** server lifecycle (A0d), remaining half | server startup; untouched by this work. The reporting half shipped in `29b62e6` |
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |

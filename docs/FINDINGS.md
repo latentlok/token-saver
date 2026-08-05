@@ -915,3 +915,37 @@ above -- both altered the receipt because both sat on a path every run takes).
 The fix itself was then verified at the seam: with a project permitting
 `^echo`, a caller passing `[]` resolves to `[]` and a silent caller resolves to
 `["^echo"]`.
+
+## Concurrency on snowy: parallel_max buys latency, not throughput
+
+vLLM does continuous batching, so the natural assumption is that N concurrent
+delegations cost less than N serial ones. Measured through the PRODUCT (real
+delegations, not raw HTTP, so the plugin's own per-run work is included),
+capped at 3 because the endpoint's ceiling is 4 and another build shares it:
+
+| concurrency | wall | per-run | throughput |
+|---|---|---|---|
+| K=1 | 14.7s | 14.7s | 4.1 runs/min |
+| K=3 | 42.4s | 28.6–42.4s | 4.2 runs/min |
+
+**Throughput is flat; per-run latency nearly tripled.** Three concurrent runs
+took 42.4s, against ~44s for three serial ones. The endpoint is effectively
+serialising: a 27B model already saturates the GPU with one request, so a second
+and third queue behind it rather than batching alongside it.
+
+What this does NOT contradict: the plugin genuinely achieves concurrency
+(measured earlier at peak 4 workers on `parallel_max: 4`). Both are true --
+the dispatcher fans out correctly, and the endpoint declines to reward it.
+
+**The consequence for a caller** is the part worth acting on. `parallel_max > 1`
+does not make a batch finish sooner here; it makes every individual run in that
+batch wait ~3× longer while the total finishes at the same moment. For a caller
+watching one delegation, that is strictly worse. Fan-out on this endpoint is
+worth it only when the alternative is N separate submits with their own
+overhead -- not for throughput.
+
+**Caveats, because one measurement is an anecdote (§IV).** N=1 per level; tiny
+tasks (~500 output tokens each, where prefill dominates and batching has least
+to offer); another build intermittently sharing the GPU. A longer generation
+might batch better. The flat throughput is the robust part of the reading --
+contention would have made it DROP, not hold steady.

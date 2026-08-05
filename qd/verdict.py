@@ -877,6 +877,14 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     _emit(c2_blocks, detectors.uncalled, ctx)
     _emit(c2_blocks, detectors.mocked_seams, ctx)
     _emit(c2_blocks, detectors.never_executed, ctx)
+    # A6. NOTE: this line is why "adding a detector is one file plus one line
+    # in DETECTORS" is not yet true -- the renderer still names each detector's
+    # PLACEMENT, because placement is the size cap's tie-break among equal
+    # priorities and cannot be derived from registration order alone. Making it
+    # derivable needs an explicit SLOT per detector; until then a new detector
+    # needs a line here too, and a detector that has one but is missing this
+    # one computes a finding nobody ever sees.
+    _emit(c2_blocks, detectors.unmarked_tests, ctx)
 
     # DISPATCH: what the fan-out ACTUALLY did. The capacity a call gets is
     # resolved from three files (call arg > project > machine) and was visible
