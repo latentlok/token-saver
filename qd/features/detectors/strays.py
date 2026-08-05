@@ -13,6 +13,7 @@ in particular could never have been `facts -> Finding`.
 import os
 
 from qd.core.findings import Finding
+from qd.surface.receipt import Block
 
 KIND = "strays"
 
@@ -39,3 +40,14 @@ def _strays(created, task, touch_scope):
 def detect(facts, inputs):
     found = _strays(inputs.created, inputs.task, inputs.touch_scope)
     return Finding(KIND, found) if found else None
+
+
+def block(data):
+    """The receipt line. Drop priority 1 is shared with the all-green ADVISORY
+    block; the cap's drop loop sorts stably, so on a tie the block appended
+    FIRST goes first -- advisory-green, whose absence costs the least.
+    """
+    return [Block(KIND,
+                  f"STRAYS: {len(data)} file(s) not named in the task: "
+                  + ", ".join(data[:6]) + (" ..." if len(data) > 6 else "")
+                  + " -- worker debris; review or rm.", True, 1)]

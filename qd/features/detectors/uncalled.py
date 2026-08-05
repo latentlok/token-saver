@@ -8,6 +8,7 @@ it.
 """
 
 from qd.core.findings import Finding
+from qd.surface.receipt import Block
 from qd.gittree import uncalled_symbols
 
 KIND = "uncalled"
@@ -16,3 +17,17 @@ KIND = "uncalled"
 def detect(facts, inputs):
     found = uncalled_symbols(inputs.work_cwd, facts["pubs"])
     return Finding(KIND, found) if found else None
+
+
+def block(data):
+    """Drop priority 1: a diagnostic, so it yields to STATUS/CHANGED/ROLLBACK
+    under the size cap, but it sits ABOVE the accounting lines because a dead
+    symbol matters more than a token count.
+    """
+    flat = [f"{n} ({p})" for p, names in data.items() for n in names]
+    return [Block(KIND,
+                  f"UNCALLED: {len(flat)} new public symbol(s) referenced by "
+                  f"nothing outside their own file/tests: " + ", ".join(flat[:6])
+                  + (" ..." if len(flat) > 6 else "")
+                  + " -- built and wired to nothing, or intended for a caller "
+                    "that does not exist yet. Confirm which.", True, 1)]

@@ -11,6 +11,7 @@ something observed about the tree. See inputs.py.
 """
 
 from qd.core.findings import Finding
+from qd.surface.receipt import Block
 from qd.gittree import never_executed
 
 KIND = "never_executed"
@@ -19,3 +20,12 @@ KIND = "never_executed"
 def detect(facts, inputs):
     found = never_executed(inputs.work_cwd, facts["changed"], inputs.verify)
     return Finding(KIND, found) if found else None
+
+
+def block(data):
+    return [Block(KIND,
+                  f"NEVER EXECUTED: {len(data)} delivered test file(s) the gate "
+                  f"does not run: " + ", ".join(data[:4])
+                  + (" ..." if len(data) > 4 else "")
+                  + " -- written, never run, so nothing here proves they pass.",
+                  True, 1)]

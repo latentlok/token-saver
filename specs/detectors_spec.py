@@ -272,5 +272,45 @@ class ReachesTheReceipt(Fixture):
         self.assertIn("test_new_qwen.py", out)
 
 
+class TheFeatureOwnsItsLine(Fixture):
+    """Step 3's rule: the renderer no longer knows what a finding SAYS.
+
+    Before this, every feature that wanted a line edited an 888-line function,
+    and that is measurably how `verdict.render` became the second god function
+    -- 20 inline branches, each carrying its own text, droppability and drop
+    priority. Now a detector is one file holding all three (`KIND`, `detect`,
+    `block`), and the renderer holds only WHERE the block goes.
+
+    Where still matters and is deliberately still the renderer's: position is
+    the size cap's tie-break among equal priorities (qd/surface/receipt.py rule
+    1), so it is a property of the receipt as a whole, not of any one feature.
+    """
+
+    def test_the_receipt_prints_what_the_feature_says(self):
+        # The proof that the text moved rather than being duplicated: change
+        # what the feature returns, and the receipt changes. If the renderer
+        # still held a copy, this would print the old wording.
+        from qd.surface.receipt import Block
+        real = detectors.uncalled.block
+        detectors.uncalled.block = lambda data: [
+            Block("uncalled", "UNCALLED: rewritten by the feature", True, 1)]
+        self.addCleanup(setattr, detectors.uncalled, "block", real)
+        self.steps([{"write": {"out.py": "MARKER\n"
+                                         "def run_threads():\n    return 1\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "challenge_brief": False})
+        self.assertIn("UNCALLED: rewritten by the feature", out)
+
+    def test_every_detector_can_render_what_it_detects(self):
+        # A detector with `detect` but no `block` would compute a finding that
+        # can never reach a caller -- step 2's registry made that possible to
+        # write, so step 3 has to make it impossible to forget.
+        for d in detectors.DETECTORS:
+            self.assertTrue(callable(getattr(d, "block", None)),
+                            f"{d.KIND} has no block()")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

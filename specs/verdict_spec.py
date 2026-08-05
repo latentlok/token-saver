@@ -104,6 +104,56 @@ class Fixture(unittest.TestCase):
         return text.replace(self.full_sha, "SHA").replace(self.short_sha, "SHA")
 
 
+class SizeCap(Fixture):
+    """What a caller LOSES when the receipt will not fit.
+
+    The cap sheds droppable blocks worst-priority-first until the receipt fits
+    (3,000 chars), then shrinks the result tail, then the verify tail. Which
+    blocks go is a judgement about what a caller can afford not to be told, and
+    it was encoded in twenty scattered integers and asserted NOWHERE.
+
+    Found by mutation while restructuring the renderer in step 3: inverting the
+    drop order -- so the cap sheds the most important lines first and keeps the
+    accounting -- passed all 1,032 tests. A receipt that quietly drops UNCALLED
+    to make room for RESUME is worse than one that drops nothing, because the
+    caller reads the absence as "no seam risk" rather than as "did not fit".
+    """
+
+    LOADED = {
+        "cost_usd": 0.5, "executor": "paid", "refs_added": ["a.md"],
+        "graph_line": "GRAPH: stale", "dispatch": "parallel", "batch_size": 4,
+        "endpoint": {"name": "snowy", "parallel_max": 4},
+    }
+
+    def loaded(self, result_len):
+        over = dict(self.LOADED)
+        over["detections"] = [verdict_findings("uncalled",
+                                               {"out.py": ["run_threads"]})]
+        return self.receipt(result="R" * result_len, v2_over=over)
+
+    def test_an_uncapped_receipt_keeps_everything(self):
+        # The control. Without it, the test below could pass on a renderer that
+        # simply never emits LEDGER or RESUME at all.
+        out = self.loaded(600)
+        self.assertIn("UNCALLED:", out)
+        self.assertIn("COST:", out)
+        self.assertIn("RESUME:", out)
+
+    def test_the_cap_sheds_the_least_important_lines_first(self):
+        out = self.loaded(2400)
+        self.assertLessEqual(len(out), 3000)
+        # Shed, worst priority first: an affordance (7), history (6), the burn
+        # rate (5), the money (4). A caller loses nothing here they cannot
+        # recover by asking again.
+        for gone in ("RESUME:", "LEDGER:", "COST:"):
+            self.assertNotIn(gone, out, f"{gone} should have been shed first")
+        # Kept: a warning about the delivered work (1), what the fan-out
+        # actually did (2), the graph (2), the refs (3). These are what the
+        # receipt exists to say, and they outrank every line above.
+        for kept in ("UNCALLED:", "DISPATCH:", "GRAPH:", "REFS:"):
+            self.assertIn(kept, out, f"{kept} outranks what was kept instead")
+
+
 class CompactGreen(Fixture):
     """R2 (PLAN-v3-l5): a clean success renders COMPACT -- diagnostics appear
     only when something needs the manager's judgment. Receipt text is asserted
@@ -209,6 +259,11 @@ class Helpers(Fixture):
         for text, parsed, stripped in cases:
             self.assertEqual(verdict.parse_handoff(text), parsed)
             self.assertEqual(verdict.strip_handoff(text), stripped)
+
+
+def verdict_findings(kind, data):
+    from qd.core.findings import Finding
+    return Finding(kind, data)
 
 
 class C2Lines(Fixture):

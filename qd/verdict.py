@@ -9,7 +9,9 @@ from qd.runlog import (
     write_runlog, leverage_record, digest, ledger_summary, brief_summary,
 )
 from qd import limits, refs
+from qd.features import detectors
 from qd.features.detectors import find as _finding
+from qd.surface.receipt import Block
 
 
 RESULT_CAP = 3000
@@ -171,6 +173,26 @@ def strip_handoff(text):
     return "\n".join(keep).strip()
 
 
+def _emit(into, feature, ctx, text_only=False):
+    """Append one feature's receipt block(s), if its finding fired.
+
+    The split this exists to make: the FEATURE owns its text, its droppability
+    and its priority; the RENDERER owns where the block goes. Position is not
+    cosmetic -- it is the cap's tie-break among equal priorities (see
+    qd/surface/receipt.py rule 1), which is why the call sites below sit where
+    the inline branches used to and not wherever is tidiest.
+
+    `text_only` for the fixed region, which is a list of strings rather than of
+    blocks: those lines are never dropped, so droppability and priority have
+    nothing to act on there.
+    """
+    data = _finding(ctx.get("detections"), feature.KIND)
+    if data is None:
+        return
+    for b in feature.block(data):
+        into.append(b.text if text_only else b)
+
+
 def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_verify=None):
     cwd = ctx["cwd"]
     guard_on = ctx["guard_on"]
@@ -314,13 +336,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # where the receipt is otherwise indistinguishable from honest work, and
     # suppressing it on the compact green path would hide it precisely when it
     # matters most.
-    for path, marks in sorted(
-            (_finding(ctx.get("detections"), "dodge") or {}).items())[:5]:
-        body.append(
-            f"TEST DODGE: {path} adds {', '.join(marks[:4])} -- an added skip "
-            f"in delivered tests can hide the very failure the task was about; "
-            f"review before trusting green."
-        )
+    _emit(body, detectors.dodge, ctx, text_only=True)
 
     # Context used, so Claude can size the next delegation.
     peak = ctx.get("peak", 0)
@@ -749,23 +765,17 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         if skipped:
             summary += f", {skipped} skipped (malformed)"
         adv_lines.append(summary)
-        c2_blocks.append(("\n".join(adv_lines),
-                          not adv_red, -1 if adv_red else 1))
+        c2_blocks.append(Block("advisory", "\n".join(adv_lines),
+                               not adv_red, -1 if adv_red else 1))
 
     notes = ctx.get("notes")
     if notes:
-        c2_blocks.append((f"NOTES: {notes[:200]}", True, 0))
+        c2_blocks.append(Block("notes", f"NOTES: {notes[:200]}", True, 0))
 
-    # U4.3 strays: files this run created that the task never asked for. Drop
-    # priority 1 is shared with the all-green ADVISORY block; the cap's drop
-    # loop sorts stably, so on a tie the block appended FIRST goes first --
-    # advisory-green, which is the one whose absence costs the least.
-    strays = _finding(ctx.get("detections"), "strays") or []
-    if strays:
-        c2_blocks.append((
-            f"STRAYS: {len(strays)} file(s) not named in the task: "
-            + ", ".join(strays[:6]) + (" ..." if len(strays) > 6 else "")
-            + " -- worker debris; review or rm.", True, 1))
+    # U4.3 strays. The LINE lives with the detector (qd/features/detectors/);
+    # what the renderer owns is WHERE it goes -- and its position here is
+    # load-bearing, see qd/surface/receipt.py rule 1.
+    _emit(c2_blocks, detectors.strays, ctx)
 
     # CHALLENGE: the pre-build objection pass (A23), on by default. Two things
     # are worth a line and neither is visible otherwise: that the pass RAN (a
@@ -775,13 +785,15 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     ch = ctx.get("challenge")
     if isinstance(ch, dict) and ch.get("ran"):
         if ch.get("unverified"):
-            c2_blocks.append(
-                (f"CHALLENGE: worker objected but could not cite a real path, "
-                 f"so the run proceeded -- \"{truncate(ch['unverified'], 160)}\"",
-                 False, -1))
+            c2_blocks.append(Block(
+                "challenge",
+                f"CHALLENGE: worker objected but could not cite a real path, "
+                f"so the run proceeded -- \"{truncate(ch['unverified'], 160)}\"",
+                False, -1))
         else:
-            c2_blocks.append(("CHALLENGE: brief reviewed against the code, "
-                              "no objection", False, -1))
+            c2_blocks.append(Block("challenge",
+                                   "CHALLENGE: brief reviewed against the code, "
+                                   "no objection", False, -1))
 
     worktree = ctx.get("worktree")
     if worktree:
@@ -789,17 +801,19 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         if worktree.get("dirty"):
             wt_line += (" (main tree had uncommitted changes at branch time -- "
                         "they are NOT in this worktree)")
-        c2_blocks.append((wt_line, False, -1))
+        c2_blocks.append(Block("worktree", wt_line, False, -1))
         merge = ctx.get("merge")
         if merge == "clean":
-            c2_blocks.append(
-                (f"MERGE: git merge --no-edit {worktree['branch']} && "
-                 f"git worktree remove {worktree['path']} && "
-                 f"git branch -d {worktree['branch']}", False, -1))
+            c2_blocks.append(Block(
+                "merge",
+                f"MERGE: git merge --no-edit {worktree['branch']} && "
+                f"git worktree remove {worktree['path']} && "
+                f"git branch -d {worktree['branch']}", False, -1))
         elif merge == "conflict":
-            c2_blocks.append(
-                (f"MERGE: CONFLICT -- contract overlap with "
-                 f"{worktree['branch']}; escalate, do not force", False, -1))
+            c2_blocks.append(Block(
+                "merge",
+                f"MERGE: CONFLICT -- contract overlap with "
+                f"{worktree['branch']}; escalate, do not force", False, -1))
 
     # TIMEOUT: the budget, fitted from this run's own telemetry. Priority 0 --
     # above the diagnostics, because a killed run's remedy is a single number
@@ -809,7 +823,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     except Exception:
         t_line = None
     if t_line:
-        c2_blocks.append((t_line, True, 0))
+        c2_blocks.append(Block("timeout", t_line, True, 0))
 
     # --- Seam risk (v0.6) ---
     # A green receipt is evidence about a MODULE and is routinely read as
@@ -817,35 +831,9 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # unsupported. Drop priority 1: they are diagnostics, so they yield to
     # STATUS/CHANGED/ROLLBACK under the size cap, but they sit ABOVE the
     # accounting lines because a dead symbol matters more than a token count.
-    facts = ctx.get("tree_facts") or {}
-
-    uncalled = _finding(ctx.get("detections"), "uncalled") or {}
-    if uncalled:
-        flat = [f"{n} ({p})" for p, names in uncalled.items() for n in names]
-        c2_blocks.append((
-            f"UNCALLED: {len(flat)} new public symbol(s) referenced by nothing "
-            f"outside their own file/tests: " + ", ".join(flat[:6])
-            + (" ..." if len(flat) > 6 else "")
-            + " -- built and wired to nothing, or intended for a caller that "
-              "does not exist yet. Confirm which.", True, 1))
-
-    seams = _finding(ctx.get("detections"), "mocked_seams") or []
-    if seams:
-        pairs = [f"{t} mocks {m}" for t, m in seams]
-        c2_blocks.append((
-            f"MOCKED SEAM: " + "; ".join(pairs[:4])
-            + (" ..." if len(pairs) > 4 else "")
-            + " -- the gate replaced a boundary this run also changed, so the "
-              "boundary is the one thing it did not test.", True, 1))
-
-    unrun = _finding(ctx.get("detections"), "never_executed") or []
-    if unrun:
-        c2_blocks.append((
-            f"NEVER EXECUTED: {len(unrun)} delivered test file(s) the gate "
-            f"does not run: " + ", ".join(unrun[:4])
-            + (" ..." if len(unrun) > 4 else "")
-            + " -- written, never run, so nothing here proves they pass.",
-            True, 1))
+    _emit(c2_blocks, detectors.uncalled, ctx)
+    _emit(c2_blocks, detectors.mocked_seams, ctx)
+    _emit(c2_blocks, detectors.never_executed, ctx)
 
     # DISPATCH: what the fan-out ACTUALLY did. The capacity a call gets is
     # resolved from three files (call arg > project > machine) and was visible
@@ -861,7 +849,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                 f"· {slots} slot(s) · {ctx['batch_size']} item(s)")
         if dispatch == "serial" and ctx["batch_size"] > 1:
             line += " -- items ran IN ORDER, not concurrently"
-        c2_blocks.append((line, True, 2))
+        c2_blocks.append(Block("dispatch", line, True, 2))
 
     # GRAPH accountability: count the worker's graphify reads (C10 allow-log)
     # so a groomed-but-never-consulted graph is visible instead of invisible.
@@ -872,22 +860,22 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     if graph_line:
         if graph_used:
             graph_line += f" · used {graph_used}x this run"
-        c2_blocks.append((graph_line, True, 2))
+        c2_blocks.append(Block("graph", graph_line, True, 2))
 
     refs_added = ctx.get("refs_added") or []
     refs_result = refs.refs_line(refs_added)
     if refs_result:
-        c2_blocks.append((refs_result, True, 3))
+        c2_blocks.append(Block("refs", refs_result, True, 3))
 
     cost_usd = float(ctx.get("cost_usd", 0.0))
     executor = ctx.get("executor")
     if cost_usd > 0:
-        c2_blocks.append(
-            (f"COST: ${cost_usd:.4f} ({executor or 'unknown'})", True, 4))
+        c2_blocks.append(Block(
+            "cost", f"COST: ${cost_usd:.4f} ({executor or 'unknown'})", True, 4))
 
     burn = burn_line(ctx)
     if burn:
-        c2_blocks.append((burn, True, 5))
+        c2_blocks.append(Block("burn", burn, True, 5))
 
     # LEDGER: one line of project history -- the log finally gets a reader.
     ledger = ledger_summary(cwd)
@@ -907,7 +895,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             if bsum:
                 ledger_txt += (f" · this brief: {bsum['ok']} ok / "
                                f"{bsum['red']} red")
-        c2_blocks.append((ledger_txt, True, 6))
+        c2_blocks.append(Block("ledger", ledger_txt, True, 6))
 
     # RESUME: the affordance is cheaper than the education -- session resume
     # existed for 45 field delegations and went unused because nothing said so.
@@ -923,12 +911,14 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                              "unverified", "reported")
         was_blocked = bool(ctx.get("meta", {}).get("blocked"))
         if healthy or was_blocked:
-            c2_blocks.append((
+            c2_blocks.append(Block(
+                "resume",
                 f"RESUME: session_id={session_id} -- a follow-up in this warm "
                 f"session costs a sentence, not a re-brief (same cwd, pass "
                 f"session_id)", True, 7))
         else:
-            c2_blocks.append((
+            c2_blocks.append(Block(
+                "resume",
                 f"RESUME: not recommended — {len(trail)} failed attempt(s) in "
                 f"this session carry their confusion forward; re-delegate COLD "
                 f"with a corrected brief (or retry_of={session_id}).",
@@ -939,8 +929,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     def _assembled():
         parts = list(body)
-        for blk, _, _ in c2_blocks:
-            parts.append(blk)
+        for blk in c2_blocks:
+            parts.append(blk.text)
         parts.append(
             f"--- qwen result ---\n"
             f"{truncate(strip_handoff(result_text), caps['result'])}")
@@ -953,7 +943,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     verdict = _assembled()
     while len(verdict) > 3000:
         droppable = sorted(
-            [(i, pri) for i, (_, drop, pri) in enumerate(c2_blocks) if drop],
+            [(i, b.priority) for i, b in enumerate(c2_blocks) if b.droppable],
             key=lambda x: -x[1])
         if droppable:
             c2_blocks.pop(droppable[0][0])
@@ -1007,7 +997,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         # much a caller was doing at the same time.
         "writes_attributed": len(ctx.get("writes") or []),
         "caller_changed": len(ctx.get("scope_unattributed") or []),
-        "strays": len(strays),
+        "strays": len(_finding(ctx.get("detections"), "strays") or []),
     }
     # U5.2: the id the submit minted. This record is what CLOSES the `running`
     # one written at spawn -- without the id here, a reader could not tell an
