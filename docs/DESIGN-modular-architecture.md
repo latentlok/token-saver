@@ -314,20 +314,34 @@ Builder removes measured duplication. Abstract Factory would guard an empty room
 
 Ordered so each step is independently valuable and independently revertable.
 
+**Extract along the seams being kept, not the ones that happen to be visible.**
+
+An earlier draft opened with "extract `_delegate`'s post-run block" — one
+contiguous ~190-line region, the reflexive Extract Method move. That was wrong.
+The post-run block is **four destinations in one region**: tree facts (→
+`facts.py`), the detectors reading them (→ `detectors/`), worktree
+commit-or-release (→ `scope.py`), and status/cost/refs/stored-brief (→ report).
+Extracting it whole would build a function with four unrelated responsibilities
+that steps 1, 2 and 5 then tear apart again — a shape alive for one commit, and
+harder-to-read diffs exactly where reviewability matters most.
+
+Contiguity is a property of the file. It is not a seam.
+
 | # | Step | Why here |
 |---|---|---|
-| 1 | **Extract `_delegate`'s post-run block** | ~190 lines out, zero behaviour change. Proves the seam before anything depends on it |
-| 2 | **`Facts` record** — compute observations once, pass read-only | §4. Must precede findings; everything downstream reads it |
-| 3 | **`Finding` record + detector registry** — detectors return findings instead of writing `ctx` | the detectors already have the right signatures |
-| 4 | **Receipt as a list** — `render`'s 20 branches become registered blocks | kills the second god function; after this, adding a feature never touches the renderer |
-| 5 | **Gate strategy** — the three gates behind one interface | gives the parked red gate a socket |
-| 6 | **`RunScope`** — container + session + call log under one lifetime | absorbs today's chain-worktree handling |
-| 7 | **`RunPlan` builder** | biggest change, smallest risk once 1–6 have drained the function |
-| 8 | **Composite runnable** — Run / ChainOfRuns | last, because it is the only step that changes an external shape |
-| 9 | **Fold `query` in** — a run with `container=none, gate=none, loop=single, facts=none` | last on purpose: it is the smallest and best-behaved caller, so it is the safest thing to migrate once the shape is proven, and the first to benefit (it has no per-call telemetry today) |
+| 1 | **`Facts` record** — lift the fact computation into a read-only record | §4, and everything downstream reads it. Still the safest opening move: it is the part with no branching and no writes — but it lands in the shape we keep |
+| 2 | **`Finding` record + detector registry** — detectors return findings instead of writing `ctx` | the detectors already have the right signatures |
+| 3 | **Receipt as a list** — `render`'s 20 branches become registered blocks | kills the second god function; after this, adding a feature never touches the renderer |
+| 4 | **Gate strategy** — the gates behind one interface | gives the parked red gate a socket |
+| 5 | **`RunScope`** — container + session + call log under one lifetime | absorbs today's chain-worktree handling *and* the worktree disposition left behind by step 1 |
+| 6 | **`RunPlan` builder** | biggest change, smallest risk once 1–5 have drained the function |
+| 7 | **Composite runnable** — Run / ChainOfRuns | late, because it is the only step that changes an external shape |
+| 8 | **Fold `query` in** — `container=none, gate=none, loop=single, facts=none` | last on purpose: the smallest and best-behaved caller, safest to migrate once the shape is proven, and the first to benefit (it has no per-call telemetry today) |
 
-Steps 1–4 deliver most of the benefit. After step 4 a feature can be added
-without touching the renderer; after step 5 there is a template to copy.
+Steps 1–3 deliver most of the benefit. After step 3 a feature can be added
+without touching the renderer; after step 4 there is a template to copy. The
+post-run block is not a step — it **drains**, as steps 1, 2 and 5 each take
+their part.
 
 ---
 
