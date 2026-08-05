@@ -1,7 +1,7 @@
 # Handover — the modularity restructure
 
 **State: clean. Branch `v0.6`, ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **994 tests**. Version is **0.6.0**; the
+`bash ci/run-specs.sh` → exit 0, **1,008 tests**. **Step 1 is DONE** — start at step 2. Version is **0.6.0**; the
 remaining release steps (PR → CI → squash-merge → tag) are the user's, not yours.
 
 Your job is the restructure. Everything else is parked and mapped.
@@ -83,7 +83,7 @@ Full detail in the design doc §8. Summary:
 
 | # | Step | One line |
 |---|---|---|
-| 1 | **Facts** | lift "what changed" into one read-only record, computed once |
+| 1 | ~~**Facts**~~ | **done** — `qd/core/facts.py` + `specs/facts_spec.py` |
 | 2 | **Findings** | detectors return findings instead of writing into `ctx` |
 | 3 | **Receipt as a list** | the report builds from registered blocks, not 20 hardcoded branches |
 | 4 | **Gates** | the things that can refuse a run get one shape |
@@ -103,26 +103,26 @@ steps immediately dismantle.
 
 ---
 
-## How to do step 1
+## Step 1 is done — read it before starting step 2
 
-The one everything else reads, so it is worth doing slowly.
+`qd/core/facts.py` + `specs/facts_spec.py`. Read both; they are short, and step 2
+is the other half of the same idea.
 
-**What moves.** The fact computation currently inline in `_delegate`'s post-run
-region (`qd/engine.py`, from `# --- Tree facts (C3) ---`): changed files,
-`committed_during_run`, `blast_radius`, `new_public_symbols`, the T0 snapshot,
-gate output. **Not** the detectors that read them — those are step 2.
+**What step 1 proved.** The extraction made visible something invisible while it
+was one inline block: **the detectors write their results back INTO the facts
+record** (`tf["uncalled"] = ...` in `qd/engine.py`). That is exactly the
+facts/findings confusion design §4 describes. It is why `collect()` returns a
+plain dict rather than a frozen type — the freeze lands in step 2, with them.
 
-**What it becomes.** `qd/core/facts.py`: one function that computes them in
-dependency order and returns a read-only record. No branching, no writes.
+**What step 2 is.** Move `uncalled_symbols`, `mocked_seams`, `never_executed`,
+`dodge_markers` and the strays check out of `_delegate` so they *return* findings
+instead of writing into facts. Then freeze the facts record.
 
-**The rule that makes it worth doing** (design §4): facts are computed once, by
-the pipeline; findings are pure readers; **a feature may never write a fact.**
-That is what removes ordering between features. If two things ever seem to need
-ordering, one of them is writing a fact it should be reading.
-
-**Its spec must cover order and freshness, not just values.** This is the step
-that can fail quietly: a stale or mis-ordered fact leaves receipts green and
-saying the wrong thing, and no amount of green suite catches that.
+**One lesson from step 1's mutation pass, worth repeating.** Breaking the
+changed-set derivation SURVIVED the first spec: a deleted file still shows up in
+the post status, so the obvious test did not bind. The case that actually breaks
+is a file dirty at T0 that the run puts back — it disappears from the post status
+entirely. Mutate every branch, not the one you had in mind when you wrote it.
 
 ---
 
