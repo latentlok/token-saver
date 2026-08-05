@@ -136,6 +136,10 @@ TOOL = json.loads(r'''
         "type": "boolean",
         "description": "ON by default: the worker reads the code and may OBJECT to the brief before building it (read-only, one short pass). A worker-written gate is your brief restated as an assertion, so a wrong requirement becomes a green test defending the defect -- and `preflight_expect` is blind to it (red before, green after is what a confidently-built defect looks like too). The run is refused only when the objection cites a path that EXISTS; unverifiable objections never block. Pass `false` to decline it, or set `challenge_brief` in .qwen-delegate.json / machine config."
       },
+      "challenge_warm": {
+        "type": "boolean",
+        "description": "Default true: the build RESUMES the challenge pass's session, so the builder starts having already read the code it is about to change, and a deterministic hand-off line revokes the review's do-not-build instruction. This is a CONTINUITY lever, not a saving -- measured at +50% input tokens and +16% wall against a cold build, because a resumed session re-sends its history every turn. Pass false to build in a fresh session."
+      },
       "verify_timeout_sec": {
         "type": "integer",
         "description": "Kill time for ONE `verify` run, seconds (default 300, or project .qwen-delegate.json `verify_timeout_sec`; clamped 10..3600). A pre-flight that times out refuses the run before any attempt is burned."

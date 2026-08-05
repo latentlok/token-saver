@@ -228,6 +228,62 @@ class Receipt(unittest.TestCase):
         self.assertNotIn("CHALLENGE:", self.render(None))
 
 
+class WarmHandoff(Decision):
+    """The build resumes the challenge's session instead of starting cold.
+
+    The builder inherits the reading the challenge just did. NOT a saving --
+    measured live at +50% input tokens and +16% wall against a cold build,
+    because a resumed session re-sends its whole history on every turn. The
+    design predicted the opposite ("one prefill instead of two"); the numbers
+    are in _challenge_brief's docstring so the wrong reasoning cannot be
+    re-derived from the code.
+    """
+
+    def test_the_session_comes_back_for_the_build_to_resume(self):
+        engine.invoke.run_executor = lambda *a, **k: (
+            "CHALLENGE: none", [], "sess-42", None, {})
+        self.assertEqual(
+            engine._challenge_brief({"name": "p"}, "t", self.cwd, 60)[2],
+            "sess-42")
+
+    def test_the_handoff_line_revokes_the_do_not_build_instruction(self):
+        # The challenge prompt ends with "Do NOT build anything yet", and that
+        # line is in the history the build inherits. Something must retract it.
+        self.assertIn("no longer", engine.CHALLENGE_CLEARED)
+        self.assertIn("now building", engine.CHALLENGE_CLEARED.lower())
+
+    def test_the_handoff_line_is_deterministic_not_generated(self):
+        # A retraction the model composes for itself is not a retraction. This
+        # is a server-stated fact, and it must be a constant to stay one.
+        self.assertIsInstance(engine.CHALLENGE_CLEARED, str)
+        self.assertTrue(engine.CHALLENGE_CLEARED.startswith("---"))
+        self.assertTrue(engine.CHALLENGE_CLEARED.endswith("\n\n"))
+
+    def test_warm_is_the_default_and_false_is_honoured(self):
+        w = engine._warm_challenge
+        self.assertTrue(w({}, {}))                          # nobody says -> on
+        self.assertFalse(w({"challenge_warm": False}, {}))  # caller declines
+        self.assertFalse(w({}, {"challenge_warm": False}))  # project declines
+        # and `false` is not chained past by a truthy layer behind it
+        self.assertFalse(w({"challenge_warm": False}, {"challenge_warm": True}))
+
+
+class DiagnosisIsExempt(unittest.TestCase):
+    """`report_dont_fix` asks why something fails -- a brief that makes no
+    claim about the code, so there is nothing for the code to contradict."""
+
+    def test_a_report_run_skips_the_pass(self):
+        src = open(os.path.join(ROOT, "qd", "engine.py")).read()
+        self.assertIn("if challenge and not report:", src)
+
+    def test_report_is_resolved_before_the_challenge_runs(self):
+        # Order matters: `report` is read from args well above, and reading it
+        # after would make the exemption a no-op.
+        src = open(os.path.join(ROOT, "qd", "engine.py")).read()
+        self.assertLess(src.index('report = bool(args.get("report_dont_fix"))'),
+                        src.index("if challenge and not report:"))
+
+
 class DefaultOn(unittest.TestCase):
     """C9: absence leaves behaviour identical."""
 

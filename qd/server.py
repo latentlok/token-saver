@@ -428,6 +428,13 @@ def run_chain(items, handler, on_partial=None):
             continue
         args = dict(item or {})
         args[CHAIN_ARG] = {"pos": k, "of": n}
+        # The brief review happens ONCE, at the head of the chain. Every link
+        # is its own delegate() call, so the default would fire per link -- an
+        # eight-link chain paying eight read-the-whole-codebase passes to
+        # re-answer a question already settled. An item that asks for it
+        # explicitly still gets it.
+        if k > 1 and args.get("challenge_brief") is None:
+            args["challenge_brief"] = False
         if wt is not None:
             args[WT_ARG] = wt
         if carried and args.get("carry") != "none":

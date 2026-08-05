@@ -422,6 +422,33 @@ class HandoffForwarding(Fixture):
         self.assertIn("SKIPPED", out)
 
 
+class ChallengeOncePerChain(Fixture):
+    """The brief review happens at the HEAD of the chain, not per link.
+
+    Every link is its own delegate() call, so the default would fire on each
+    one -- an eight-link chain paying eight read-the-whole-codebase passes to
+    re-answer a settled question.
+    """
+
+    def test_only_the_first_link_is_left_to_challenge(self):
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        got = [a.get("challenge_brief") for a in self.seen]
+        self.assertIsNone(got[0], "link 1 must keep the default")
+        self.assertEqual(got[1:], [False, False])
+
+    def test_an_item_that_asks_for_it_explicitly_still_gets_it(self):
+        items = self.items(2)
+        items[1]["challenge_brief"] = True
+        server.run_chain(items, self.handler(GREEN, GREEN))
+        self.assertIs(self.seen[1]["challenge_brief"], True)
+
+    def test_an_item_that_declines_stays_declined(self):
+        items = self.items(2)
+        items[0]["challenge_brief"] = False
+        server.run_chain(items, self.handler(GREEN, GREEN))
+        self.assertIs(self.seen[0]["challenge_brief"], False)
+
+
 class SharedWorktree(Fixture):
     """One container for the whole chain -- the dependency the shape promises.
 

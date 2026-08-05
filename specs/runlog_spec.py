@@ -327,5 +327,62 @@ class RunIds(unittest.TestCase):
         self.assertGreater(len({runlog.new_run_id() for _ in range(50)}), 1)
 
 
+class CallLogSpec(unittest.TestCase):
+    """Per-executor-call telemetry (the flat `cum` sum cannot answer "what did
+    the challenge cost", because a run is no longer one kind of call)."""
+
+    def test_it_starts_empty_and_writes_nothing(self):
+        # An empty log must not put `"calls": []` into every record -- a field
+        # that is always there and always empty is noise in every future query.
+        self.assertEqual(runlog.CallLog().as_record(), {})
+
+    def test_one_call_carries_its_kind_tokens_and_session(self):
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 900,
+                                                      "completion": 20},
+                                           "ms": 1200, "turns": 2}},
+                   session="s-1")
+        rec = log.as_record()["calls"][0]
+        self.assertEqual(rec["kind"], "challenge")
+        self.assertEqual((rec["prompt"], rec["completion"]), (900, 20))
+        self.assertEqual(rec["ms"], 1200)
+        self.assertEqual(rec["session"], "s-1")
+
+    def test_missing_or_partial_meta_never_raises(self):
+        log = runlog.CallLog()
+        for meta in (None, {}, {"stats": None}, {"stats": {"tokens": None}}):
+            log.record("attempt", meta)
+        self.assertEqual(len(log.as_record()["calls"]), 4)
+        self.assertEqual(log.by_kind()["attempt"]["prompt"], 0)
+
+    def test_by_kind_is_what_makes_the_question_answerable(self):
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 900}, "ms": 5}})
+        log.record("attempt", {"stats": {"tokens": {"prompt": 100}, "ms": 50}})
+        log.record("attempt", {"stats": {"tokens": {"prompt": 200}, "ms": 70}})
+        by = log.by_kind()
+        self.assertEqual(by["challenge"], {"calls": 1, "prompt": 900,
+                                           "completion": 0, "ms": 5})
+        self.assertEqual(by["attempt"]["calls"], 2)
+        self.assertEqual(by["attempt"]["prompt"], 300)
+
+    def test_an_errored_call_is_still_a_call(self):
+        # It spent tokens and wall-clock. A log that only records successes
+        # under-reports exactly the runs worth investigating.
+        log = runlog.CallLog()
+        log.record("attempt", {"stats": {"tokens": {"prompt": 50}}},
+                   err="timed out after 900s")
+        self.assertEqual(log.as_record()["calls"][0]["err"],
+                         "timed out after 900s")
+        self.assertEqual(log.by_kind()["attempt"]["prompt"], 50)
+
+    def test_the_record_is_json_serialisable(self):
+        # It goes into runs.jsonl; anything that cannot serialise silently
+        # loses the whole line (write_runlog is best-effort by contract).
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 1}}}, session="s")
+        json.dumps(log.as_record())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

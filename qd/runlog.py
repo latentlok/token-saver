@@ -347,6 +347,66 @@ def _tok_zero():
     return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "thoughts": 0}
 
 
+class CallLog:
+    """Per-executor-call telemetry for one delegation.
+
+    `accum_stats` sums everything into one `cum` dict, which answered the only
+    question a run used to raise: what did this delegation cost? A run was one
+    KIND of call -- an attempt -- repeated until it passed or ran out.
+
+    That stopped being true. A run is now heterogeneous: a `challenge_brief`
+    pass, then N attempts, each with its own tokens and its own reason for
+    existing. Folded into one sum they are indistinguishable, so "what do
+    challenge passes cost us" -- the question that decides whether default-on
+    is worth it -- had no answer anywhere in the system.
+
+    An object rather than a list of dicts for the same reason `EndpointGuard`
+    is one: the append and the totalling belong to the thing being logged, and
+    every caller that had to remember to do both is a caller that could forget.
+    Kept deliberately thin -- it accumulates and reports, it decides nothing.
+    """
+
+    __slots__ = ("calls",)
+
+    def __init__(self):
+        self.calls = []
+
+    def record(self, kind, meta, session=None, err=None):
+        """Append one call. `meta` is run_executor's meta; None is fine."""
+        st = (meta or {}).get("stats") or {}
+        tok = st.get("tokens") or {}
+        self.calls.append({
+            "kind": kind,
+            "session": session or None,
+            "prompt": int(tok.get("prompt") or 0),
+            "completion": int(tok.get("completion") or 0),
+            "cached": int(tok.get("cached") or 0),
+            "ms": int(st.get("ms") or 0),
+            "turns": int(st.get("turns") or 0),
+            "err": err or None,
+        })
+        return self.calls[-1]
+
+    def by_kind(self):
+        """{kind: {calls, prompt, completion, ms}} -- the aggregate that makes
+        'what did challenges cost' answerable without re-reading every line."""
+        out = {}
+        for c in self.calls:
+            agg = out.setdefault(c["kind"], {"calls": 0, "prompt": 0,
+                                             "completion": 0, "ms": 0})
+            agg["calls"] += 1
+            for k in ("prompt", "completion", "ms"):
+                agg[k] += c[k]
+        return out
+
+    def as_record(self):
+        """The shape that goes into the run log. Empty stays empty rather than
+        writing `{"calls": []}` into every historical-looking record."""
+        if not self.calls:
+            return {}
+        return {"calls": list(self.calls), "calls_by_kind": self.by_kind()}
+
+
 def leverage_record(tool, cwd, status, verdict, stats, peak,
                     executor="qwen-local", cost_usd=0.0, extra=None):
     """

@@ -1023,6 +1023,13 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         if status not in ("success", "success_but_preflight_passed"):
             rec["halted"] = True
         extra["chain"] = rec
+    # Per-call telemetry: the run log gets it, the RECEIPT does not. The receipt
+    # is context the caller pays for on every run; a per-call breakdown is
+    # analysis you do later, over many runs, from a file that costs nothing to
+    # write and nothing to read until you ask.
+    calls = ctx.get("calls")
+    if calls is not None and hasattr(calls, "as_record"):
+        extra.update(calls.as_record())
     write_runlog(cwd, leverage_record(
         "qwen_delegate", cwd, status, verdict, cum, ctx.get("peak", 0),
         executor=executor or "qwen-local",
