@@ -663,6 +663,37 @@ Green receipt ≈ 8 lines. What to actually look at:
 
 When something matters enough to check but not enough for `verified`:
 
+### `advisory_gates` — measure whether self-grading caught anything
+
+**The question `trust="self"` cannot answer about itself:** the worker wrote the
+suite, so a green receipt tells you the worker's tests pass. It cannot tell you
+whether a gate *you* would have written would also have passed.
+
+`advisory_gates` answers it, and it is the only instrument here that does:
+
+```json
+{"advisory_gates": [{"name": "owner-spec", "cmd": "python3 specs/thing_spec.py"}]}
+```
+
+Attach a spec **you** hold, run the delegation at `trust="self"`, and read the
+two results against each other:
+
+| STATUS | advisory | what you learned |
+|---|---|---|
+| green | green | the worker's suite and yours agree — the strongest signal available |
+| green | **red** | **a measured self-grading blindspot.** The worker's tests pass and yours do not. This is the case you cannot get any other way |
+| red | — | the gate already stopped it; the advisory is noise |
+
+Advisory gates **never touch `STATUS` and never reach the worker**. They cannot
+turn a red run green or a green run red, and the worker cannot write code aimed
+at passing them — it does not know they exist. That is what makes the second row
+a measurement rather than another gate.
+
+Cheapest useful shape: keep one small owner-written spec per risky module and
+attach it whenever you delegate into that module at `trust="self"`. It costs one
+extra command run and it is the difference between trusting self-grading and
+having checked it.
+
 - `grade/stage1.py` (token-saver-eval) — deterministic scorecard: interface match
   vs a manifest, unpromised surface, complexity, suite runs.
 - One free adversarial pass: `qwen_query` "propose 8 mutations this suite would NOT

@@ -313,11 +313,16 @@ class ProjectDoctor(unittest.TestCase):
         # It did: a loose pattern matched the SHELL running the check, so the
         # answer changed with the invocation. A detector whose result depends
         # on the observer is worse than no detector.
-        n1, _ = doctor._server_count()
-        n2, _ = doctor._server_count()
+        n1, _v1, p1 = doctor._server_count()
+        n2, _v2, p2 = doctor._server_count()
         self.assertEqual(n1, n2)
+        self.assertEqual(p1, p2)
         self.assertIsInstance(n1, int)
         self.assertGreaterEqual(n1, 0)
+        # The pids are what the finding now names, so they must be as stable as
+        # the count -- and must never include the process doing the asking.
+        self.assertEqual(len(p1), n1)
+        self.assertNotIn(os.getpid(), p1)
 
     def test_project_check_never_raises(self):
         # doctor is what a confused caller reaches for; a fault in one check

@@ -446,23 +446,44 @@ def project_check(cwd):
     # A0d: several servers, possibly of different plugin versions, sharing one
     # .qwen-delegate/ directory and one machine-wide lock namespace. Eleven
     # were once alive on one box, the oldest three days stale.
-    n, versions = _server_count()
+    n, versions, pids = _server_count()
     if n > 1:
         out.append({
             "id": "stale-servers", "severity": "high", "fixable": False,
+            # Names the PIDs. "Kill the stale ones" was true and unactionable:
+            # a caller then had to re-derive the same pgrep this check already
+            # ran, and get the pattern right -- a loose one matches the shell
+            # doing the deriving.
             "text": ("%d token-saver servers are running (%s). They share this "
                      "project's .qwen-delegate/ state and the machine-wide "
                      "endpoint lock; an upgrade or /reload-plugins starts a new "
-                     "one without stopping the old. Kill the stale ones."
-                     % (n, ", ".join(versions) or "unknown versions")),
+                     "one without stopping the old.%s"
+                     % (n, ", ".join(versions) or "unknown versions",
+                        _kill_hint(pids))),
         })
 
     order = {"high": 0, "info": 1}
     return sorted(out, key=lambda f: order.get(f["severity"], 1))
 
 
+def _kill_hint(pids):
+    """The exact command, or a bare instruction when the pids are unknown.
+
+    A finding that names the problem and leaves the reader to reconstruct the
+    query is a finding they postpone. Oldest first, and never including this
+    process: the newest server is the one the caller is talking to.
+    """
+    others = [p for p in (pids or []) if p != os.getpid()]
+    if not others:
+        return " Kill the stale ones."
+    return (" Kill the stale ones (oldest first): kill %s"
+            % " ".join(str(p) for p in others[:-1] or others))
+
+
 def _server_count():
-    """(count, versions) of running token-saver servers. (0, []) if unknown."""
+    """(count, versions, pids) of running token-saver servers, oldest first.
+
+    (0, [], []) if unknown."""
     import re as _re
     import subprocess as _sp
     # The command line must be an INTERPRETER running the server script, not
@@ -477,9 +498,17 @@ def _server_count():
                  if l.strip() and real.search(l) and str(os.getpid()) not in l.split()[:1]]
         versions = sorted({m.group(1) for l in lines
                            for m in [_re.search(r"/(\d+\.\d+\.\d+)/", l)] if m})
-        return len(lines), versions
+        pids = []
+        for l in lines:
+            try:
+                pids.append(int(l.split()[0]))
+            except (ValueError, IndexError):
+                continue
+        # pgrep lists oldest first, which is the order to kill in: the newest
+        # server is the one the caller is currently talking to.
+        return len(lines), versions, pids
     except Exception:
-        return 0, []
+        return 0, [], []
 
 if __name__ == "__main__":
     sys.exit(main())
