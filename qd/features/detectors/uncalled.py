@@ -15,7 +15,7 @@ KIND = "uncalled"
 
 
 def detect(facts, inputs):
-    found = uncalled_symbols(inputs.work_cwd, facts["pubs"])
+    found = uncalled_symbols(inputs.scope.work_cwd, facts["pubs"])
     return Finding(KIND, found) if found else None
 
 

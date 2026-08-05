@@ -195,7 +195,12 @@ engine's.
 *Amended by v0.5 (2026-07-27): the engine hands over FACTS, not a tree to re-read, and
 the status it hands over is FINAL.* Added keys:
 
-    work_cwd: str                  # the tree the run actually used (worktree or main)
+    work_cwd: str                  # the tree the run actually used (worktree or main).
+                                   # v0.6 step 5: owned by qd/core/scope.py RunScope,
+                                   # together with T0 (pre_status/pre_sha) and the
+                                   # container's disposal -- green commits, red
+                                   # releases, a BORROWED container is committed but
+                                   # never released or merge-classified by its link
     tree_facts: {post_status, changed, numstat, head_moved, head_now, pubs} | None
                                    # captured from work_cwd BEFORE any worktree
                                    # commit/release. None => verdict recomputes from

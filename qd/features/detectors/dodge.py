@@ -17,8 +17,8 @@ KIND = "dodge"
 
 
 def detect(facts, inputs):
-    found = dodge_markers(inputs.work_cwd, inputs.pre_sha_full,
-                          inputs.pre_status)
+    found = dodge_markers(inputs.scope.work_cwd, inputs.scope.pre_sha,
+                          inputs.scope.pre_status)
     return Finding(KIND, found) if found else None
 
 

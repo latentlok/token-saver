@@ -18,7 +18,7 @@ KIND = "never_executed"
 
 
 def detect(facts, inputs):
-    found = never_executed(inputs.work_cwd, facts["changed"], inputs.verify)
+    found = never_executed(inputs.scope.work_cwd, facts["changed"], inputs.verify)
     return Finding(KIND, found) if found else None
 
 

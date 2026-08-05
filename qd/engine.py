@@ -33,6 +33,7 @@ from qd.gittree import (
     # tree facts nor observes the tree any more. It asks, and renders the answer.
     _project_config, _global_config,
 )
+from qd.core.scope import RunScope
 from qd.features import detectors, gates
 from qd.features.detectors.inputs import DetectorInputs
 from qd.bootstrap import (
@@ -1084,10 +1085,15 @@ def _delegate(args, t0_dir):
         # disposed of -- the chain outlives this link and owns the container.
         wt = lent
         wt_owned = False
-        work_cwd = wt["path"]
     elif wt_mode == "auto":
         wt = worktrees.acquire(cwd)
-        work_cwd = wt["path"]
+    # Step 5: ONE owner for the container. The three disposal sites below
+    # (refusal, green, red) each used to re-derive "may I dispose of this?"
+    # from the flag above; a rule spread over three sites is one edit from
+    # disagreeing with itself, and here that deletes work rather than leaking
+    # a directory. See qd/core/scope.py.
+    scope = RunScope(cwd, container=wt, owned=wt_owned)
+    work_cwd = scope.work_cwd
 
     def refuse(text):
         """Refuse from PAST the worktree acquisition.
@@ -1100,8 +1106,7 @@ def _delegate(args, t0_dir):
         chain's earlier links already committed into, on a refusal that only
         concerns this link.
         """
-        if wt is not None and wt_owned:
-            worktrees.release(cwd, wt["path"], wt["branch"])
+        scope.abandon()
         return _refusal(text, max_iter)
 
     # U3.1: arg > config > 300, clamped 10..3600. The floor is what keeps a
@@ -1131,6 +1136,10 @@ def _delegate(args, t0_dir):
     # --- Pre-run snapshot ---
     _, pre_sha_full = git(work_cwd, "rev-parse", "HEAD")
     pre_status = snapshot(work_cwd)
+    # T0 belongs to the run's scope: it describes the tree this run holds, at
+    # the moment it took it. Recorded here rather than at construction because
+    # it must be read FROM the container, which did not exist until above.
+    scope.mark_start(pre_status, pre_sha_full)
     pre_clean = not pre_status
     # T0 byte contents of every dirty path: a revert must restore what the tree
     # HELD at T0, not what HEAD holds -- checkout-from-sha destroyed pre-run
@@ -1978,9 +1987,7 @@ def _delegate(args, t0_dir):
         ctx["detections"], ctx["detections_failed"] = detectors.run_all(
             ctx["tree_facts"],
             DetectorInputs(
-                work_cwd=work_cwd,
-                pre_status=pre_status,
-                pre_sha_full=pre_sha_full,
+                scope=scope,
                 created=_created(work_cwd, final_changed, pre_status,
                                  pre_tracked, ctx.get("writes"), hooked),
                 verify=verify,
@@ -2009,29 +2016,15 @@ def _delegate(args, t0_dir):
             args["advisory_gates"], work_cwd, verify_timeout)
 
     # --- Worktree commit or release (M4 seam 1) ---
-    if wt is not None:
-        # A demoted run is still a run whose gate went green: moving the
-        # demotion into the engine (U3.2) would otherwise have started silently
-        # DELETING the work of every preflight-passed worktree run.
-        if status in ("success", "success_but_preflight_passed"):
-            git(work_cwd, "add", "-A")
-            git(work_cwd, "commit", "-m", f"qwen delegation {wt['branch']}")
-            ctx["worktree"] = {"path": wt["path"], "branch": wt["branch"],
-                               "dirty": wt.get("dirty")}
-            # The commit above is what a LENT tree needs most: it makes this
-            # link's files visible to the next one AND tracked, so `spec_globs`
-            # can protect them (spec_files() is `git ls-files` -- an untracked
-            # new test is unprotected, and the next link could rewrite the gate
-            # it is supposed to be graded by).
-            #
-            # The merge classification is skipped for a lent tree: it compares
-            # the branch against the MAIN repo, which for an intermediate link
-            # describes work the chain has not finished. run_chain classifies
-            # once, at the end, when the answer means something.
-            if wt_owned:
-                ctx["merge"] = worktrees.classify_merge(cwd, wt["branch"])
-        elif wt_owned:
-            worktrees.release(cwd, wt["path"], wt["branch"])
+    # The whole decision -- green keeps and commits, red releases, a borrower
+    # commits but never releases or classifies -- is one call now. Every rule
+    # it encodes is spelled out in qd/core/scope.py and frozen by
+    # specs/scope_spec.py.
+    _disposal = scope.dispose(status)
+    if _disposal["worktree"] is not None:
+        ctx["worktree"] = _disposal["worktree"]
+    if _disposal["merge"] is not None:
+        ctx["merge"] = _disposal["merge"]
 
     # --- Compute cost_usd ---
     try:

@@ -5,17 +5,23 @@ The design says a detector is `facts -> Finding | None`. Five of five detectors
 need more than that, and pretending otherwise would mean lying about where the
 extra inputs come from:
 
-    work_cwd, pre_status, pre_sha_full, created   what this run OWNS  -> step 5
-    verify, task, touch_scope                     what was ASKED FOR  -> step 6
+    scope                     what this run OWNS      -> step 5, DONE
+    created                   run attribution         -> step 5, when writes/
+                                                         hooked move too
+    verify, task, touch_scope what was ASKED FOR      -> step 6
 
 `verify` is the gate command and `task` is the brief: neither is an observation
 about the code, so neither belongs in the facts record. `created` depends on
 `writes` and `hooked` -- run attribution, which step 5 owns -- so it is computed
 by the engine and handed over rather than gathered here.
 
-**This type is temporary and must stay small.** It exists because `core/scope.py`
-(step 5) and `core/plan.py` (step 6) do not exist yet; when they do, each field
-below leaves for the owner named beside it and this file is deleted. The danger
+**It is already shrinking, which is the point.** It began at seven fields;
+`work_cwd`, `pre_status` and `pre_sha_full` left together when `core/scope.py`
+gave them an owner, and they are now reached through `scope`. Four remain.
+
+**This type is temporary and must stay small.** `core/scope.py` now exists and has already
+taken three fields; `core/plan.py` (step 6) takes three more, and when
+`created`'s attribution follows them this file is deleted. The danger
 is obvious and worth naming: a general-purpose bag passed to every feature is
 exactly `ctx` with a nicer name, and rebuilding `ctx` is the one thing the
 restructure exists to prevent. Two properties keep it honest -- it is FROZEN, so
@@ -28,9 +34,7 @@ from typing import NamedTuple
 
 
 class DetectorInputs(NamedTuple):
-    work_cwd: str        # the tree the run actually used     -> step 5 scope
-    pre_status: dict     # the T0 dirty snapshot              -> step 5 scope
-    pre_sha_full: str    # the T0 HEAD, full 40-char          -> step 5 scope
+    scope: object        # RunScope: work_cwd, pre_status, pre_sha   -- OWNED
     created: list        # files this run made, attributed    -> step 5 scope
     verify: str          # the gate command                   -> step 6 plan
     task: str            # the brief, as the caller wrote it  -> step 6 plan
