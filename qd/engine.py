@@ -110,10 +110,40 @@ echo "$out" | tail -25
 # one line per file, and reading only the first compares the bar against a
 # single file's total. That can demand more tests than any one file holds, so
 # the gate is unsatisfiable and self-grading silently never works.
-ran=$(echo "$out" | grep -Eo 'Ran [0-9]+ tests?|[0-9]+ passed' | grep -Eo '[0-9]+' \
-      | awk '{{s+=$1}} END {{if (NR) print s}}')
+#
+# The two runners are counted SEPARATELY because they mean different things by
+# their totals, and conflating them is how a suite of nothing but skips cleared
+# this bar. unittest's "Ran N tests" INCLUDES skipped ones (it then prints
+# "OK (skipped=N)"); pytest's "N passed" already excludes them. So unittest's
+# total needs the skips subtracted and pytest's must not be discounted twice.
+# A skip is not a failure -- but it is not evidence either, and this guard
+# exists to count evidence.
+u_ran=$(echo "$out" | grep -Eo 'Ran [0-9]+ tests?' | grep -Eo '[0-9]+' \
+        | awk '{{s+=$1}} END {{if (NR) print s}}')
+p_ran=$(echo "$out" | grep -Eo '[0-9]+ passed' | grep -Eo '[0-9]+' \
+        | awk '{{s+=$1}} END {{if (NR) print s}}')
+u_skip=$(echo "$out" | grep -Eo 'skipped=[0-9]+' | grep -Eo '[0-9]+' \
+         | awk '{{s+=$1}} END {{if (NR) print s+0}}')
+p_skip=$(echo "$out" | grep -Eo '[0-9]+ skipped' | grep -Eo '[0-9]+' \
+         | awk '{{s+=$1}} END {{if (NR) print s+0}}')
+[ -z "$u_skip" ] && u_skip=0
+[ -z "$p_skip" ] && p_skip=0
+skipped=$(( u_skip + p_skip ))
+ran=""
+[ -n "$u_ran" ] && ran=$(( u_ran - u_skip ))
+[ -n "$p_ran" ] && ran=$(( ${{ran:-0}} + p_ran ))
 if [ -n "$ran" ] && [ "$ran" -lt {min} ]; then
-  echo "SELF-GATE: only $ran tests ran -- write a real suite (>= {min} tests)"
+  note=""
+  [ "$skipped" -gt 0 ] && note=" ($skipped skipped -- a skip is not evidence)"
+  echo "SELF-GATE: only $ran test(s) actually ran$note -- write a real suite (>= {min} tests)"
+  exit 1
+fi
+# No parseable count AND visible skips: we do not know how many ran, but we do
+# know some did not. pytest's fully-skipped summary is "N skipped" with no
+# "passed" clause at all, which is exactly this case -- and it used to reach
+# the "guard inactive" note below and exit 0.
+if [ -z "$ran" ] && [ "$skipped" -gt 0 ]; then
+  echo "SELF-GATE: $skipped test(s) skipped and no passing count -- a skip is not evidence"
   exit 1
 fi
 if [ -z "$ran" ]; then

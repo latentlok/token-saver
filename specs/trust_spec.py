@@ -90,6 +90,68 @@ class SelfGateScript(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("vacuous-pass guard inactive", out)
 
+    # --- D1: a skip is not evidence -------------------------------------
+    #
+    # unittest's "Ran N tests" COUNTS the skipped ones and then prints
+    # "OK (skipped=N)", so a suite of nothing but skips satisfied the floor
+    # exactly. pytest prints "N skipped" with no "passed" clause at all, which
+    # matched neither alternative, so the count came back empty and the script
+    # took its "guard inactive" branch and exited 0 anyway. Both parsers folded
+    # a skip into green -- the A19 shape, inside the guard written to catch it.
+
+    def _skipping_suite(self, n):
+        os.makedirs(os.path.join(self.cwd, "tests"), exist_ok=True)
+        open(os.path.join(self.cwd, "tests", "__init__.py"), "w").close()
+        body = "import unittest\n\nclass T(unittest.TestCase):\n"
+        for i in range(n):
+            body += (f'    @unittest.skip("no creds")\n'
+                     f"    def test_{i}(self):\n        pass\n")
+        with open(os.path.join(self.cwd, "tests", "test_gen.py"), "w") as f:
+            f.write(body)
+
+    def test_an_all_skipped_unittest_suite_fails(self):
+        self._skipping_suite(6)              # comfortably over the floor of 5
+        rc, out = run_gate(self.cwd)
+        self.assertNotEqual(rc, 0, f"6 skipped tests satisfied the floor:\n{out}")
+        self.assertIn("skip", out.lower())
+
+    def test_skips_are_subtracted_from_a_mixed_unittest_suite(self):
+        write_suite(self.cwd, 6)
+        with open(os.path.join(self.cwd, "tests", "test_skip.py"), "w") as f:
+            f.write("import unittest\n\nclass S(unittest.TestCase):\n"
+                    '    @unittest.skip("x")\n    def test_s(self):\n        pass\n')
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"min_tests": 7}')      # 7 ran, 1 skipped -> 6 real
+        rc, out = run_gate(self.cwd)
+        self.assertNotEqual(rc, 0, f"a skipped test counted toward the floor:\n{out}")
+
+    def test_a_real_suite_beside_a_skip_still_passes(self):
+        # The other direction, and the one that matters for not crying wolf: a
+        # skip is not a failure, it just is not evidence. 6 real tests clear a
+        # floor of 5 whether or not something beside them skipped.
+        write_suite(self.cwd, 6)
+        with open(os.path.join(self.cwd, "tests", "test_skip.py"), "w") as f:
+            f.write("import unittest\n\nclass S(unittest.TestCase):\n"
+                    '    @unittest.skip("x")\n    def test_s(self):\n        pass\n')
+        rc, out = run_gate(self.cwd)
+        self.assertEqual(rc, 0, out)
+
+    def test_an_all_skipped_pytest_suite_fails(self):
+        # pytest's summary is "5 skipped" -- no "passed" clause, so the old
+        # parse found no count and fell through to "guard inactive" + exit 0.
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"test_command": "echo \'===== 5 skipped in 0.01s =====\'"}')
+        rc, out = run_gate(self.cwd)
+        self.assertNotEqual(rc, 0, f"a fully-skipped pytest run passed:\n{out}")
+
+    def test_pytest_passed_counts_are_not_double_discounted(self):
+        # pytest's "N passed" already EXCLUDES skips, so subtracting them again
+        # would fail a suite that genuinely passed enough tests.
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"test_command": "echo \'6 passed, 3 skipped in 0.1s\'"}')
+        rc, out = run_gate(self.cwd)
+        self.assertEqual(rc, 0, out)
+
     def test_min_tests_config_override(self):
         write_suite(self.cwd, 6)
         with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
