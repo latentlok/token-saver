@@ -375,6 +375,42 @@ without touching the renderer; after step 4 there is a template to copy. The
 post-run block is not a step — it **drains**, as steps 1, 2 and 5 each take
 their part.
 
+### 8.1 Steps 7 and 8, reassessed after 2–6 shipped
+
+Recorded as an argued recommendation, not a decision taken. Steps 1–6 changed
+what is known, and both remaining steps look different from here.
+
+**Step 7 (Composite) — recommend NOT building as specified.**
+
+The stated benefit is that it "makes *nesting is one level* a property rather
+than a refusal message". But `_batch_item`'s own docstring argues the opposite,
+deliberately: nesting is refused because *"a batch inside a batch item says
+nothing `batch` does not already say, and would make the receipt's structure
+depend on how deeply the caller happened to nest."* Composite's whole value is
+treating leaf and composite uniformly — and here they are **not** uniform on
+purpose. A batch is unordered and parallel; a chain is ordered and shares one
+worktree. Uniform treatment loses the distinction that makes each correct.
+
+The code it would replace is a four-line type check inside a thirteen-line
+function. §7's own rule is that *a pattern earns its place by removing a problem
+that exists here*, and Builder was adopted because it removed **measured**
+duplication. This would guard an empty room.
+
+**What is actually needed, and by what.** G2 (whole-chain contradiction check)
+needs a chain to be an *addressable thing* it can hand to a gate — today a chain
+is `items` plus `run_chain`, not a value. That is one small record, built as
+part of G2, not a hierarchy built in advance of it.
+
+**Step 8 (fold `query` in) — recommend the cheap 80% first.**
+
+Its stated payoff is that `query` gains per-call telemetry, which it lacks. That
+payoff does not require the fold: giving `queries.py` a `CallLog` is a small,
+low-risk change that delivers the entire user-visible benefit. The fold's
+remaining value is structural uniformity, which is real but buys nothing a
+caller can see, and it touches the one caller that has never misbehaved.
+
+Do the telemetry; leave the fold until something needs it.
+
 ---
 
 ## 9. Risks
