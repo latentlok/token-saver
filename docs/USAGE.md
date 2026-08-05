@@ -656,6 +656,12 @@ Green receipt ≈ 8 lines. What to actually look at:
   `SHELL APPROVAL NEEDED` (judge the command alone), `gate_suspect` (fix the gate,
   never iterate), `PREFLIGHT` (the gate proved nothing — tighten it), `TEST DODGE`
   (a skip added beside the delivery), `STRAYS` (files the task never asked for).
+- **`SUPPRESSED:`** names any of the above that did NOT report — either the
+  size cap shed it to fit, or the check itself failed. Read it as *this
+  receipt is not telling you those checks were clean*, because a missing
+  warning and a passed check look identical otherwise. It never fires for
+  `RESUME`/`LEDGER` being shed: those cost you nothing you cannot ask for
+  again, and a line that fired on every long receipt would be ignored.
 - Never re-verify a green gate and never read the diff — that's the token cost this
   system exists to remove.
 

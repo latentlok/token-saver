@@ -154,6 +154,69 @@ class SizeCap(Fixture):
             self.assertIn(kept, out, f"{kept} outranks what was kept instead")
 
 
+class Suppressed(SizeCap):
+    """G1: a check that did not report must say so.
+
+    The cap sheds blocks to fit. When what it sheds is a FINDING, the receipt
+    stops saying "this symbol is wired to nothing" and says nothing at all --
+    and a caller reads nothing as "no seam risk", not as "did not fit". That is
+    PRINCIPLES §IV exactly: a zero meaning "nothing found" and a zero meaning
+    "nothing was measured" have to be distinguishable, or every zero is
+    worthless as evidence.
+
+    Two different causes, one consequence:
+
+        dropped for size   the detector ran and had something to say; the
+                           receipt had no room for it
+        failed             the detector raised, so nothing is known either way
+
+    Both are reported. Neither is inferable from a receipt that simply omits
+    the line.
+
+    **Only findings.** RESUME and LEDGER are shed on any long receipt and their
+    absence costs a caller nothing they cannot ask for again -- reporting those
+    would make this line fire constantly, and a warning that fires always is
+    one nobody reads.
+    """
+
+    def test_a_finding_dropped_for_size_is_named(self):
+        out = self.loaded(3200)
+        self.assertIn("SUPPRESSED:", out)
+        self.assertIn("uncalled", out)
+
+    def test_shedding_only_affordances_stays_quiet(self):
+        # RESUME, LEDGER and COST all go at this size; no finding does. The
+        # line must not fire, or it fires on every long receipt.
+        out = self.loaded(2400)
+        self.assertNotIn("SUPPRESSED:", out)
+
+    def test_a_detector_that_could_not_run_is_named(self):
+        over = dict(self.LOADED)
+        over["detections"] = []
+        over["detections_failed"] = ["mocked_seams"]
+        out = self.receipt(v2_over=over)
+        self.assertIn("SUPPRESSED:", out)
+        self.assertIn("mocked_seams", out)
+
+    def test_size_and_failure_are_told_apart(self):
+        over = dict(self.LOADED)
+        over["detections"] = [verdict_findings("uncalled",
+                                               {"out.py": ["run_threads"]})]
+        over["detections_failed"] = ["dodge"]
+        out = self.receipt(result="R" * 3200, v2_over=over)
+        line = [l for l in out.splitlines() if l.startswith("SUPPRESSED:")][0]
+        self.assertIn("uncalled (size)", line)
+        self.assertIn("dodge (failed)", line)
+
+    def test_the_suppressed_line_survives_the_cap_that_caused_it(self):
+        # It reports on the cap, so the cap must not be able to eat it -- a
+        # self-defeating warning is worse than none, because its absence is
+        # exactly what it exists to deny.
+        out = self.loaded(9000)
+        self.assertIn("SUPPRESSED:", out)
+        self.assertLessEqual(len(out), 3000)
+
+
 class CompactGreen(Fixture):
     """R2 (PLAN-v3-l5): a clean success renders COMPACT -- diagnostics appear
     only when something needs the manager's judgment. Receipt text is asserted

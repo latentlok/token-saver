@@ -34,7 +34,6 @@ thing and this list stays another.
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
-| **G1** `SUPPRESSED:` line | step 3 | `surface/receipt.py` + `surface/runlog.py` |
 | **G2** whole-chain brief contradiction | steps 4, 7 | `features/gates/`, on the composite |
 | **G3** `stuck_no_progress` status | step 3 | engine status + a receipt block |
 | **G4** brief-vs-diff advisory | step 4 | `features/gates/` (advisory only) |
@@ -175,18 +174,18 @@ not the receipt); the ledger has to survive the orchestrator forgetting
 (`ledger_summary`, `runs_in_flight` with pid-liveness — theirs is a markdown
 file an agent appends to, ours checks whether the process is alive).
 
-**G1 — a dropped finding leaves no trace.** `verdict.py:957` pops droppable C2
-blocks while the receipt exceeds 3,000 chars. Two cases were already exempted
-because their absence reads as a green: red advisory (`:735` — *"a red indicator
-the cap silently dropped is worse than none at all"*) and TEST DODGE (`:311`).
-UNCALLED / MOCKED SEAM / NEVER EXECUTED are still droppable **and**, unlike
-STRAYS, are not in the runlog `extra` either — so on a long receipt they leave
-no trace anywhere, and a caller cannot tell "no seam risk" from "seam risk did
-not fit." That is §IV against our own renderer: a zero meaning *nothing found*
-and a zero meaning *nothing reported* have to be distinguishable. Wants one
-non-droppable `SUPPRESSED: n finding(s) dropped for size` line and the per-kind
-counts into `extra`. **Why step 3:** the loop cannot count what it drops while
-the blocks are a hand-built array of tuples; registered blocks are enumerable.
+~~**G1 — a dropped finding leaves no trace.**~~ **DONE.** `SUPPRESSED:` names
+every check that did not report and why — `uncalled (size)` when the cap shed it,
+`mocked_seams (failed)` when the detector raised — and the per-kind lists go to
+`runs.jsonl` as `detections_suppressed` / `detections_failed`. Findings only: the
+line stays quiet when the cap sheds RESUME or LEDGER, because a warning that
+fires on every long receipt is one nobody reads. It is not in the droppable list
+at all, so the cap cannot eat the line that reports capping.
+
+*What building it turned up.* Mutation-checking the cap first showed the drop
+ORDER itself was unpinned — inverting it, so the receipt shed its most important
+blocks and kept the accounting, passed all 1,032 tests. Pinned by
+`verdict_spec.SizeCap` before G1 was built on top of it.
 
 **G2 — nothing reads a chain's links against each other.** Per-link challenge
 already exists: `server.py:436` defaults `challenge_brief` off for links 2..N

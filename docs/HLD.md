@@ -250,7 +250,9 @@ verdict_spec oracle) — and skips it entirely under `preflight_expect="green"`.
 the LEDGER line from it, and `runs_in_flight()` answers "did my run die with the
 session".* The `extra` map gains, always: `blocked_commands: [str] (≤50)` (the full list
 the grouped receipt line elides), `graph_used: int`, `writes_attributed: int`,
-`caller_changed: int`, `strays: int`. Conditionally: `run_id: str` (a submitted run),
+`caller_changed: int`, `strays: int`, `detections_suppressed: [kind]` and
+`detections_failed: [kind]` (G1 — the receipt is capped, the log is not, so a
+finding that did not fit still survives here). Conditionally: `run_id: str` (a submitted run),
 `retry_of: str`, `verify_timeout_sec` / `preflight_expect` **only when non-default**
 (a key that reads 300/"any" in every record hides the runs where somebody turned a
 knob), `advisory: {red: int, of: int}` when gates were supplied, `report: bool` +

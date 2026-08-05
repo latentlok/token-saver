@@ -173,6 +173,35 @@ def strip_handoff(text):
     return "\n".join(keep).strip()
 
 
+# The kinds that are FINDINGS -- claims about the delivered work, whose absence
+# a caller reads as "nothing found". Derived from the registry so a detector
+# added tomorrow is covered without editing this file.
+_FINDING_KINDS = frozenset(d.KIND for d in detectors.DETECTORS)
+
+
+def _suppressed_line(dropped, failed):
+    """One line naming every check that did NOT report, and why.
+
+    G1. Two causes, one consequence: a finding the size cap shed (the detector
+    ran and had something to say, and there was no room) and a detector that
+    raised (nothing is known either way). Both leave the receipt silent, and a
+    reader takes silence for a clean result -- PRINCIPLES §IV, where a zero
+    meaning "nothing found" and a zero meaning "nothing was measured" have to
+    stay distinguishable or every zero stops being evidence.
+
+    Findings ONLY. RESUME and LEDGER are shed by any long receipt and cost a
+    caller nothing they cannot ask for again; naming those would fire this line
+    constantly, and a warning that fires always is one nobody reads.
+    """
+    if not dropped and not failed:
+        return None
+    bits = ([f"{k} (size)" for k in dropped]
+            + [f"{k} (failed)" for k in failed])
+    return ("SUPPRESSED: " + ", ".join(bits)
+            + " -- these checks did not report, so their silence is not "
+              "evidence of a clean run.")
+
+
 def _emit(into, feature, ctx, text_only=False):
     """Append one feature's receipt block(s), if its finding fired.
 
@@ -926,11 +955,23 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     # Insert C2 blocks before the "--- qwen result ---" line.
     caps = {"result": RESULT_CAP, "verify": VERIFY_CAP}
+    # G1: what the cap shed, and what never ran. Recomputed into the receipt on
+    # every pass of the loop below, so the line reflects the FINAL set of drops
+    # rather than a snapshot taken partway through.
+    suppressed = []
+    failed_detectors = list(ctx.get("detections_failed") or [])
 
     def _assembled():
         parts = list(body)
         for blk in c2_blocks:
             parts.append(blk.text)
+        _sup = _suppressed_line(suppressed, failed_detectors)
+        if _sup:
+            # NON-DROPPABLE by construction: it is not in c2_blocks at all, so
+            # the loop cannot shed the one line that reports shedding. A
+            # self-defeating warning is worse than none -- its absence is
+            # precisely what it exists to deny.
+            parts.append(_sup)
         parts.append(
             f"--- qwen result ---\n"
             f"{truncate(strip_handoff(result_text), caps['result'])}")
@@ -946,7 +987,9 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             [(i, b.priority) for i, b in enumerate(c2_blocks) if b.droppable],
             key=lambda x: -x[1])
         if droppable:
-            c2_blocks.pop(droppable[0][0])
+            gone = c2_blocks.pop(droppable[0][0])
+            if gone.kind in _FINDING_KINDS:
+                suppressed.append(gone.kind)
         elif caps["result"] > 200:
             caps["result"] = max(200, caps["result"] - (len(verdict) - 3000))
         elif verify_idx is not None and caps["verify"] > 400:
@@ -998,6 +1041,10 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         "writes_attributed": len(ctx.get("writes") or []),
         "caller_changed": len(ctx.get("scope_unattributed") or []),
         "strays": len(_finding(ctx.get("detections"), "strays") or []),
+        # G1: the receipt is capped; the log is not. A finding that did not
+        # fit still happened, and this is where it survives.
+        "detections_suppressed": list(suppressed),
+        "detections_failed": list(failed_detectors),
     }
     # U5.2: the id the submit minted. This record is what CLOSES the `running`
     # one written at spawn -- without the id here, a reader could not tell an
