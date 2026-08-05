@@ -885,3 +885,33 @@ The transferable rule, now enforced structurally by `qd/core/plan.py`:
 > `None` means *this layer did not answer*. Every other value -- including
 > `false`, `0` and `[]` -- is an answer. Saying nothing and saying no are
 > different, and exactly one of them defers.
+
+## An e2e test whose observable depends on the model cannot discriminate
+
+Attempting to verify the `shell_allow=[]` fix end to end: a scratch project
+permitting `^echo`, a call passing `shell_allow=[]`, and a task instructing the
+worker to run `echo PERMISSION_PROBE`. If the fix held, the worker would be
+denied; if the old fall-through survived, permitted.
+
+**Both arms returned identical results.** Zero blocked commands either way --
+because the worker never ran a shell command at all. It wrote the file directly
+and the allowlist was never consulted. The test was measuring the model's choice
+of tool, not the resolver.
+
+This is the A11 lesson in a new costume, and worth naming separately because the
+first version looked like a textbook A/B: two arms, one variable, a clear
+observable. What it lacked was any guarantee that the observable would be
+PRODUCED. A live test only discriminates if the code path under test is on the
+critical path of a task the worker cannot complete another way -- and a worker
+free to choose its tools will route around the thing you are trying to measure.
+
+**The rule:** for anything DETERMINISTIC -- config resolution, precedence,
+env-var construction -- test at the seam, where the answer does not depend on
+what a model felt like doing. Spend live runs on what only a live run can show:
+that the pipeline works against a real model at all, and that a mutation to it
+changes the receipt (the two live mutations that DID discriminate are recorded
+above -- both altered the receipt because both sat on a path every run takes).
+
+The fix itself was then verified at the seam: with a project permitting
+`^echo`, a caller passing `[]` resolves to `[]` and a silent caller resolves to
+`["^echo"]`.
