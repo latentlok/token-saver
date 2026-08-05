@@ -475,6 +475,54 @@ class SpecGuardWiring(Fixture):
         self.assertEqual(r["status"], "spec_violation")
 
 
+class ExplicitlyNarrowedPermissions(Fixture):
+    """A caller who asks for LESS must not be given more.
+
+    Settings resolve call arg > project config > machine config > builtin, and
+    most of that precedence is written as `args.get(x) or cfg.get(x)`. That
+    reads correctly until the caller's answer is FALSY -- at which point it
+    falls through to the next layer and silently replaces a deliberate choice
+    with a default.
+
+    The engine already knows this. `challenge_brief` is resolved with explicit
+    None checks and says why: *"`false` is a real answer, and `or` chaining
+    would fall through it to the next layer and silently re-enable what the
+    caller just switched off."* The permission lists were never given the same
+    treatment, and for them the empty list is the most deliberate answer a
+    caller can give -- it means *no extra capability at all*.
+
+    Why this is the serious instance rather than a tidiness one: it widens a
+    capability boundary against an explicit request. PRINCIPLES §III asks of
+    every allowlist *what is the most powerful thing reachable through the
+    things I permit* -- and here the caller permitted nothing and received
+    whatever the project happened to declare, which in the fixture below
+    includes `rm`.
+    """
+
+    def test_an_explicit_empty_shell_allow_is_not_widened_by_the_project(self):
+        self.commit_cfg({"shell_allow": ["^rm\\b"]})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(shell_allow=[], approval_mode="scoped")
+        self.assertEqual(json.loads(self.env_seen(1)["QGATE_EXTRA"]), [],
+                         "the caller asked for no extra shell and got some")
+
+    def test_an_explicit_empty_mcp_allow_is_not_widened_by_the_project(self):
+        self.commit_cfg({"mcp_allow": ["some_tool"]})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(mcp_allow=[], approval_mode="scoped")
+        self.assertEqual(json.loads(self.env_seen(1)["QGATE_MCP"]), [])
+
+    def test_saying_nothing_still_inherits_the_project(self):
+        # The control, and the reason this cannot be fixed by ignoring config.
+        # Silence means "use the project's policy"; [] means "none". They are
+        # different answers and must stay different.
+        self.commit_cfg({"shell_allow": ["^pytest\\b"]})
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(approval_mode="scoped")
+        self.assertEqual(json.loads(self.env_seen(1)["QGATE_EXTRA"]),
+                         ["^pytest\\b"])
+
+
 class SpecGuard(Fixture):
     def test_worker_spec_edit_reverted_and_attempt_fails(self):
         self.steps([{"write": {"guard_spec.py": "WEAKENED = 1\n",

@@ -33,6 +33,7 @@ from qd.gittree import (
     # tree facts nor observes the tree any more. It asks, and renders the answer.
     _project_config, _global_config,
 )
+from qd.core.plan import setting
 from qd.core.scope import RunScope
 from qd.features import detectors, gates
 from qd.features.detectors.inputs import DetectorInputs
@@ -1003,8 +1004,12 @@ def _delegate(args, t0_dir):
     # overrides it.
     approval_mode = args.get("approval_mode") or cfg.get("approval_mode") \
         or "auto-edit"
-    shell_allow = args.get("shell_allow") or cfg.get("shell_allow")
-    mcp_allow = args.get("mcp_allow") or cfg.get("mcp_allow")
+    # Resolved through core/plan.py, NOT with `or`: for a permission list the
+    # empty list is the most deliberate answer a caller can give -- no extra
+    # capability at all -- and `or` fell through it to whatever the project
+    # declared, silently widening a boundary the call had just narrowed.
+    shell_allow = setting("shell_allow", args, cfg)
+    mcp_allow = setting("mcp_allow", args, cfg)
     # Default: project config, else 3; clamped 1..10 -- the schema has promised
     # both since v1, and the engine port had silently dropped them.
     max_iter = (args.get("max_iterations")
