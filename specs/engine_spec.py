@@ -2167,6 +2167,32 @@ class FixtureProvenance(Fixture):
         self.assertEqual(r["ctx"]["fixtures_unproven"], [])
 
 
+    def test_a_project_can_switch_off_path_based_detection(self):
+        # Same falsy fall-through as shell_allow, found by sweeping the
+        # remaining precedence sites. `fixture_globs: []` is a project saying
+        # "no path segment marks a fixture here" -- a real answer, and an empty
+        # list is falsy, so `or` replaced it with the builtin list and the
+        # project's declaration was ignored.
+        #
+        # Milder than the permission case: the fall-through makes the check
+        # STRICTER, not laxer, so nothing is unsafe. It is still an explicit
+        # answer being overridden by a default, which is the bug either way.
+        self.commit_cfg({"fixture_globs": []})
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/users.json": "[]\n"}}])
+        r = self.delegate(fixture_provenance=True)
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(r["ctx"]["fixtures_unproven"], [])
+
+    def test_saying_nothing_still_uses_the_builtin_segments(self):
+        # The control. Silence means "use the defaults" and must stay a
+        # different answer from [].
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "tests/fixtures/users.json": "[]\n"}}])
+        r = self.delegate(fixture_provenance=True)
+        self.assertEqual(r["status"], "fixture_unproven")
+
+
 class ResultSchema(Fixture):
     """U5.1: `result_schema` makes the reply machine-readable, and a violation
     is treated like a red gate -- fed back by name, retried, and named in the

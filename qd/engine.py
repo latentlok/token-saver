@@ -1129,7 +1129,11 @@ def _delegate(args, t0_dir):
     # project decision -- what a repo calls its fixture directory varies -- so
     # the config value replaces the defaults rather than extending them.
     fixture_provenance = bool(args.get("fixture_provenance"))
-    fixture_segments = cfg.get("fixture_globs") or _FIXTURE_SEGMENTS
+    # Through core/plan.py, not `or`: `fixture_globs: []` is a project saying
+    # no path segment marks a fixture here, and `or` replaced that answer with
+    # the builtin list. Milder than the permission case (the fall-through makes
+    # the check stricter, not laxer) but the same bug.
+    fixture_segments = setting("fixture_globs", cfg, default=_FIXTURE_SEGMENTS)
     if not isinstance(fixture_segments, (list, tuple)):
         fixture_segments = _FIXTURE_SEGMENTS
 

@@ -856,3 +856,32 @@ receipt for code that no longer exists.** Nothing in the status, the changed-fil
 list or the gate output contradicts it — the only signal is the ABSENCE of a
 line. Same shape as every other hole found in this round: the failure looks like
 success.
+
+## Falsy-precedence sweep (v0.6, step 6)
+
+`shell_allow=[]` being silently widened to the project's list was found while
+building step 6. The question that follows is whether it was one bug or a
+pattern, so all 15 remaining `or`-chained precedence sites were triaged by one
+test: **is a falsy value a meaningful answer here?**
+
+| Site | Verdict |
+|---|---|
+| `shell_allow`, `mcp_allow` | **BUG** — `[]` means *no extra capability*; fixed in `c15d242` |
+| `fixture_globs` | **BUG** — `[]` means *no path segment marks a fixture*; fixed here |
+| `burn_budget` | already correct — uses `.get(k, default)`, so a configured `0` survives |
+| `touch_scope` | already correct — no fallback layer to fall through to |
+| `timeout_sec`, `verify_timeout_sec` | **`or` is right.** Both are clamped to a floor (30s / 10s), so `0` cannot express a valid answer. Treating it as one would silently clamp to a value the caller never asked for -- worse than falling through to the default. |
+| the other 9 (`retry_of`, `cwd`, `session_id`, `approval_mode`, `on_compaction`, `worktree`, `shell_feedback`, `retry_message`, `_brief`) | no meaningful falsy value -- an empty session id or cwd is not an answer |
+
+**Three real instances out of fifteen.** The pattern is narrower than it first
+looked, and the discipline that finds it is not "never use `or`" but a question
+asked per setting. Two of the three touch capability or policy the caller
+declared explicitly; the third (`fixture_globs`) fails in the STRICTER
+direction, which is why it survived unnoticed -- nothing breaks, a check just
+runs that a project asked to switch off.
+
+The transferable rule, now enforced structurally by `qd/core/plan.py`:
+
+> `None` means *this layer did not answer*. Every other value -- including
+> `false`, `0` and `[]` -- is an answer. Saying nothing and saying no are
+> different, and exactly one of them defers.
