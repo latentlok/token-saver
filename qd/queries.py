@@ -111,6 +111,18 @@ def run_query(args):
         profile, prompt, cwd, "plan", timeout, session_id, suffix=suffix
     )
 
+    # Step 8, cheap half: a query is ONE executor call, and until now the run
+    # log recorded its totals without recording it as a CALL. That mattered
+    # once the log became heterogeneous -- a delegation's record distinguishes
+    # its challenge pass from its build attempts, and a query sat outside that
+    # vocabulary entirely, so "what did we spend on queries" could not be asked
+    # in the same shape as every other question about the log.
+    #
+    # NOT the full fold of query into the run pipeline (DESIGN §8.1): this is
+    # the whole user-visible benefit of that step at a fraction of its risk.
+    calls = qd.runlog.CallLog()
+    calls.record("query", meta, session=sid, err=err)
+
     def _log_query(status, verdict):
         stats = meta.get("stats") or {}
         peak = meta.get("peak", 0)
@@ -130,6 +142,7 @@ def run_query(args):
                 "question": qd.runlog.digest(question),
                 "focus": focus or None,
                 "resumed": bool(session_id),
+                **calls.as_record(profile),
             },
         ))
 

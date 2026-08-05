@@ -460,5 +460,37 @@ class CallLogSpec(unittest.TestCase):
         json.dumps(log.as_record())
 
 
+class QueryCallTelemetry(unittest.TestCase):
+    """A query is one executor call, and the log must say so in the same
+    vocabulary as everything else.
+
+    Step 8's cheap half (DESIGN §8.1). The run log became heterogeneous when a
+    delegation learned to distinguish its challenge pass from its build
+    attempts; a query sat outside that vocabulary entirely, so "what did we
+    spend on queries" could not be asked in the same shape as every other
+    question about the log. Totals were recorded; the CALL was not.
+    """
+
+    def test_a_query_call_is_recorded_by_kind(self):
+        log = runlog.CallLog()
+        log.record("query", {"stats": {"tokens": {"prompt": 900,
+                                                  "completion": 120}}},
+                   session="q-1")
+        rec = log.as_record(None)
+        self.assertEqual(len(rec["calls"]), 1)
+        self.assertIn("query", rec["calls_by_kind"],
+                      f"the call was counted but not by KIND: {rec}")
+
+    def test_an_errored_query_still_counts_as_spend(self):
+        # A timed-out or unparseable query still burned the tokens. Records are
+        # written by survivors (PRINCIPLES §IV); a log that drops the failures
+        # reports a floor and reads as a total.
+        log = runlog.CallLog()
+        log.record("query", {"stats": {"tokens": {"prompt": 500,
+                                                  "completion": 0}}},
+                   session="q-2", err="timeout")
+        self.assertEqual(len(log), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

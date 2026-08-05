@@ -252,6 +252,22 @@ class LogSeam(Fixture):
         self.assertEqual(rec["approval_mode"], "plan")
         self.assertTrue(rec["question"]["sha256"])
 
+    def test_the_query_is_logged_as_a_CALL_not_only_as_a_total(self):
+        # Step 8's cheap half (DESIGN §8.1). The log became heterogeneous when
+        # a delegation learned to separate its challenge pass from its build
+        # attempts; a query sat outside that vocabulary, so "what did we spend
+        # on queries" could not be asked in the shape every other question
+        # about the log uses. Its totals were recorded -- the CALL was not.
+        #
+        # Pinned HERE rather than against CallLog directly, because the unit is
+        # not what broke: mutating the wiring in queries.py left every
+        # CallLog test green. Tested logic, untested wiring, again.
+        self.q()
+        rec = self.log_records()[-1]
+        self.assertEqual(len(rec["calls"]), 1, "the query was not logged as a call")
+        self.assertEqual(rec["calls"][0]["kind"], "query")
+        self.assertIn("query", rec["calls_by_kind"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
