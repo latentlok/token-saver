@@ -581,6 +581,46 @@ class Worktree(Fixture):
         wl = self.git_main("worktree", "list")
         self.assertNotIn("qwen/", wl.replace(self.cwd, ""))
 
+    def test_a_lent_container_survives_its_links_failure(self):
+        # A chain's links SHARE one worktree and commit into it between links,
+        # so link 2 sees link 1's work. The container therefore outlives any
+        # single link and none of them may dispose of it.
+        #
+        # Found unpinned by mutation during step 5: dropping the ownership
+        # check so a failing link releases the tree passed all 1,062 tests.
+        # What that costs is not a leaked directory -- it is link 1's COMMITTED
+        # work, deleted by link 2 failing, with the chain then running on a
+        # tree that no longer exists. The failure looks like an ordinary red
+        # link, which is the shape every hole found today has shared.
+        from qd import worktrees
+        wt = worktrees.acquire(self.cwd)
+        with open(os.path.join(wt["path"], "link1.py"), "w") as f:
+            f.write("LINK1 = 1\n")
+        subprocess.run(["git", "-C", wt["path"], "add", "-A"], check=True)
+        subprocess.run(["git", "-C", wt["path"], "commit", "-qm", "link 1"],
+                       check=True)
+
+        self.steps([{"write": {"out.py": "wrong\n"}}])
+        r = self.delegate(_worktree=wt, max_iterations=1)
+
+        self.assertEqual(r["status"], "verify_failed")
+        self.assertTrue(os.path.exists(wt["path"]),
+                        "a failing link deleted the chain's container")
+        self.assertTrue(os.path.exists(os.path.join(wt["path"], "link1.py")),
+                        "link 1's committed work was destroyed by link 2")
+
+    def test_a_lent_container_is_not_merge_classified_by_a_link(self):
+        # The other half of the same rule. classify_merge compares the branch
+        # against the MAIN repo, which for an intermediate link describes work
+        # the chain has not finished -- so the answer would be about a state
+        # nobody is in yet. run_chain classifies once, at the end.
+        from qd import worktrees
+        wt = worktrees.acquire(self.cwd)
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(_worktree=wt, max_iterations=1)
+        self.assertEqual(r["status"], "success")
+        self.assertIsNone(r["ctx"].get("merge"))
+
     def test_project_config_auto_isolates_without_the_arg(self):
         # "worktree": "auto" in .qwen-delegate.json is the standing default
         # for a repo where co-work is the norm; a call that says nothing gets
