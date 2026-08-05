@@ -354,6 +354,74 @@ class BatchOfChains(Fixture):
         self.assertIn("mutually exclusive", out)
 
 
+class HandoffForwarding(Fixture):
+    """Link N's handoff reaches link N+1, without going through the caller.
+
+    The envelope already existed and was already spec-pinned -- every worker is
+    asked for HANDOFF/FILES/NEXT/FINDINGS and parse_handoff reads them back.
+    Nothing forwarded them, so the only route from link 1 to link 2 ran through
+    the orchestrator's context: the exact burn the product exists to prevent.
+    """
+
+    def reply(self, handoff="built the thing", files="a.py", nxt="nothing"):
+        return (f"STATUS: success\nSESSION: s\nprose\n"
+                f"HANDOFF: {handoff}\nFILES: {files}\nNEXT: {nxt}\n")
+
+    def test_link_two_receives_link_ones_handoff(self):
+        server.run_chain(self.items(2),
+                         self.handler(self.reply("alpha.txt written"), GREEN))
+        second = self.seen[1]["task"]
+        self.assertIn("HANDOFF: alpha.txt written", second)
+        self.assertIn("FILES: a.py", second)
+        self.assertIn("--- link 1 of 2 finished", second)
+
+    def test_the_original_task_survives_and_reads_last(self):
+        server.run_chain(self.items(2), self.handler(self.reply(), GREEN))
+        second = self.seen[1]["task"]
+        self.assertTrue(second.endswith("step 2"), second[-40:])
+        self.assertLess(second.index("HANDOFF:"), second.index("step 2"))
+
+    def test_the_preamble_is_framed_as_context_not_orders(self):
+        # NEXT: is "what a follow-up would know", written by a worker who was
+        # not told a follow-up would read it. Unframed it reads as a directive.
+        server.run_chain(self.items(2),
+                         self.handler(self.reply(nxt="delete the old module"),
+                                      GREEN))
+        self.assertIn("context, not instructions", self.seen[1]["task"])
+
+    def test_link_one_gets_no_preamble(self):
+        server.run_chain(self.items(2), self.handler(self.reply(), GREEN))
+        self.assertEqual(self.seen[0]["task"], "step 1")
+
+    def test_a_reply_with_no_handoff_lines_carries_nothing(self):
+        server.run_chain(self.items(2), self.handler(GREEN, GREEN))
+        self.assertEqual(self.seen[1]["task"], "step 2")
+
+    def test_only_the_previous_link_is_carried_not_the_whole_history(self):
+        # A chain of eight would otherwise accumulate eight preambles, and the
+        # oldest is the least relevant. One hop is what "the tree you inherit"
+        # means.
+        server.run_chain(self.items(3),
+                         self.handler(self.reply(handoff="from one"),
+                                      self.reply(handoff="from two"), GREEN))
+        third = self.seen[2]["task"]
+        self.assertIn("from two", third)
+        self.assertNotIn("from one", third)
+
+    def test_carry_none_opts_out(self):
+        items = self.items(2)
+        items[1]["carry"] = "none"
+        server.run_chain(items, self.handler(self.reply(), GREEN))
+        self.assertEqual(self.seen[1]["task"], "step 2")
+
+    def test_a_halted_chain_carries_nothing_onward(self):
+        # Nothing to inherit from a link that did not deliver, and the links
+        # after it are skipped anyway.
+        out = server.run_chain(self.items(3), self.handler(self.reply(), RED))
+        self.assertEqual(len(self.seen), 2)
+        self.assertIn("SKIPPED", out)
+
+
 class SharedWorktree(Fixture):
     """One container for the whole chain -- the dependency the shape promises.
 
