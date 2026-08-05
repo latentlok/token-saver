@@ -49,9 +49,9 @@ All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9
 | A20 | DEALBREAKER | **done** | `MOCKED SEAM:` |
 | A21 | DEALBREAKER (method) | **not fixable in code** — see §5 | |
 | A22 | DEALBREAKER | **done** | `UNCALLED:` |
-| A23 | DEALBREAKER | open — **and its priority changed** | → §3.0 |
+| A23 | DEALBREAKER | **done** | `challenge_brief`, evidence-verified → §3.0 |
 
-**Score: 18 done, 1 partial, 4 open, 1 designed, 1 methodological.**
+**Score: 19 done, 1 partial, 3 open, 1 designed, 1 methodological.**
 
 Plus five defects found while *designing* the A14 replacement (DESIGN §9). Three exist
 today and are not in the ledger at all: **D1** the vacuous-pass guard counts skipped
@@ -142,15 +142,21 @@ Hard constraint held: a lone delegation and `qwen_query` are untouched.
 
 ## 3. The A14 replacement
 
-### 3.0 A23 `challenge_brief` is now a prerequisite, not a sibling
+### 3.0 ~~A23 `challenge_brief`~~ — **DONE** (`e7db573`)
 
-The ledger filed A23 alongside A14. The design changes that relationship: DESIGN §13
-concludes that **test-first without `challenge_brief` is worse than the problem it
-fixes**, because splitting the runs protects you from the worker while leaving the
-orchestrator's contract unfalsifiable — and it now has a green receipt behind it.
+`challenge_brief: true` runs one read-only pass before any building. An objection
+blocks **only when it cites a path that exists** — an unverifiable citation is an
+opinion, and a run stopped by one teaches callers to switch the feature off.
 
-So A23 moves *ahead* of the pipeline in build order. It was also the cheapest of the
-dealbreakers to begin with: ask the worker to object to the brief before building it.
+Live, same repo and worker, module storing integer cents:
+
+| brief | result |
+|---|---|
+| "the stored value is already in dollars" | **refused**, citing `store.py:1` and `:3` |
+| "return the stored integer cents" | **built**, no objection |
+
+It discriminates, which is the half that matters — a checker that blocks everything is
+not a checker.
 
 ### 3.1 Plumbing (ship independently)
 
@@ -241,7 +247,7 @@ which is exactly where A21 happened.
 
 0. ~~**A11 transport**~~ — **done** (`f1527b0`), concurrency unblocked
 1. **D1** (§2.2) — live hole, waits on nothing, one regex
-2. **A23 `challenge_brief`** (§3.0) — prerequisite for the pipeline being honest
+2. ~~**A23 `challenge_brief`**~~ — **done** (`e7db573`)
 3. ~~**Chain plumbing**~~ — **done** (`4af4936`), plus batch-of-chains (`95278a7`)
 4. **Extract `_delegate`'s post-run block** (§3.2) — 183 lines of independent analyses in a
    1041-line function the design adds four more things to. **Next up.**
