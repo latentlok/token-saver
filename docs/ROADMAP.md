@@ -238,8 +238,10 @@ which is exactly where A21 happened.
 
 ## 6. Decisions owed
 
-- **Version.** `.claude-plugin/plugin.json` still says `0.5.1`; root `CHANGELOG.md` has
-  no `0.6.0` entry. `docs/RELEASING.md` owns the sequence.
+- ~~**Version.**~~ **Decided: 0.6.0.** Bumped in `.claude-plugin/plugin.json`
+  and `qd/server.py` `SERVER_INFO` (they must stay equal), changelog entry
+  written. Remaining per `docs/RELEASING.md`: PR → CI → squash-merge → tag
+  `v0.6.0` on master → GitHub release.
 - **`reset_worktree()`** in `qd/gittree.py` — called only by its own spec since best-of-N
   was removed. Keep or drop.
 - **`qd/doctor.py` Ollama advice** — `OLLAMA_NUM_PARALLEL`, CONTEXT off `ollama ps`.
