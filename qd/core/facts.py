@@ -21,11 +21,20 @@ work reads as a false `COMMITTED` alarm, and after a release there is nothing
 left to look at. A fact gathered a moment too late leaves the receipt green and
 saying the wrong thing.
 
-Not yet frozen as a type. The detectors still write their results INTO this dict
-(`tf["uncalled"] = ...`), which is the exact facts/findings confusion §4
-describes -- and which extracting this made visible. They move out in step 2;
-the freeze lands with them.
+FROZEN, as of step 2. The detectors used to write their results back INTO this
+dict (`tf["uncalled"] = ...`) -- the exact facts/findings confusion §4 describes,
+and the thing extracting this module made visible. They now live in
+qd/features/detectors/ and RETURN findings, so nothing writes here any more and
+the record says so: a write raises instead of quietly succeeding.
+
+Why enforce it rather than document it. While the write was possible, an
+observation (`pubs`) and a judgement (`uncalled`) sat in one dict, indistinguish-
+able to every later reader, and any detector reading a written-back key silently
+depended on the order the calls happened to appear in. Comments do not stop that
+coming back; a TypeError does.
 """
+
+from types import MappingProxyType
 
 from qd.gittree import (
     snapshot, numstat_map, committed_during_run, head_sha, new_public_symbols,
@@ -37,7 +46,8 @@ def collect(work_cwd, pre_status, pre_sha_full):
 
     `pre_status` is the T0 dirty snapshot; `pre_sha_full` the T0 HEAD.
 
-    Returns a dict, or raises -- callers decide what an unobservable tree means.
+    Returns a READ-ONLY mapping, or raises -- callers decide what an
+    unobservable tree means.
     The engine treats it as "no facts" rather than failing the run, because a
     delivered unit whose tree could not be read is still delivered.
     """
@@ -48,11 +58,16 @@ def collect(work_cwd, pre_status, pre_sha_full):
     changed = sorted(
         p for p in set(list(post_status.keys()) + list(pre_status.keys()))
         if post_status.get(p) != pre_status.get(p))
-    return {
+    # MappingProxyType rather than a NamedTuple: every consumer reads this with
+    # [] or .get(), and buying immutability by breaking those would trade a
+    # silent failure for a noisy one across the whole renderer. Safe to freeze
+    # because nothing serialises this record -- engine.run() returns rendered
+    # text, and the per-run telemetry in runs.jsonl is built field by field.
+    return MappingProxyType({
         "post_status": post_status,
         "changed": changed,
         "numstat": numstat_map(work_cwd),
         "head_moved": committed_during_run(work_cwd, pre_sha_full),
         "head_now": head_sha(work_cwd),
         "pubs": new_public_symbols(work_cwd),
-    }
+    })

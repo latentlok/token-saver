@@ -183,6 +183,46 @@ class WhenAndHowManyTimes(Fixture):
         self.assertNotIn("only_main.py", got["changed"])
 
 
+class Frozen(Fixture):
+    """Step 2: the record is READ-ONLY once collected.
+
+    Not a nicety. The detectors used to write their results back into this
+    record -- `tf["uncalled"] = ...` -- and while that was possible, three
+    things were true: an observation (`pubs`) and a judgement (`uncalled`) were
+    indistinguishable to every later reader; any detector reading a written-back
+    key silently depended on the order the calls happened to appear in; and
+    removing a detector meant first proving nothing else relied on its
+    leftovers. Step 2 moved the detectors out. This makes going back an ERROR
+    rather than a style violation.
+
+    The rule a comment cannot enforce: FACTS ARE COMPUTED ONCE. Everything
+    downstream reads this as the tree AS IT WAS at collection time, and a
+    late write would make some reader's finding describe a tree nobody observed.
+    """
+
+    def test_a_fact_cannot_be_overwritten(self):
+        got = self.collect()
+        with self.assertRaises(TypeError):
+            got["changed"] = ["fabricated.py"]
+
+    def test_a_finding_cannot_be_smuggled_in_beside_the_facts(self):
+        # The exact regression: this is the line that used to live in the
+        # engine, and it is the one this freeze exists to stop.
+        got = self.collect()
+        with self.assertRaises(TypeError):
+            got["uncalled"] = {"out.py": ["run_threads"]}
+
+    def test_it_still_reads_like_a_mapping(self):
+        # Frozen must not mean awkward. Every consumer reads it with [] or
+        # .get(); breaking those to gain immutability would trade one silent
+        # failure for a louder one.
+        self.write("new.py", "x = 1\n")
+        got = self.collect()
+        self.assertIn("new.py", got["changed"])
+        self.assertEqual(got.get("nonexistent"), None)
+        self.assertIn("changed", got)
+
+
 class Behaviour(Fixture):
     """It is an extraction: the shape must match what the engine built inline."""
 
