@@ -416,6 +416,29 @@ def project_check(cwd):
     except Exception:
         pass
 
+    # Orphaned containers. A lone run disposes of its worktree inside the run;
+    # a CHAIN's container is held across every link and released only when the
+    # chain ends, so a chain that dies mid-flight leaves one with no owner.
+    # Reported, never removed: it holds work that passed its gate, and the
+    # caller may not have read the receipt yet.
+    try:
+        from qd import worktrees
+        orphans = worktrees.stale(cwd)
+        if orphans:
+            oldest = max(o["age_s"] for o in orphans) // 3600
+            out.append({
+                "id": "stale-worktrees", "severity": "info", "fixable": False,
+                "text": ("%d delegation worktree(s) untouched for >6h (oldest "
+                         "~%dh): %s. A chain that died mid-flight leaves its "
+                         "container behind. Each holds committed work -- merge "
+                         "or `git worktree remove` them."
+                         % (len(orphans), oldest,
+                            ", ".join(o["branch"] or o["path"]
+                                      for o in orphans[:4]))),
+            })
+    except Exception:
+        pass
+
     # A0d: several servers, possibly of different plugin versions, sharing one
     # .qwen-delegate/ directory and one machine-wide lock namespace. Eleven
     # were once alive on one box, the oldest three days stale.

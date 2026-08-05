@@ -250,5 +250,182 @@ class Routing(Fixture):
         self.assertNotIn(CHAIN_ARG, calls[0])
 
 
+class SharedWorktree(Fixture):
+    """One container for the whole chain -- the dependency the shape promises.
+
+    Before this, every link called `worktrees.acquire` for itself and, on
+    success, committed to its OWN branch without merging back. So under
+    `worktree: "auto"` link 2 opened a clean checkout of HEAD holding none of
+    link 1's files, and run_chain's own "link 2 builds on link 1's tree" was
+    true only under `"off"` -- the mode that takes the repo lock and serializes
+    every concurrent chain. Isolation XOR dependency, pick one.
+    """
+
+    def repo(self):
+        import subprocess
+        d = tempfile.mkdtemp()
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", d] + a, capture_output=True)
+        with open(os.path.join(d, "seed.txt"), "w") as f:
+            f.write("seed\n")
+        subprocess.run(["git", "-C", d, "add", "-A"], capture_output=True)
+        subprocess.run(["git", "-C", d, "commit", "-qm", "init"],
+                       capture_output=True)
+        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+            f.write('{"worktree": "auto"}')
+        return d
+
+    def test_every_link_is_lent_the_same_tree(self):
+        from qd.engine import WT_ARG
+        d = self.repo()
+        items = [{"task": f"s{i}", "cwd": d} for i in (1, 2, 3)]
+        server.run_chain(items, self.handler(GREEN, GREEN, GREEN))
+        lent = [a.get(WT_ARG) for a in self.seen]
+        self.assertTrue(all(lent), "a link ran without the chain's tree")
+        self.assertEqual(len({w["path"] for w in lent}), 1,
+                         "links did not share one container")
+        self.assertNotEqual(lent[0]["path"], d, "the chain ran in the main tree")
+
+    def test_link_two_sees_what_link_one_wrote(self):
+        # The end-to-end claim, and the only one that proves the plumbing:
+        # a real file, written by link 1 into the lent tree and committed,
+        # readable by link 2. Everything else here is bookkeeping.
+        from qd.engine import WT_ARG
+        d = self.repo()
+        seen_by_two = {}
+
+        def h(args):
+            wt = args[WT_ARG]["path"]
+            if args["task"] == "s1":
+                open(os.path.join(wt, "from_one.txt"), "w").write("hello\n")
+                import subprocess
+                subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True)
+                subprocess.run(["git", "-C", wt, "commit", "-qm", "link1"],
+                               capture_output=True)
+            else:
+                p = os.path.join(wt, "from_one.txt")
+                seen_by_two["exists"] = os.path.isfile(p)
+                seen_by_two["body"] = open(p).read() if os.path.isfile(p) else None
+            return GREEN
+
+        server.run_chain([{"task": "s1", "cwd": d}, {"task": "s2", "cwd": d}], h)
+        self.assertTrue(seen_by_two.get("exists"),
+                        "link 2 could not see link 1's file -- the chain is "
+                        "not a chain")
+        self.assertEqual(seen_by_two.get("body"), "hello\n")
+
+    def test_a_kept_container_reports_how_to_merge_it(self):
+        d = self.repo()
+        out = server.run_chain([{"task": "s1", "cwd": d}], self.handler(GREEN))
+        self.assertIn("=== chain worktree:", out)
+        self.assertIn("MERGE: git merge", out)
+
+    def test_a_halted_chain_keeps_what_already_passed(self):
+        # Link 1 delivered and its gate went green. Link 3 failing does not
+        # retract that, and releasing the container would delete it unseen.
+        d = self.repo()
+        items = [{"task": f"s{i}", "cwd": d} for i in (1, 2)]
+        out = server.run_chain(items, self.handler(GREEN, RED))
+        self.assertIn("chain halted, kept anyway", out)
+        branch = out.split("=== chain worktree: ")[1].split(" ===")[0]
+        import subprocess
+        p = subprocess.run(["git", "-C", d, "branch", "--list", branch],
+                           capture_output=True, text=True)
+        self.assertIn(branch, p.stdout, "the kept branch is gone")
+
+    def test_a_chain_that_committed_nothing_leaves_no_container(self):
+        d = self.repo()
+        out = server.run_chain([{"task": "s1", "cwd": d}], self.handler(RED))
+        self.assertNotIn("=== chain worktree:", out)
+        base = os.path.expanduser("~/.qwen-delegate/worktrees")
+        import subprocess
+        p = subprocess.run(["git", "-C", d, "branch", "--list", "qwen/*"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.stdout.strip(), "",
+                         "a chain that delivered nothing left a branch behind")
+
+    def test_an_in_tree_chain_is_untouched(self):
+        # `worktree: "off"` is the long-standing default and keeps the repo
+        # lock path. Nothing here may change it.
+        from qd.engine import WT_ARG
+        d = self.repo()
+        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+            f.write('{"worktree": "off"}')
+        server.run_chain([{"task": "s1", "cwd": d}], self.handler(GREEN))
+        self.assertNotIn(WT_ARG, self.seen[0])
+
+    def test_a_lone_delegation_is_never_lent_a_tree(self):
+        # The hard constraint on this change: a single delegation and
+        # qwen_query must behave exactly as before. A lone run acquires and
+        # disposes of its own container; only a chain lends one. Driven through
+        # the real routing seam with engine.run stubbed, so this fails if the
+        # lone path ever starts reading WT_ARG.
+        from qd import engine
+        from qd.engine import WT_ARG
+        d = self.repo()
+        seen = []
+        real = engine.run
+        engine.run = lambda a: (seen.append(a), GREEN)[1]
+        try:
+            server.run_delegate_batch({"cwd": d, "task": "solo"})
+        finally:
+            engine.run = real
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn(WT_ARG, seen[0])
+
+    def test_an_empty_chain_acquires_nothing(self):
+        d = self.repo()
+        server.run_chain([], self.handler())
+        import subprocess
+        p = subprocess.run(["git", "-C", d, "branch", "--list", "qwen/*"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.stdout.strip(), "")
+
+
+class ChainPreflight(Fixture):
+    """The shared pre-flight verdict must not cross a chain link boundary.
+
+    `_preflight_once` keys on (base sha, worktrees dir, gate) and justifies
+    itself with "every item is cut from the SAME base commit into its own clean
+    worktree, so that answer is identical for every item by construction".
+    True for a batch; false for chain link 2, whose tree deliberately holds
+    link 1's commits.
+    """
+
+    def test_sharing_off_actually_bypasses_the_cache(self):
+        # The mechanism the fix relies on: `isolated=False` must RUN the gate,
+        # not answer from the shared dict. If this ever silently starts caching
+        # regardless, chain link 2 would be graded on link 1's verdict and the
+        # bug returns with the fix still in place.
+        from qd import engine
+        d = tempfile.mkdtemp()
+        engine._preflight_forget()
+        runs = []
+        real = engine._run_verify_timed
+        engine._run_verify_timed = lambda c, w, t: (
+            runs.append(c), (True, "", 1, False))[1]
+        try:
+            for _ in range(2):
+                engine._preflight_once("gate", d, 5, "abc123", False)
+            self.assertEqual(len(runs), 2, "an unshared pre-flight was cached")
+            runs.clear()
+            for _ in range(2):
+                engine._preflight_once("gate", d, 5, "abc123", True)
+            self.assertEqual(len(runs), 1, "a shared pre-flight stopped sharing")
+        finally:
+            engine._run_verify_timed = real
+            engine._preflight_forget()
+
+    def test_a_chain_link_after_the_first_is_marked_unshareable(self):
+        # And the wiring: the engine decides from CHAIN_ARG's position, so the
+        # positions run_chain injects are what actually reach that decision.
+        from qd.engine import CHAIN_ARG
+        d = tempfile.mkdtemp()
+        server.run_chain([{"task": "a", "cwd": d}, {"task": "b", "cwd": d}],
+                         self.handler(GREEN, GREEN))
+        self.assertEqual([a[CHAIN_ARG]["pos"] for a in self.seen], [1, 2])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

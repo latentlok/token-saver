@@ -397,10 +397,11 @@ def run_chain(items, handler, on_partial=None):
     finishes: a submitted chain is the longest thing this server runs, and
     waiting for link 8 to read link 1 is what made it feel like a black box.
     """
-    from qd.engine import CHAIN_ARG
+    from qd.engine import CHAIN_ARG, WT_ARG
     n = len(items)
     out = []
     halted_at = halted_status = None
+    wt, wt_repo, committed = _chain_worktree(items)
     for k, item in enumerate(items, 1):
         if halted_at is not None:
             out.append(f"=== chain link {k}/{n}: skipped ===\n"
@@ -410,6 +411,8 @@ def run_chain(items, handler, on_partial=None):
             continue
         args = dict(item or {})
         args[CHAIN_ARG] = {"pos": k, "of": n}
+        if wt is not None:
+            args[WT_ARG] = wt
         acquired = []
         try:
             for g in _guards_for("qwen_delegate", args):
@@ -430,9 +433,83 @@ def run_chain(items, handler, on_partial=None):
         # A preflight-passed pass still moved the tree the next link builds on,
         # so it is green here for the same reason the worktree commit treats it
         # as green (U3.2, decision 4).
-        if status not in ("success", "success_but_preflight_passed"):
+        if status in ("success", "success_but_preflight_passed"):
+            committed.append(k)
+        else:
             halted_at, halted_status = k, status
+    trailer = _release_chain_worktree(wt, wt_repo, committed, n)
+    if trailer:
+        out.append(trailer)
     return CHAIN_SEP.join(out)
+
+
+def _chain_worktree(items):
+    """Acquire ONE container for the whole chain. Returns (wt, repo, []).
+
+    A chain's links are dependent by definition, so they must share a tree.
+    Acquiring per link -- which is what `engine.delegate` does for a lone run --
+    gave link 2 a clean checkout of HEAD with none of link 1's work in it, and
+    made run_chain's own "link 2 builds on link 1's tree" false under
+    `worktree: "auto"`.
+
+    Best-effort: a repo that cannot produce a worktree (unborn HEAD, git too
+    old, disk full) falls back to per-link behaviour rather than failing the
+    chain. That is the pre-existing shape, not an improvement on it.
+    """
+    from qd import engine, worktrees
+    first = next((i for i in items if isinstance(i, dict)), None)
+    if first is None:
+        return None, None, []
+    repo = first.get("cwd")
+    if not repo or engine.worktree_mode(first, repo) != "auto":
+        return None, None, []          # in-tree chains keep the repo lock path
+    try:
+        return worktrees.acquire(repo), repo, []
+    except Exception as e:
+        log(f"chain worktree unavailable ({e!r}); links run in-tree")
+        return None, None, []
+
+
+def _release_chain_worktree(wt, repo, committed, n):
+    """Dispose of the chain's container; return a trailer block or ''.
+
+    KEPT when any link committed, even if a later one halted the chain. The
+    lone-run rule is "green keeps, red releases", but releasing here would
+    delete work that ALREADY PASSED its gate -- link 3 failing does not retract
+    link 1's delivery, and a caller who cannot see it cannot decide what to do
+    about it. Released only when nothing was committed, which is the same
+    "nothing to keep" case the lone run is really expressing.
+    """
+    from qd import worktrees
+    if wt is None:
+        return ""
+    if not committed:
+        try:
+            worktrees.release(repo, wt["path"], wt["branch"])
+        except Exception:
+            pass
+        return ""
+    # WORKTREE:/MERGE: in the SAME shape verdict.render emits for a lone
+    # worktree run, so a chain's container is merged by the caller with the
+    # same two lines and no new protocol to learn. (`worktrees.merge_lines`
+    # looks like the helper for this and is not: it takes a dict, while
+    # classify_merge returns the bare string the renderer switches on.)
+    lines = [f"=== chain worktree: {wt['branch']} ===",
+             f"{len(committed)} of {n} link(s) committed"
+             f"{'' if len(committed) == n else ' -- chain halted, kept anyway'}",
+             f"WORKTREE: {wt['path']}"]
+    try:
+        merge = worktrees.classify_merge(repo, wt["branch"])
+    except Exception:
+        merge = None
+    if merge == "clean":
+        lines.append(f"MERGE: git merge --no-edit {wt['branch']} && "
+                     f"git worktree remove {wt['path']} && "
+                     f"git branch -d {wt['branch']}")
+    elif merge == "conflict":
+        lines.append(f"MERGE: CONFLICT -- contract overlap with "
+                     f"{wt['branch']}; escalate, do not force")
+    return "\n".join(lines)
 
 
 def _shape_refusal(args):
@@ -472,6 +549,7 @@ def run_delegate_batch(args, on_partial=None):
         return run_batch(_inherit(args, args["batch"]), engine.run,
                          on_partial=on_partial)
     return engine.run(args)
+
 
 
 # Call-level fields an item inherits when it does not state its own. `cwd` is

@@ -72,6 +72,24 @@ _DEFAULT_BURN_BUDGET = 10_000_000
 # hand-written call cannot claim to be link 3 of a chain that never ran.
 CHAIN_ARG = "_chain"
 
+# The worktree a chain LENDS to each of its links. Reserved for the same reason
+# CHAIN_ARG is: only run_chain may set it, so a hand-written call cannot point a
+# delegation at a container it does not own.
+#
+# A chain is the dependent shape -- "link 2 builds on link 1's tree" -- and that
+# sentence was false under `worktree: "auto"`. Every link acquired its OWN tree
+# from HEAD and, on success, committed to its own branch without merging back
+# (see the disposition block below), so link 2 opened a clean checkout with none
+# of link 1's files in it. The dependency the shape promises simply was not
+# implemented; `"off"` was the only mode where it held, and that mode takes the
+# repo lock and serializes every concurrent chain.
+#
+# A lent worktree is USED but never disposed of: the link commits into it (which
+# is what makes link 1's files both visible AND tracked, so spec_globs can
+# protect them from link 2), and the chain decides at the end whether to keep or
+# release the container.
+WT_ARG = "_worktree"
+
 # U5.2, same reserved-arg convention: the submitted run's id, and the result of
 # the preconditions the server already ran. Both are injected by qd/server.py
 # on the way into a background delegation and are absent from the schema -- a
@@ -960,7 +978,15 @@ def _delegate(args, t0_dir):
     # --- Worktree acquisition (M4 seam 1) ---
     work_cwd = cwd
     wt = None
-    if wt_mode == "auto":
+    wt_owned = True          # whether THIS run may dispose of the container
+    lent = args.get(WT_ARG)
+    if isinstance(lent, dict) and lent.get("path"):
+        # A chain link running in the chain's tree (see WT_ARG). Used, never
+        # disposed of -- the chain outlives this link and owns the container.
+        wt = lent
+        wt_owned = False
+        work_cwd = wt["path"]
+    elif wt_mode == "auto":
         wt = worktrees.acquire(cwd)
         work_cwd = wt["path"]
 
@@ -970,8 +996,12 @@ def _delegate(args, t0_dir):
         The preconditions above run before any container exists; the gate
         refusals below do not, and returning straight out of one would leave
         the worktree and its branch behind for every refused run.
+
+        A LENT tree is exempt: releasing it here would delete the tree the
+        chain's earlier links already committed into, on a refusal that only
+        concerns this link.
         """
-        if wt is not None:
+        if wt is not None and wt_owned:
             worktrees.release(cwd, wt["path"], wt["branch"])
         return _refusal(text, max_iter)
 
@@ -1032,8 +1062,20 @@ def _delegate(args, t0_dir):
     gate_timed_out = False
     self_min = None
     if verify:
+        # `_preflight_once` shares one verdict across items keyed on
+        # (base sha, worktrees dir, gate), and its stated invariant is that
+        # "every item is cut from the SAME base commit into its own clean
+        # worktree, so that answer is identical for every item by
+        # construction". True for a batch. FALSE for a chain link after the
+        # first: its tree deliberately holds the previous links' commits, which
+        # is the entire point of a chain. Tiers make the collision likelier
+        # rather than rarer -- once projects declare `tests`, every pipeline's
+        # gate becomes the same command string, so concurrent chains from one
+        # base would share a key while holding genuinely different trees.
+        _pos = (args.get(CHAIN_ARG) or {}).get("pos") or 1
+        shareable = wt is not None and _pos == 1
         preflight, preflight_out, gate_ms, gate_timed_out = _preflight_once(
-            verify, work_cwd, verify_timeout, pre_sha_full, wt is not None)
+            verify, work_cwd, verify_timeout, pre_sha_full, shareable)
         if self_gate and preflight:
             # Incremental ratchet: an existing suite is already green, so this
             # gate proves nothing -- and every later feature would read as
@@ -1794,8 +1836,19 @@ def _delegate(args, t0_dir):
             git(work_cwd, "commit", "-m", f"qwen delegation {wt['branch']}")
             ctx["worktree"] = {"path": wt["path"], "branch": wt["branch"],
                                "dirty": wt.get("dirty")}
-            ctx["merge"] = worktrees.classify_merge(cwd, wt["branch"])
-        else:
+            # The commit above is what a LENT tree needs most: it makes this
+            # link's files visible to the next one AND tracked, so `spec_globs`
+            # can protect them (spec_files() is `git ls-files` -- an untracked
+            # new test is unprotected, and the next link could rewrite the gate
+            # it is supposed to be graded by).
+            #
+            # The merge classification is skipped for a lent tree: it compares
+            # the branch against the MAIN repo, which for an intermediate link
+            # describes work the chain has not finished. run_chain classifies
+            # once, at the end, when the answer means something.
+            if wt_owned:
+                ctx["merge"] = worktrees.classify_merge(cwd, wt["branch"])
+        elif wt_owned:
             worktrees.release(cwd, wt["path"], wt["branch"])
 
     # --- Compute cost_usd ---
