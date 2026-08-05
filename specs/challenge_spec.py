@@ -82,8 +82,15 @@ class Decision(unittest.TestCase):
             lambda *a, **k: (text, [], "s1", None, {})
 
     def call(self):
+        """The objection only. `_challenge_brief` also returns the executor
+        meta, because the pass is a real call whose tokens must land in the
+        run's totals -- see TelemetryIsAccounted."""
         return engine._challenge_brief({"name": "p"}, "do the thing",
-                                       self.cwd, 60)
+                                       self.cwd, 60)[0]
+
+    def meta(self):
+        return engine._challenge_brief({"name": "p"}, "do the thing",
+                                       self.cwd, 60)[1]
 
     def test_none_proceeds(self):
         self.reply("Looks fine.\nCHALLENGE: none\n")
@@ -157,8 +164,78 @@ class Decision(unittest.TestCase):
         self.assertIn("CHALLENGE:", seen["suffix"])
 
 
-class OffByDefault(unittest.TestCase):
+class TelemetryIsAccounted(Decision):
+    """The pass is a real executor call and now runs on EVERY delegation.
+
+    Discarding its telemetry would put its tokens in nobody's BURN and nobody's
+    COST -- the same defect class as a metric that reads 0 without measuring,
+    except paid once per run rather than once ever.
+    """
+
+    def test_the_meta_comes_back_for_the_caller_to_fold_in(self):
+        engine.invoke.run_executor = lambda *a, **k: (
+            "CHALLENGE: none", [], "s", None,
+            {"stats": {"tokens": {"prompt": 900, "completion": 20}}})
+        self.assertEqual(self.meta()["stats"]["tokens"]["prompt"], 900)
+
+    def test_its_tokens_sum_into_the_run_total(self):
+        from qd.invoke import cum_zero, accum_stats
+        cum = cum_zero()
+        engine.invoke.run_executor = lambda *a, **k: (
+            "CHALLENGE: none", [], "s", None,
+            {"stats": {"tokens": {"prompt": 900, "completion": 20}}})
+        accum_stats(cum, self.meta().get("stats"), attempt=False)
+        self.assertEqual(cum["tokens"]["prompt"], 900)
+        # ...without pretending an attempt happened. The pass is not an attempt.
+        self.assertEqual(cum["attempts"], 0)
+
+    def test_an_unverified_objection_is_recorded_even_though_it_cannot_block(self):
+        # Otherwise it exists nowhere a human looks: not in the status, not in
+        # the trail, and by design not in the refusal.
+        self.reply("CHALLENGE: I have a bad feeling\nEVIDENCE: nope.py\n")
+        self.assertIn("bad feeling", self.meta()["challenge_unverified"])
+
+    def test_a_clean_pass_records_no_objection(self):
+        self.reply("CHALLENGE: none\n")
+        self.assertIsNone(self.meta().get("challenge_unverified"))
+
+
+class Receipt(unittest.TestCase):
+    """The pass has to be visible, or a caller cannot tell it ran."""
+
+    def render(self, challenge):
+        from qd import verdict
+        from qd.invoke import cum_zero
+        ctx = {"cwd": ".", "guard_on": False, "preflight": False,
+               "cum": cum_zero(), "peak": 0, "challenge": challenge,
+               "changed": [], "denials": [], "notes": "", "worktree": None,
+               "merge": None, "graph_line": None, "refs_added": [],
+               "bootstrap_note": None, "session_hint": None}
+        return verdict.render("success", "s1", ["a"], "done", [], 3, ctx)
+
+    def test_a_clean_pass_says_so(self):
+        out = self.render({"ran": True, "unverified": None})
+        self.assertIn("CHALLENGE: brief reviewed against the code", out)
+
+    def test_an_unverified_objection_reaches_the_receipt(self):
+        out = self.render({"ran": True,
+                           "unverified": "the module looks wrong to me"})
+        self.assertIn("could not cite a real path", out)
+        self.assertIn("looks wrong to me", out)
+
+    def test_a_run_that_skipped_the_pass_says_nothing(self):
+        # challenge_brief: false must leave the receipt byte-identical.
+        self.assertNotIn("CHALLENGE:", self.render(None))
+
+
+class DefaultOn(unittest.TestCase):
     """C9: absence leaves behaviour identical."""
+
+    def test_the_schema_says_it_is_on_by_default(self):
+        import json
+        from qd import schemas
+        d = json.dumps(schemas.TOOL["inputSchema"]["properties"]["challenge_brief"])
+        self.assertIn("ON by default", d)
 
     def test_the_param_is_in_the_schema(self):
         import json
@@ -176,20 +253,24 @@ class OffByDefault(unittest.TestCase):
         # the first attempt already asked.
         self.assertIn("challenge_brief", engine.BRIEF_KEYS)
 
-    def test_nothing_runs_when_the_flag_is_absent(self):
-        called = []
-        real = engine._challenge_brief
-        engine._challenge_brief = lambda *a, **k: called.append(1)
-        try:
-            # The guard is a plain truthiness check on the arg; assert the
-            # shape rather than driving a whole delegation.
-            for args in ({}, {"challenge_brief": False},
-                         {"challenge_brief": None}):
-                if args.get("challenge_brief"):
-                    engine._challenge_brief()
-        finally:
-            engine._challenge_brief = real
-        self.assertEqual(called, [])
+    def test_false_is_honoured_and_not_chained_past(self):
+        # `false` is a real answer. Resolving with `or` would fall through it
+        # to the config layer and silently re-enable what the caller just
+        # switched off -- the bug that made this an explicit-None chain.
+        for explicit, cfgv, glob, want in (
+                (False, True, True, False),    # caller says no, config says yes
+                (None, False, True, False),    # project says no
+                (None, None, False, False),    # machine says no
+                (None, None, None, True),      # nobody says -> ON
+                (True, False, False, True)):   # caller says yes
+            v = explicit
+            if v is None:
+                v = cfgv
+            if v is None:
+                v = glob
+            if v is None:
+                v = True
+            self.assertEqual(bool(v), want, (explicit, cfgv, glob))
 
 
 if __name__ == "__main__":

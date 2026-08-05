@@ -134,7 +134,7 @@ TOOL = json.loads(r'''
       },
       "challenge_brief": {
         "type": "boolean",
-        "description": "Ask the worker to OBJECT to the brief before building it (read-only, one short pass). A worker-written gate is your brief restated as an assertion, so a wrong requirement becomes a green test defending the defect -- and `preflight_expect` is blind to it (red before, green after is what a confidently-built defect looks like too). The run is refused only when the objection cites a path that EXISTS; unverifiable objections never block. Worth it for correctness-critical or ambiguous briefs, and for the gate-writing link of a test-first chain."
+        "description": "ON by default: the worker reads the code and may OBJECT to the brief before building it (read-only, one short pass). A worker-written gate is your brief restated as an assertion, so a wrong requirement becomes a green test defending the defect -- and `preflight_expect` is blind to it (red before, green after is what a confidently-built defect looks like too). The run is refused only when the objection cites a path that EXISTS; unverifiable objections never block. Pass `false` to decline it, or set `challenge_brief` in .qwen-delegate.json / machine config."
       },
       "verify_timeout_sec": {
         "type": "integer",

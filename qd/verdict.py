@@ -747,6 +747,22 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             + ", ".join(strays[:6]) + (" ..." if len(strays) > 6 else "")
             + " -- worker debris; review or rm.", True, 1))
 
+    # CHALLENGE: the pre-build objection pass (A23), on by default. Two things
+    # are worth a line and neither is visible otherwise: that the pass RAN (a
+    # green receipt means more when something tried to stop it), and an
+    # objection that could not be verified -- recorded but deliberately not
+    # blocking, so without this line it would exist nowhere a human looks.
+    ch = ctx.get("challenge")
+    if isinstance(ch, dict) and ch.get("ran"):
+        if ch.get("unverified"):
+            c2_blocks.append(
+                (f"CHALLENGE: worker objected but could not cite a real path, "
+                 f"so the run proceeded -- \"{truncate(ch['unverified'], 160)}\"",
+                 False, -1))
+        else:
+            c2_blocks.append(("CHALLENGE: brief reviewed against the code, "
+                              "no objection", False, -1))
+
     worktree = ctx.get("worktree")
     if worktree:
         wt_line = f"WORKTREE: {worktree['path']}"

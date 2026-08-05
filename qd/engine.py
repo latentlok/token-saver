@@ -209,8 +209,16 @@ def _ensure_self_gate(work_cwd, min_override=None):
 def _challenge_brief(profile, task, work_cwd, timeout, session_id=None):
     """Ask the worker to object to the brief BEFORE building it (A23).
 
-    Returns (objection, evidence) when the brief is challenged with a path that
-    EXISTS, else None. Read-only: plan mode, no gate, nothing written.
+    Returns (objection|None, meta). The objection is (why, evidence) only when
+    the brief is challenged AND the evidence names a path that EXISTS.
+
+    `meta` comes back so the caller can fold this pass into the run's totals.
+    It is a real executor call: discarding its telemetry would put its tokens
+    in nobody's BURN and nobody's COST, which is the same defect class as a
+    metric that reads 0 without measuring -- and it would land on EVERY
+    delegation now that the pass is on by default.
+
+    Read-only: plan mode, no gate, nothing written.
 
     The finding: a worker-written gate is the brief restated as an assertion,
     so a wrong requirement becomes a green test defending the defect. Measured
@@ -234,23 +242,28 @@ def _challenge_brief(profile, task, work_cwd, timeout, session_id=None):
     # feature looked like it worked. A question that cannot fail a run must
     # still be allowed to fail loudly when it is broken.
     try:
-        text, _, _, err, _ = invoke.run_executor(
+        text, _, _, err, meta = invoke.run_executor(
             profile, f"Review this brief.\n\nBRIEF:\n{task}", work_cwd,
             "plan", timeout, session_id, suffix=verdict.CHALLENGE_SUFFIX)
     except Exception:
-        return None                  # endpoint down, timeout, profile fault
+        return None, {}              # endpoint down, timeout, profile fault
+    meta = meta or {}
     if err or not text:
-        return None
+        return None, meta
     parsed = verdict.parse_handoff(text)
     raw = (parsed.get("CHALLENGE") or "").strip()
     if not raw or raw.lower().rstrip(".") in ("none", "no", "n/a"):
-        return None
+        return None, meta
     ev = (parsed.get("EVIDENCE") or "").strip()
     for token in re.split(r"[\s,;]+", ev):
         path = token.strip("`'\"").split(":")[0]
         if path and os.path.exists(os.path.join(work_cwd, path)):
-            return raw, ev
-    return None
+            return (raw, ev), meta
+    # Objected but could not point at it. Recorded, never blocking -- see the
+    # docstring: a run stopped by an unverifiable citation teaches callers to
+    # switch the pass off, and it takes the real objections with it.
+    meta["challenge_unverified"] = raw
+    return None, meta
 
 
 def _repo_relative(paths, work_cwd):
@@ -1221,6 +1234,7 @@ def _delegate(args, t0_dir):
         "notes": "",
         "worktree": None,
         "merge": None,
+        "challenge": None,
         "graph_line": None,
         "refs_added": [],
         "cost_usd": 0.0,
@@ -1276,9 +1290,31 @@ def _delegate(args, t0_dir):
     # cannot run is a worse problem than a brief that is wrong, and there is no
     # point asking about a brief for a run that GATE UNUSABLE will refuse
     # anyway. This is the last moment before any tokens are spent building.
-    if args.get("challenge_brief"):
-        objection = _challenge_brief(profile, task, work_cwd, timeout,
-                                     session_id)
+    # DEFAULT ON. A23 is the failure a caller cannot see from the receipt: a
+    # wrong requirement becomes a green test defending the defect, and every
+    # signal downstream reads as success. Opt-in safety does not get opted into
+    # -- the same measurement A14 rests on -- so the flag is inverted here and
+    # `challenge_brief: false` is how a caller declines it.
+    #
+    # Resolved with explicit None checks rather than `or`: `false` is a real
+    # answer, and `or` chaining would fall through it to the next layer and
+    # silently re-enable what the caller just switched off.
+    challenge = args.get("challenge_brief")
+    if challenge is None:
+        challenge = cfg.get("challenge_brief")
+    if challenge is None:
+        challenge = _global_config().get("challenge_brief")
+    if challenge is None:
+        challenge = True
+    if challenge:
+        objection, ch_meta = _challenge_brief(profile, task, work_cwd, timeout,
+                                              session_id)
+        # Folded into the run's totals BEFORE the refusal branch, so a caller
+        # who does get a receipt sees what the pass cost. accum_stats does not
+        # touch `attempts`, so the attempt count still means attempts.
+        accum_stats(ctx["cum"], (ch_meta or {}).get("stats"), attempt=False)
+        ctx["challenge"] = {"ran": True,
+                            "unverified": (ch_meta or {}).get("challenge_unverified")}
         if objection:
             why, evidence = objection
             return refuse(

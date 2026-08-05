@@ -137,6 +137,16 @@ class Fixture(unittest.TestCase):
                        check=True)
         subprocess.run(["git", "-C", self.cwd, "config", "user.name", "s"],
                        check=True)
+        # challenge_brief is ON by default and spends one executor call before
+        # the attempt loop. These specs drive a STUBBED executor with a queue of
+        # canned replies, so leaving it on has the challenge eat reply #1 and
+        # shifts every assertion about attempts by one -- a whole suite failing
+        # for a reason none of its tests are about. Switched off at the PROJECT
+        # layer so it covers the inline `engine.run({...})` call sites too, not
+        # just the shared delegate() helper. Its own behaviour is pinned by
+        # specs/challenge_spec.py.
+        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+            f.write('{"challenge_brief": false}\n')
         with open(os.path.join(self.cwd, "guard_spec.py"), "w") as f:
             f.write("PROTECTED = 1\n")
         with open(os.path.join(self.cwd, "QWEN.md"), "w") as f:
@@ -206,9 +216,17 @@ class Fixture(unittest.TestCase):
                        check=True)
 
     def delegate(self, **over):
+        # challenge_brief is ON by default and costs one executor call before
+        # the attempt loop. These specs drive a STUBBED executor with a queue of
+        # canned replies, so leaving it on would have the challenge eat reply #1
+        # and shift every assertion about attempts by one -- a whole suite
+        # failing for a reason none of its tests are about. The challenge has
+        # its own spec (specs/challenge_spec.py); here it is switched off so
+        # each test keeps testing the one thing it names.
         args = {"task": "build out.py with MARKER", "cwd": self.cwd,
                 "verify": "grep -q MARKER out.py", "approval_mode": "auto-edit",
-                "executor": "stub", "max_iterations": 3}
+                "executor": "stub", "max_iterations": 3,
+                "challenge_brief": False}
         args.update(over)
         return engine.delegate(args)
 

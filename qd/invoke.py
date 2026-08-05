@@ -544,13 +544,20 @@ def tok_add(dst, src):
     return dst
 
 
-def accum_stats(cum, st):
+def accum_stats(cum, st, attempt=True):
     """
     Sum one attempt's telemetry into the run total.
 
     ctx["meta"] holds only the LAST attempt, so a 3-attempt run costs roughly 3x what a
     last-attempt reading reports. Cost accounting has to see the whole run: the iterate
     loop is precisely where free tokens get spent.
+
+    `attempt=False` for executor calls that are NOT tries at the task -- the
+    pre-build `challenge_brief` pass is the first. Their tokens are real and
+    must land in BURN and COST, but `ATTEMPTS: 2/3` on a receipt means two
+    tries at the work, and a question asked before any work is not one of them.
+    Folding them in with attempt=True would make every receipt over-report by
+    one and quietly change what the number means.
     """
     st = st or {}
     for k in ("tokens", "tokens_main", "tokens_overhead"):
@@ -569,7 +576,8 @@ def accum_stats(cum, st):
     cum["token_source"] = ("usage" if "usage" in seen
                            else "blended" if "blended" in seen
                            else "bySource" if "bySource" in seen else "none")
-    cum["attempts"] = (cum.get("attempts") or 0) + 1
+    if attempt:
+        cum["attempts"] = (cum.get("attempts") or 0) + 1
     return cum
 
 
