@@ -23,6 +23,43 @@ original cost. It is evidence, it is long, and the roadmap quotes what matters.
 
 ---
 
+## Do NOT read the codebase into context
+
+`qd/` is ~9,400 lines. Reading it is both unnecessary and against the point of
+this product — the whole thesis is that a smart model orchestrates and does not
+ingest source.
+
+**Read this much and no more (~600 lines total):**
+
+| For | Read |
+|---|---|
+| the plan | the design doc's §4 (facts vs findings) and §8 (the steps) |
+| step 1 | `qd/engine.py` from `# --- Tree facts (C3) ---` to `# --- Advisory gates ---` — about 50 lines |
+| what the detectors expect | the public signatures in `qd/gittree.py` — `grep '^def ' qd/gittree.py` |
+| the shape a spec takes | one existing spec, e.g. `specs/challenge_spec.py` |
+
+**Locate code without reading it.** The repo has a structural graph
+(`graphify-out/`, ~2.4 MB, no LLM involved):
+
+```
+graphify explain "delegate()"          # what a symbol connects to
+graphify query "how are facts computed" --budget 2000
+graphify affected "new_public_symbols" # who breaks if this changes
+graphify god-nodes --top 10            # the hubs, i.e. where the risk is
+graphify update . --no-cluster         # refresh after your own edits
+```
+
+That is how the numbers in the design doc were produced. Rebuild it once at the
+start; it takes seconds and costs nothing.
+
+**Use the plugin on itself.** `qwen_query` answers questions about this codebase
+on free tokens without spending your context. Answers are leads to verify, not
+truth — every one carries a `VERIFY:` list.
+
+If you find yourself opening a fifth file, stop and ask the graph instead.
+
+---
+
 ## The problem, in one paragraph
 
 Adding one feature (`challenge_brief`) took five edits across four modules with
