@@ -819,3 +819,40 @@ It also argues for where to spend the next sweep. The logic in this repo is
 well covered; both holes were in the wiring between a tested mechanism and its
 call site. §1 of the modularity design says the same thing from the other
 direction — *the logic is not tangled, the wiring is*.
+
+## Live verification of the v0.6 restructure (steps 2-5)
+
+Steps 2-5 were built against a hermetic suite and a golden receipt harness. Both
+prove a MOVE was faithful; neither proves the thing works against a real model on
+real hardware. One tiny delegation against `snowy` (Qwen3.6-27B, vLLM), on a
+throwaway repo, with `worktree="auto"` so every new component sat on the critical
+path.
+
+**Result: success in 17s, gate green, 512 output tokens.** Every piece of new
+machinery appeared in the receipt:
+
+    UNCALLED: 1 new public symbol(s)... add (mathlib.py)     steps 2+3
+    WORKTREE: ... / MERGE: git merge --no-edit qwen/r08c1ec  step 5
+    CHALLENGE: brief reviewed against the code, no objection step 4
+
+**Then the receipt was mutation-checked live**, because a live test that passes
+with and without the change is testing nothing (the rule this repo learned the
+hard way on A11):
+
+| Live mutation | Effect on the real receipt |
+|---|---|
+| `uncalled` unregistered from `DETECTORS` | UNCALLED line gone; `NEW PUBLIC SURFACE` (an older, separate mechanism) still present — so the line genuinely comes from the step-2 registry |
+| `RunScope._GREEN = ()` — a green run treated as red | `WORKTREE:` and `MERGE:` gone, the delivered code released |
+
+The second is worth recording in full, because it is what the ownership rule
+exists to prevent and it is far more alarming seen than described. The receipt
+read:
+
+    STATUS: success
+    CHANGED: 2 file(s)
+
+...with no `WORKTREE:` line, because the work had just been deleted. **A green
+receipt for code that no longer exists.** Nothing in the status, the changed-file
+list or the gate output contradicts it — the only signal is the ABSENCE of a
+line. Same shape as every other hole found in this round: the failure looks like
+success.
