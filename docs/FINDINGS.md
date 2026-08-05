@@ -765,3 +765,57 @@ heading wrong.
 **Stateless by default is load-bearing.** A fresh session re-reads QWEN.md — which is
 what makes the rules bind at all — and stops one task's reasoning contaminating the next.
 Use `session_id` only for tight follow-ups on the same task.
+
+## Mutation sweep of the safety surface (v0.6 restructure)
+
+Three safety mechanisms were found unpinned *by accident* while restructuring —
+each one touched for an unrelated reason, each one passing a fully green suite
+while broken. That is not a run of bad luck; it is a shape. So the remaining
+guards were swept deliberately: break one, run the whole suite, record whether
+anything notices.
+
+**12 guards swept. 10 pinned, 2 unpinned.** Both holes were *wiring*, not logic
+— in each case the mechanism itself had a passing test and the thing that
+connected it did not.
+
+| Guard | Result |
+|---|---|
+| spec revert does nothing | pinned |
+| **engine passes `base=None` to the spec revert** | **UNPINNED** |
+| `reset_worktree` uses `-fdx` (eats a gitignored venv) | pinned |
+| `violated_specs` never finds anything | pinned |
+| child inherits the server's stdin (×2 sites) | pinned |
+| touch-scope edits are not reverted | pinned |
+| the burn budget never stops a run | pinned |
+| **a real `*_spec.py` edit is not classified** | **UNPINNED** |
+| a scope violation no longer sets its status | pinned |
+| `gate_suspect` never fires | pinned |
+| the brief file is not restored after a worker edit | pinned |
+
+**Hole 1 — the revert's base.** `gittree.revert_specs` handles a *committed*
+sabotage correctly and has its own test, which passes `base=pre_sha`
+explicitly. Nothing checked that the engine supplies it. With `base=None`, a
+worker that commits its spec edit has HEAD holding the weakened spec, so the
+revert restores the sabotage faithfully — the guard runs, reports success, and
+hands back a spec the worker wrote. That is the single thing the spec guard
+exists to prevent, because a gate from a different hand is what makes a green
+receipt mean anything (§I).
+
+**Hole 2 — the classification.** Both pre-existing `spec_violation` assertions
+were *playbook* edits, which take their own branch in the status cascade. A
+genuine `*_spec.py` edit had no status assertion anywhere, so the cascade could
+stop classifying it and the run would report `verify_failed` — a gate that did
+not pass, rather than a worker that touched the gate.
+
+**The transferable part.** Every hole found today — these two plus the
+`DISPATCH` line, the receipt's drop order, and the gate refusal — shares one
+property: *the failure looks like success*. A suite built by asking "does this
+work?" never covers them, because they all answer yes right up until the moment
+the answer stops mattering. The question that finds them is "what would still
+be green if this stopped working?", and the only way to ask it is to break the
+thing and look.
+
+It also argues for where to spend the next sweep. The logic in this repo is
+well covered; both holes were in the wiring between a tested mechanism and its
+call site. §1 of the modularity design says the same thing from the other
+direction — *the logic is not tangled, the wiring is*.

@@ -73,6 +73,13 @@ for rel, content in (step.get("write") or {}).items():
 # scoped); the touch-scope classifier must not read that as "pre-existing".
 for rel in (step.get("git_add") or []):
     subprocess.run(["git", "add", rel], cwd=os.getcwd())
+# A worker outside `scoped` has no hook denying `git commit`, so committing its
+# own sabotage is available to it -- and that is the case revert_specs' `base`
+# argument exists for. Without this the stub could only ever produce the easy
+# half of the problem.
+if step.get("git_commit"):
+    subprocess.run(["git", "add", "-A"], cwd=os.getcwd())
+    subprocess.run(["git", "commit", "-qm", step["git_commit"]], cwd=os.getcwd())
 # Stand in for scoped_hook.py's log files (deny + the C10 allow-side pair).
 for env_key, step_key in (("QGATE_DENYLOG", "deny_log"),
                           ("QGATE_WRITELOG", "write_log"),
@@ -413,6 +420,59 @@ class GateRefusalReachesTheCaller(Fixture):
         r = self.delegate(challenge_brief=True)
         self.assertIn("EVIDENCE:", r["result_text"])
         self.assertIn("Correct the brief and re-send", r["result_text"])
+
+
+class SpecGuardWiring(Fixture):
+    """The engine must thread T0 into the revert -- not just call it.
+
+    Found by the step-4 mutation sweep. `gittree.revert_specs` handles a
+    COMMITTED sabotage correctly and has its own test
+    (gittree_spec.test_committed_spec_edit_hole_closed_by_base, which passes
+    base=pre_sha explicitly). What nothing checked was that the ENGINE supplies
+    that base. Changing the call site to `base=None` left all 1,059 tests green.
+
+    The consequence is the exact failure the docstring warns about: if the
+    worker committed its edit, HEAD now holds the WEAKENED spec, so restoring
+    from HEAD faithfully restores the sabotage. The guard runs, reports itself
+    as having reverted, and hands back a spec the worker wrote -- which is the
+    one thing the spec guard exists to make impossible, because the gate coming
+    from a different hand is what makes a green receipt mean anything at all
+    (PRINCIPLES §I).
+
+    Tested logic and untested wiring is the theme of this restructure: the
+    logic is not tangled, the wiring is.
+    """
+
+    WEAK = "WEAKENED = True\n"
+
+    def test_a_committed_spec_sabotage_is_reverted_to_its_pre_run_content(self):
+        self.steps([{"write": {"guard_spec.py": self.WEAK},
+                     "git_commit": "sabotage"}])
+        r = self.delegate(max_iterations=1)
+        with open(os.path.join(self.cwd, "guard_spec.py")) as f:
+            body = f.read()
+        self.assertNotIn("WEAKENED", body,
+                         "the committed sabotage was restored as-is")
+        self.assertEqual(body, "PROTECTED = 1\n")
+        self.assertIn("SPEC VIOLATION", r["trail"][0].upper())
+
+    def test_an_uncommitted_spec_edit_is_still_reverted(self):
+        # The control. The committed case must not be fixed by breaking the
+        # ordinary one, which is the overwhelmingly common path.
+        self.steps([{"write": {"guard_spec.py": self.WEAK}}])
+        self.delegate(max_iterations=1)
+        with open(os.path.join(self.cwd, "guard_spec.py")) as f:
+            self.assertEqual(f.read(), "PROTECTED = 1\n")
+
+    def test_a_real_spec_edit_is_classified_as_a_spec_violation(self):
+        # Both pre-existing `spec_violation` assertions are PLAYBOOK edits,
+        # which take their own branch in the status cascade. A genuine
+        # `*_spec.py` edit had no status assertion at all, so the cascade could
+        # stop classifying it and the run would report `verify_failed` -- a
+        # gate that did not pass, rather than a worker that touched the gate.
+        self.steps([{"write": {"guard_spec.py": self.WEAK}}])
+        r = self.delegate(max_iterations=1)
+        self.assertEqual(r["status"], "spec_violation")
 
 
 class SpecGuard(Fixture):
