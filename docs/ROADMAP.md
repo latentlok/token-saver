@@ -36,7 +36,7 @@ All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9
 | A8 | — | **done** | resolved during the ledger session |
 | A9 | BUG | **done** | doctor check; the tier map (DESIGN §2.2) makes it structural |
 | A10 | FRICTION | open | `^cmd\b` allows every subcommand → §4.1 |
-| A11 | DEALBREAKER | **half** | teardown half done; **transport half open** → §2.1 |
+| A11 | DEALBREAKER | **done** | teardown half `5c9e021`; transport half root-caused and fixed `f1527b0` → §2.1 |
 | A12 | BUG | **done** | `server._inherit` |
 | A13 | DEALBREAKER | **done** | shared pre-flight + per-item scheduling |
 | A14 | DEALBREAKER | **designed, not built** | all of DESIGN → §3.1–3.3 |
@@ -51,7 +51,7 @@ All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9
 | A22 | DEALBREAKER | **done** | `UNCALLED:` |
 | A23 | DEALBREAKER | open — **and its priority changed** | → §3.0 |
 
-**Score: 16 done, 2 partial, 5 open, 1 designed, 1 methodological.**
+**Score: 17 done, 1 partial, 5 open, 1 designed, 1 methodological.**
 
 Plus five defects found while *designing* the A14 replacement (DESIGN §9). Three exist
 today and are not in the ledger at all: **D1** the vacuous-pass guard counts skipped
@@ -62,28 +62,32 @@ tests as evidence, **D2** `preflight_expect="red"` cannot tell FAIL from ERROR, 
 
 ## 2. Blockers — things that stop other work
 
-### 2.1 A11 transport: it blocks the fan-out the design assumes
+### 2.1 ~~A11 transport~~ — **FIXED** (`f1527b0`)
 
-**This is the most important thing this consolidation turned up.**
+Root-caused and closed. It was never a protocol or single-flight limitation: **every
+spawned child inherited the server's stdin**, which under stdio transport is the
+JSON-RPC input stream. The executor's stdin was a pipe rather than a tty — exactly what
+a CLI checks to decide it has piped input worth reading — so it consumed the caller's
+next request, the reader thread saw EOF, and `main()` drained `DRAIN_SECONDS` and exited.
 
-A second `qwen_*` tool call while a run is in flight closes the stdio transport;
-recovery needs a human `/mcp` reconnect, so a headless session is dead. PLAN §7 states
-the workaround: *"fan out through `batch` in one call rather than through separate
-calls."*
+`DRAIN_SECONDS = 10.0`, and the field log failed at **10s to the second**. That was the
+drain, not a timeout.
 
-But `chain` and `batch` are **mutually exclusive** — refused by name in
-`_shape_refusal`. So for the test-first pipeline:
+The teardown round did not cover it: `start_new_session=True` detaches the process
+*group*, not the file descriptors. Fix is `stdin=subprocess.DEVNULL` at all 17 spawn
+sites, pinned by `teardown_spec.py::TransportIsolation` — including a test that
+demonstrates the mechanism itself, so the spec fails if the premise ever stops holding,
+and one asserting *no* spawn site in `qd/` inherits stdin, so the next one added
+inherits the rule rather than the bug.
 
-- you cannot batch chains (refused), and
-- you cannot submit several chains separately (transport dies)
+**Consequence for the design:** concurrent delegations from one session now work, and
+DESIGN §8.4 is back to what it originally said — N pipelines cost N async submits,
+linear and acceptable. A batch-of-chains shape would still be nicer; it is no longer
+load-bearing.
 
-⇒ **concurrent test-first pipelines are impossible from one session today.**
-
-DESIGN §8.4 says five pipelines are "five async submits… probably acceptable." That was
-written without this constraint and is wrong: they are not merely linear, they are
-forbidden. Fixing A11 (refuse the second call cleanly instead of dropping the
-connection) is a **prerequisite** for the design's concurrency story, not a parallel
-nicety. The alternative is a batch-of-chains shape, which does not exist.
+*Remaining under A11's original scope:* nothing for the transport. `STATUS: busy`
+(refusing a second call cleanly) was only ever a workaround for this defect, and is no
+longer needed.
 
 ### 2.2 D1 — the vacuous-pass guard counts skipped tests
 
@@ -197,10 +201,10 @@ which is exactly where A21 happened.
 
 ## 7. Suggested order
 
+0. ~~**A11 transport**~~ — **done** (`f1527b0`), concurrency unblocked
 1. **D1** (§2.2) — live hole, waits on nothing, one regex
-2. **A11 transport** (§2.1) — unblocks all concurrent pipeline work
-3. **A23 `challenge_brief`** (§3.0) — prerequisite for the pipeline being honest
-4. **Chain plumbing** (§2.3, task #1) — fixes three defects that exist today
-5. **Extract `_delegate`'s post-run block** (§3.2) — before adding to it
-6. **Design mechanism, then policy** (§3.2–3.3)
-7. **Skill pass** (§4.1) — last, after the prose it deletes is gone
+2. **A23 `challenge_brief`** (§3.0) — prerequisite for the pipeline being honest
+3. **Chain plumbing** (§2.3, task #1) — fixes three defects that exist today
+4. **Extract `_delegate`'s post-run block** (§3.2) — before adding to it
+5. **Design mechanism, then policy** (§3.2–3.3)
+6. **Skill pass** (§4.1) — last, after the prose it deletes is gone

@@ -542,15 +542,14 @@ key.
 `chain` and `batch` are mutually exclusive, refused by name in `_shape_refusal`. Five
 concurrent test-first pipelines would be five async submits, not one batch.
 
-**Corrected after cross-checking the ledger: those five submits are not merely linear, they
-are forbidden.** A11 / PLAN §2.3 — a second `qwen_*` tool call while a run is in flight
-closes the stdio transport, and the documented workaround is *"fan out through `batch` in
-one call rather than through separate calls."* Which `chain` cannot do.
+Cross-checking the ledger flagged A11 here — a second `qwen_*` call while a run was in
+flight closed the stdio transport, which would have made concurrent pipelines *impossible*
+rather than merely linear. **That is fixed** (`f1527b0`): every spawned child was inheriting
+the server's stdin, which under stdio transport is the JSON-RPC input stream, so the
+executor ate the caller's next request. See [ROADMAP.md](ROADMAP.md) §2.1.
 
-So today: **concurrent test-first pipelines are impossible from one session.** Fixing A11
-(refuse the second call cleanly instead of dropping the connection) is a prerequisite for
-this design's concurrency story, not a parallel nicety — or a batch-of-chains shape has to
-exist. Tracked in [ROADMAP.md](ROADMAP.md) §2.1.
+So this section stands as written: N pipelines cost N async submits — linear, async,
+receipts are small. A batch-of-chains shape would still be nicer and does not exist.
 
 ### 8.5 Chain worktrees need a reaper
 
