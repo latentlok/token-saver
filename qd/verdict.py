@@ -90,10 +90,38 @@ FINDINGS: <what you found -- one line per finding, semicolon-separated>
 Under 300 characters. Report the problem; do NOT fix it.
 """
 
+
+# A23. Asked BEFORE any building, read-only. The finding this exists for: a
+# worker-written gate is the brief restated as an assertion, so a wrong
+# requirement becomes a green test DEFENDING the defect -- and preflight_expect
+# is blind to it by construction, because "red before, green after" is what a
+# confidently-built defect looks like too.
+#
+# EVIDENCE is required and is CHECKED (the path must exist in the tree), which
+# is what separates this from a general invitation to complain. A worker that
+# cannot point at the contradiction has an opinion, not an objection, and only
+# an objection is worth stopping a run for.
+CHALLENGE_SUFFIX = """
+
+---
+Do NOT build anything yet. Read the code first and answer only this:
+
+CHALLENGE: none
+  -- or --
+CHALLENGE: <one line: what in the brief the code contradicts, or what is
+   ambiguous enough that two readings give different programs>
+EVIDENCE: <repo-relative path[:line] that shows it>
+
+Say `CHALLENGE: none` if the brief is buildable as written. Do not object to
+style, naming, or anything you would merely have done differently -- only to
+what would make the delivered work WRONG. EVIDENCE must be a real path in this
+repository; an objection you cannot point at will be discarded.
+"""
+
 # The machine-read tail of a reply. FINDINGS joins the handoff keys rather than
 # getting a parser of its own: one reader means a worker that formats the line
 # oddly (bolded, hashed, back-ticked) is understood the same way in both.
-_TAIL_KEYS = ("HANDOFF", "FILES", "NEXT", "FINDINGS")
+_TAIL_KEYS = ("HANDOFF", "FILES", "NEXT", "FINDINGS", "CHALLENGE", "EVIDENCE")
 
 
 def parse_handoff(text):

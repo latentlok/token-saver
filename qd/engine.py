@@ -206,6 +206,53 @@ def _ensure_self_gate(work_cwd, min_override=None):
     return f"bash {_SELF_GATE_PATH}"
 
 
+def _challenge_brief(profile, task, work_cwd, timeout, session_id=None):
+    """Ask the worker to object to the brief BEFORE building it (A23).
+
+    Returns (objection, evidence) when the brief is challenged with a path that
+    EXISTS, else None. Read-only: plan mode, no gate, nothing written.
+
+    The finding: a worker-written gate is the brief restated as an assertion,
+    so a wrong requirement becomes a green test defending the defect. Measured
+    at one requirement error = 2 runs + ~35 min of GPU, with the worker able to
+    see the contradicting evidence the whole time and never asked.
+
+    `preflight_expect` cannot cover this. It proves the gate was red before and
+    green after -- which is equally true of correct work and of a defect built
+    exactly as specified. The only party positioned to catch it is the one that
+    has read the code, and this is the one moment it is cheap to ask.
+
+    Evidence is VERIFIED, not just requested. A path that does not exist is an
+    opinion dressed as a citation, and a run stopped by one would teach callers
+    to pass `challenge_brief=False` -- which is how a detector that cries wolf
+    ends up switched off. Unverifiable objections are reported, never blocking.
+    """
+    from qd import verdict          # local: verdict imports gittree/invoke too
+    # The try covers the EXECUTOR call and nothing else. Wrapping the whole
+    # body was how the first version of this shipped, and it swallowed a plain
+    # NameError -- every challenge silently returned "no objection" and the
+    # feature looked like it worked. A question that cannot fail a run must
+    # still be allowed to fail loudly when it is broken.
+    try:
+        text, _, _, err, _ = invoke.run_executor(
+            profile, f"Review this brief.\n\nBRIEF:\n{task}", work_cwd,
+            "plan", timeout, session_id, suffix=verdict.CHALLENGE_SUFFIX)
+    except Exception:
+        return None                  # endpoint down, timeout, profile fault
+    if err or not text:
+        return None
+    parsed = verdict.parse_handoff(text)
+    raw = (parsed.get("CHALLENGE") or "").strip()
+    if not raw or raw.lower().rstrip(".") in ("none", "no", "n/a"):
+        return None
+    ev = (parsed.get("EVIDENCE") or "").strip()
+    for token in re.split(r"[\s,;]+", ev):
+        path = token.strip("`'\"").split(":")[0]
+        if path and os.path.exists(os.path.join(work_cwd, path)):
+            return raw, ev
+    return None
+
+
 def _repo_relative(paths, work_cwd):
     """Hook-logged absolute writes as repo-relative paths (C10).
 
@@ -528,7 +575,7 @@ BRIEF_KEYS = (
     "mcp_allow",
     "shell_feedback", "trust", "max_iterations", "timeout_sec",
     "verify_timeout_sec", "preflight_expect", "worktree", "executor",
-    "report_dont_fix", "fixture_provenance", "advisory_gates",
+    "report_dont_fix", "fixture_provenance", "advisory_gates", "challenge_brief",
     "result_schema", "on_compaction",
     # U6: a retry replays the same DOCUMENT, not a frozen copy of its text.
     # `amend_brief` is deliberately NOT here: stored, it would re-amend the
@@ -1223,6 +1270,23 @@ def _delegate(args, t0_dir):
     # then nothing was ever left open to pair with.
     if args.get(RUN_ID_ARG):
         ctx["run_id"] = args[RUN_ID_ARG]
+
+    # --- Challenge the brief (A23) ---
+    # Placed AFTER the gate refusals and BEFORE the first attempt: a gate that
+    # cannot run is a worse problem than a brief that is wrong, and there is no
+    # point asking about a brief for a run that GATE UNUSABLE will refuse
+    # anyway. This is the last moment before any tokens are spent building.
+    if args.get("challenge_brief"):
+        objection = _challenge_brief(profile, task, work_cwd, timeout,
+                                     session_id)
+        if objection:
+            why, evidence = objection
+            return refuse(
+                f"BRIEF CHALLENGED: {why}\nEVIDENCE: {evidence}\n\n"
+                "Nothing was built. The worker read the code and says the "
+                "brief contradicts it -- and it cited a path that exists. "
+                "Correct the brief and re-send, or drop `challenge_brief` if "
+                "you have already considered this.")
 
     # --- Live limits (config: project > machine > builtin) ---
     # Both are ceilings on how wrong a run may go before we stop paying for it,

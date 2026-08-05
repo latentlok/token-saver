@@ -132,6 +132,10 @@ TOOL = json.loads(r'''
         "type": "boolean",
         "description": "Require every fixture file the run creates (under fixtures/testdata/golden/snapshots/cassettes, or project `fixture_globs`) to carry a `captured-from: <url or command> <date>` line in its first 10 lines -- a `<path>.src` sidecar for binaries. Violations are fed back by name; the last attempt ends 'fixture_unproven'. Imagined fixtures pass any gate written against them."
       },
+      "challenge_brief": {
+        "type": "boolean",
+        "description": "Ask the worker to OBJECT to the brief before building it (read-only, one short pass). A worker-written gate is your brief restated as an assertion, so a wrong requirement becomes a green test defending the defect -- and `preflight_expect` is blind to it (red before, green after is what a confidently-built defect looks like too). The run is refused only when the objection cites a path that EXISTS; unverifiable objections never block. Worth it for correctness-critical or ambiguous briefs, and for the gate-writing link of a test-first chain."
+      },
       "verify_timeout_sec": {
         "type": "integer",
         "description": "Kill time for ONE `verify` run, seconds (default 300, or project .qwen-delegate.json `verify_timeout_sec`; clamped 10..3600). A pre-flight that times out refuses the run before any attempt is burned."
