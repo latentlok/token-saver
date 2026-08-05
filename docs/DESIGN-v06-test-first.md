@@ -540,9 +540,17 @@ key.
 ### 8.4 Fan-out costs one submit per pipeline
 
 `chain` and `batch` are mutually exclusive, refused by name in `_shape_refusal`. Five
-concurrent test-first pipelines are five async submits, not one batch. Probably acceptable —
-they are async and receipts are small — but it is linear in fan-out, and a batch-of-chains
-shape does not exist today.
+concurrent test-first pipelines would be five async submits, not one batch.
+
+**Corrected after cross-checking the ledger: those five submits are not merely linear, they
+are forbidden.** A11 / PLAN §2.3 — a second `qwen_*` tool call while a run is in flight
+closes the stdio transport, and the documented workaround is *"fan out through `batch` in
+one call rather than through separate calls."* Which `chain` cannot do.
+
+So today: **concurrent test-first pipelines are impossible from one session.** Fixing A11
+(refuse the second call cleanly instead of dropping the connection) is a prerequisite for
+this design's concurrency story, not a parallel nicety — or a batch-of-chains shape has to
+exist. Tracked in [ROADMAP.md](ROADMAP.md) §2.1.
 
 ### 8.5 Chain worktrees need a reaper
 

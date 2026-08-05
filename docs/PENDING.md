@@ -1,8 +1,8 @@
 # Pending — the v4 queue
 
-> **v0.6 friction-ledger work is tracked separately in
-> [PLAN-v06-ledger.md](PLAN-v06-ledger.md)** — that is the live queue for everything
-> the field report turned up. This file remains the longer-horizon v4 list.
+> **The live queue is [ROADMAP.md](ROADMAP.md)** — everything open, in build order.
+> This file remains the longer-horizon v4 list; the roadmap references it rather than
+> absorbing it.
 
 v3 (the architect model at L5) is complete — executed, measured, shipped; its records
 live in [archive/](archive/). This is the ONLY forward-looking doc: what v4 draws

@@ -1,0 +1,206 @@
+# Roadmap — the single queue
+
+**This supersedes `HANDOVER.md` and the open sections of
+[PLAN-v06-ledger.md](PLAN-v06-ledger.md).** Those two plus the v0.6 design doc had
+overlapping, drifting task lists; this is the one place work is tracked.
+
+| Doc | Role now |
+|---|---|
+| **this file** | the queue — what is open, in what order, and why |
+| [DESIGN-v06-test-first.md](DESIGN-v06-test-first.md) | the *design* for the A14 replacement. Its §12 work items are referenced here, not duplicated |
+| [PLAN-v06-ledger.md](PLAN-v06-ledger.md) | historical: what the v0.6 code round closed, and the reasoning. Its "Done" table is the record |
+| [archive/plugin-improvement.md](archive/plugin-improvement.md) | evidence: the 23 field findings. Read only when a finding's cost is in question |
+| [PENDING.md](PENDING.md) | the longer-horizon v4 list — unchanged, not merged here |
+| [README-walkthroughs.md](README-walkthroughs.md) | how the shapes work, end to end |
+
+---
+
+## 1. Does the planned work resolve the ledger?
+
+All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9e021`.
+
+| ID | Severity | Status | Where |
+|---|---|---|---|
+| A0 | DEALBREAKER | **done** | doctor: gate-near-timeout check |
+| A0a / A0c | DEALBREAKER | **done** | `start_new_session` + `killpg`, mutation-checked |
+| A0b | BUG | **done** | endpoints honoured at profile Level 4 |
+| A0d | BUG | **partial** | doctor *reports* stale servers; nothing kills one → §3.4 |
+| A0e | BUG | **done** | freshness computed live, never read from disk |
+| A1 | FRICTION | open | skill 326 → ~100 lines → §4.1 |
+| A2 | BUG (docs) | open | skill contradicts USAGE.md on graphify → §4.1 |
+| A3 | FRICTION | open | graphify needs `scoped`, said nowhere → §4.1 |
+| A4 | — | **done** | resolved during the ledger session |
+| A5 | WISH | open | no `PAID:` line → §4.3 |
+| A7 | WISH | open | *the instrument already exists* — `advisory_gates` is exactly the self-grading measurement, and is undocumented → §4.3 |
+| A7b | BUG | **done** | run id stamped at submit |
+| A8 | — | **done** | resolved during the ledger session |
+| A9 | BUG | **done** | doctor check; the tier map (DESIGN §2.2) makes it structural |
+| A10 | FRICTION | open | `^cmd\b` allows every subcommand → §4.1 |
+| A11 | DEALBREAKER | **half** | teardown half done; **transport half open** → §2.1 |
+| A12 | BUG | **done** | `server._inherit` |
+| A13 | DEALBREAKER | **done** | shared pre-flight + per-item scheduling |
+| A14 | DEALBREAKER | **designed, not built** | all of DESIGN → §3.1–3.3 |
+| A15 | FRICTION | **done** | denials allowlisted and split |
+| A15b | NOTE | no action | transparency note: `scoped` intercepts above a `yolo` worker |
+| A16 | BUG | **done** | mark-not-substring |
+| A17 | BUG | **done** | `state: "starting"` before first token |
+| A18 | DEALBREAKER | **done** | `NEVER EXECUTED:` |
+| A19 | PRODUCT | **shape is ours now** | it was another repo's bug — but the identical hole exists in `_SELF_GATE` today → §2.2 (D1) |
+| A20 | DEALBREAKER | **done** | `MOCKED SEAM:` |
+| A21 | DEALBREAKER (method) | **not fixable in code** — see §5 | |
+| A22 | DEALBREAKER | **done** | `UNCALLED:` |
+| A23 | DEALBREAKER | open — **and its priority changed** | → §3.0 |
+
+**Score: 16 done, 2 partial, 5 open, 1 designed, 1 methodological.**
+
+Plus five defects found while *designing* the A14 replacement (DESIGN §9). Three exist
+today and are not in the ledger at all: **D1** the vacuous-pass guard counts skipped
+tests as evidence, **D2** `preflight_expect="red"` cannot tell FAIL from ERROR, **D3**
+`run_chain`'s "link 2 builds on link 1's tree" is false under `worktree: "auto"`.
+
+---
+
+## 2. Blockers — things that stop other work
+
+### 2.1 A11 transport: it blocks the fan-out the design assumes
+
+**This is the most important thing this consolidation turned up.**
+
+A second `qwen_*` tool call while a run is in flight closes the stdio transport;
+recovery needs a human `/mcp` reconnect, so a headless session is dead. PLAN §7 states
+the workaround: *"fan out through `batch` in one call rather than through separate
+calls."*
+
+But `chain` and `batch` are **mutually exclusive** — refused by name in
+`_shape_refusal`. So for the test-first pipeline:
+
+- you cannot batch chains (refused), and
+- you cannot submit several chains separately (transport dies)
+
+⇒ **concurrent test-first pipelines are impossible from one session today.**
+
+DESIGN §8.4 says five pipelines are "five async submits… probably acceptable." That was
+written without this constraint and is wrong: they are not merely linear, they are
+forbidden. Fixing A11 (refuse the second call cleanly instead of dropping the
+connection) is a **prerequisite** for the design's concurrency story, not a parallel
+nicety. The alternative is a batch-of-chains shape, which does not exist.
+
+### 2.2 D1 — the vacuous-pass guard counts skipped tests
+
+Independent of everything else and live right now. `_SELF_GATE` sums
+`Ran N tests|N passed`; five `@unittest.skip` tests satisfy `min_tests: 5` and the gate
+exits 0. The pytest path is worse — `5 skipped` parses as no count and passes anyway.
+
+A regex plus a fail-on-skip branch. **Ship this first; it waits on nothing.**
+
+### 2.3 Chain plumbing → task #1
+
+DESIGN §8.1–8.3, §11.2. One worktree per chain, commit between links, don't reuse a
+cached preflight for link N>1, plus a reaper for orphaned chain worktrees. Hard
+constraint: single delegation and `qwen_query` unchanged.
+
+---
+
+## 3. The A14 replacement
+
+### 3.0 A23 `challenge_brief` is now a prerequisite, not a sibling
+
+The ledger filed A23 alongside A14. The design changes that relationship: DESIGN §13
+concludes that **test-first without `challenge_brief` is worse than the problem it
+fixes**, because splitting the runs protects you from the worker while leaving the
+orchestrator's contract unfalsifiable — and it now has a green receipt behind it.
+
+So A23 moves *ahead* of the pipeline in build order. It was also the cheapest of the
+dealbreakers to begin with: ask the worker to object to the brief before building it.
+
+### 3.1 Plumbing (ship independently)
+
+`P1` chain worktree + commits (§2.3 above) · `P2` preflight cache skip · `P3` D1.
+
+### 3.2 Mechanism
+
+DESIGN §12 items 0–2: **extract `_delegate`'s post-run block first** (it is ~1000 lines
+and the top god node at 58 edges; four more inline additions is how it becomes
+unmaintainable), then the red gate generator, then contract pinning.
+
+### 3.3 Policy
+
+DESIGN §12 items 3–10: tier map, clause coverage as link 1's gate, seam demotion,
+`_qwen` naming enforcement, the two playbooks, contract lifecycle check, handoff
+forwarding, per-link continuity grade.
+
+---
+
+## 4. Everything else still open
+
+### 4.1 The `delegation` skill (A1, A2, A3, A10) — one pass
+
+326 lines → ~100 hot. Three content bugs to fix while in there: the graphify advice the
+skill's own measurement refutes (A2), the unsaid `scoped` requirement (A3), and that
+`^cmd\b` permits every subcommand including ones that bill a cloud account (A10).
+
+Do this **after** the doctor checks and the design's receipt lines land — each of those
+deletes skill prose, and rewriting first means rewriting twice.
+
+### 4.2 Server lifecycle (A0d)
+
+Write pid+version at startup; a new server terminates a stale predecessor. Doctor
+already reports the condition.
+
+### 4.3 Measurement (A5, A7)
+
+`PAID:` receipt line. And **document `advisory_gates` as the self-grading measurement
+instrument** — A7 asks "did self-grading catch what a real gate would?", and the answer
+already shipped: attach an owner-held spec as advisory, run `trust="self"`, and green
+STATUS + red advisory *is* a measured blindspot. This pairs directly with the design's
+`_qwen` provenance marker (DESIGN §2.5), which is the other half of grading worker tests.
+
+### 4.4 Carried from PENDING (unchanged, listed so they are not lost)
+
+Streaming loses `tools`/`lines_added`; the `usage` fallback has never run live; live
+probes P1–P8; `detect_test_cmd` cannot place this repo (the tier map addresses the
+symptom, not the detectors).
+
+---
+
+## 5. A21 — the one finding no code will close
+
+PLAN §3 says it and it stays said: two identifiers were interchangeable *by accident*,
+nothing asserted they were the same, and nothing noticed when the accident ended. 29
+foreign-key violations over ~60 minutes of GPU, and the operator spotted it before any
+test did.
+
+> **Delegate modules; gate seams yourself.** A green receipt is evidence about a module
+> and is routinely read as evidence about a product.
+
+What the design *does* contribute: A21's first and most general fix is *"two ids that
+mean different things must never be obtainable from the same expression."* The contract
+requiring an explicit entry point and signature (DESIGN §3) is that discipline applied
+to the delegation boundary — it makes the identity a written artifact instead of a
+coincidence. That covers delegated work. It does not cover the architect's own edits,
+which is exactly where A21 happened.
+
+---
+
+## 6. Decisions owed
+
+- **Version.** `.claude-plugin/plugin.json` still says `0.5.1`; root `CHANGELOG.md` has
+  no `0.6.0` entry. `docs/RELEASING.md` owns the sequence.
+- **`reset_worktree()`** in `qd/gittree.py` — called only by its own spec since best-of-N
+  was removed. Keep or drop.
+- **`qd/doctor.py` Ollama advice** — `OLLAMA_NUM_PARALLEL`, CONTEXT off `ollama ps`.
+  Ollama will not be used again; clean out when next touching doctor.
+- **Machine config, outside git:** `~/.qwen-delegate/executors.json` now has
+  `snowy: parallel_max 4`.
+
+---
+
+## 7. Suggested order
+
+1. **D1** (§2.2) — live hole, waits on nothing, one regex
+2. **A11 transport** (§2.1) — unblocks all concurrent pipeline work
+3. **A23 `challenge_brief`** (§3.0) — prerequisite for the pipeline being honest
+4. **Chain plumbing** (§2.3, task #1) — fixes three defects that exist today
+5. **Extract `_delegate`'s post-run block** (§3.2) — before adding to it
+6. **Design mechanism, then policy** (§3.2–3.3)
+7. **Skill pass** (§4.1) — last, after the prose it deletes is gone

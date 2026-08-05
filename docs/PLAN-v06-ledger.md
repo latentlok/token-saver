@@ -1,5 +1,9 @@
 # v0.6 — working the friction ledger
 
+> **Historical.** The open items in this file have moved to [ROADMAP.md](ROADMAP.md), which is now the single queue. What stays here is the
+> record of what the v0.6 code round closed and why — the "Done" table below, and
+> the reasoning in §3, §6 and §7 that the roadmap only summarises.
+
 Source: `docs/archive/plugin-improvement.md` (23 findings, all against v0.5.1, none
 previously fixed). It is now **evidence**, archived; this plan is the live tracker.
 Every finding below quotes what it cost, so the archive rarely needs re-reading.
@@ -63,7 +67,11 @@ already states the capability map, which is why the block no longer repeats it.
 
 ---
 
-## 1. Still open — deterministic, small, high value
+## 1. ~~Still open~~ — **all of §1 shipped** (deterministic, small, high value)
+
+**1.1–1.5 are done** — see the Done table above; they are kept here for the reasoning,
+which is why each was worth doing. The section title was accurate when written and is
+not now.
 
 These are the rest of the "server knows it, server should say it" set. All are static
 — nothing extra runs.
