@@ -223,6 +223,35 @@ class C2Lines(Fixture):
                     "COST:"):
             self.assertNotIn("\n" + tag, out)
 
+    def test_dispatch_says_a_batch_actually_ran_in_parallel(self):
+        # The capacity a call gets is resolved from three files (call arg >
+        # project > machine) and is visible NOWHERE else, so a batch that
+        # silently serialised looked exactly like one that did not. Pinned here
+        # because until now this line was in zero specs -- it could have stopped
+        # rendering entirely and the whole suite would have stayed green.
+        out = self.v2(dispatch="parallel", batch_size=4,
+                      endpoint={"name": "snowy", "parallel_max": 4})
+        self.assertIn("DISPATCH: parallel", out)
+        self.assertIn("snowy", out)
+        self.assertIn("4 slot(s)", out)
+        self.assertIn("4 item(s)", out)
+
+    def test_dispatch_names_a_batch_that_only_looked_parallel(self):
+        # The failure the line exists for: asked for a batch, got a queue.
+        # Silence here reads as success, which is why the warning is spelled
+        # out rather than left to be inferred from the slot count.
+        out = self.v2(dispatch="serial", batch_size=4,
+                      endpoint={"name": "snowy", "parallel_max": 1})
+        self.assertIn("DISPATCH: serial", out)
+        self.assertIn("items ran IN ORDER, not concurrently", out)
+
+    def test_a_single_item_batch_is_not_accused_of_serialising(self):
+        # One item cannot run concurrently with itself; the warning would be
+        # noise on every solo run, and a warning that fires always is ignored.
+        out = self.v2(dispatch="serial", batch_size=1,
+                      endpoint={"name": "snowy", "parallel_max": 1})
+        self.assertNotIn("items ran IN ORDER", out)
+
     def test_c2_lines_in_order_before_result_block(self):
         out = self.v2(notes="self-tests failing",
                       worktree={"path": "/w/r1", "branch": "qwen/r1"},
