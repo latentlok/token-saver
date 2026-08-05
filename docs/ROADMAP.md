@@ -56,7 +56,7 @@ All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9
 Plus five defects found while *designing* the A14 replacement (DESIGN §9). Three exist
 today and are not in the ledger at all: **D1** the vacuous-pass guard counts skipped
 tests as evidence, **D2** `preflight_expect="red"` cannot tell FAIL from ERROR, **D3**
-`run_chain`'s "link 2 builds on link 1's tree" is false under `worktree: "auto"`.
+`run_chain`'s "link 2 builds on link 1's tree" was false under `worktree: "auto"` (all three now fixed — D1 in `8cb677b`, D3/D4/D5 in `4af4936`).
 
 ---
 
@@ -107,11 +107,28 @@ exits 0. The pytest path is worse — `5 skipped` parses as no count and passes 
 
 A regex plus a fail-on-skip branch. **Ship this first; it waits on nothing.**
 
-### 2.3 Chain plumbing → task #1
+### 2.3 ~~Chain plumbing~~ — **DONE** (`4af4936`, `95278a7`)
 
-DESIGN §8.1–8.3, §11.2. One worktree per chain, commit between links, don't reuse a
-cached preflight for link N>1, plus a reaper for orphaned chain worktrees. Hard
-constraint: single delegation and `qwen_query` unchanged.
+D3/D4/D5 closed. `run_chain` acquires ONE worktree and lends it to every link through
+a reserved `_worktree` arg; links commit into it (which makes their files both visible
+to the next link AND tracked, so `spec_globs` can protect a gate link 2 is graded by);
+the chain keeps the container if any link committed and releases it only when nothing
+did. Links after the first no longer share a cached pre-flight. `worktrees.stale()` +
+a doctor check report orphaned containers — reported, never removed, because they hold
+gated work.
+
+Live: link 1 writes `alpha.txt`, link 2 must read it to build `beta.txt`, and link 2's
+gate requires link 1's content. Both green, both receipts naming the same worktree.
+Mutated (lending removed): link 2 red — *"GATE SUSPECT: the verify command produced
+identical output before"*.
+
+**Batch of chains** landed on top: a batch item may carry `chain`, so N pipelines run
+in one call, concurrently, each internally ordered and in its own worktree. Live: 2
+pipelines × 2 links, 4/4 green, 2 distinct worktrees, peak 3 workers, 24s. The one
+correctness point is a deadlock, not a slowdown — a chain item must take no
+batch-level guard, because `run_chain` guards per link.
+
+Hard constraint held: a lone delegation and `qwen_query` are untouched.
 
 ---
 
@@ -214,7 +231,7 @@ which is exactly where A21 happened.
 0. ~~**A11 transport**~~ — **done** (`f1527b0`), concurrency unblocked
 1. **D1** (§2.2) — live hole, waits on nothing, one regex
 2. **A23 `challenge_brief`** (§3.0) — prerequisite for the pipeline being honest
-3. **Chain plumbing** (§2.3, task #1) — fixes three defects that exist today
+3. ~~**Chain plumbing**~~ — **done** (`4af4936`), plus batch-of-chains (`95278a7`)
 4. **Extract `_delegate`'s post-run block** (§3.2) — before adding to it
 5. **Design mechanism, then policy** (§3.2–3.3)
 6. **Skill pass** (§4.1) — last, after the prose it deletes is gone
