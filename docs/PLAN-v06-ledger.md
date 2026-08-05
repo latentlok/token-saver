@@ -119,6 +119,10 @@ run itself created — the plugin already tracks them in `CHANGED`. Turns the de
 "cannot fail" into "cannot pass without the work".
 *Note:* a partial mitigation already exists — `_ensure_self_gate`'s `min_override`
 ratchet raises the floor to N+1 tests. Decide whether to extend that or replace it.
+**Superseded in design by [DESIGN-v06-test-first.md](DESIGN-v06-test-first.md)** — tiers,
+a test-first chain, and a dispatch rule that replaces the default rather than tuning it.
+That doc also records five defects found while designing, three of which exist today
+(notably: the vacuous-pass guard counts *skipped* tests as evidence).
 
 **2.2 `scoped` denials (A15).** ~150 blocked calls across 12 builds, every one a
 well-formed read-only `grep_search` or a test command carrying `2>&1`. Two problems:
