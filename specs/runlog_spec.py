@@ -327,6 +327,58 @@ class RunIds(unittest.TestCase):
         self.assertGreater(len({runlog.new_run_id() for _ in range(50)}), 1)
 
 
+class ExecutorCallSpec(unittest.TestCase):
+    """One executor invocation, with the arithmetic that belongs to it.
+
+    It was a dict. The fields were the same; what a dict could not carry is the
+    arithmetic every reader had to redo -- summing its tokens, pricing it,
+    reading `prompt` as spend on an endpoint that caches most of it.
+    """
+
+    PROFILE = {"price_in_per_mtok": 10.0, "price_out_per_mtok": 30.0}
+
+    def test_it_builds_from_run_executor_meta(self):
+        c = runlog.ExecutorCall.from_meta(
+            "challenge",
+            {"stats": {"tokens": {"prompt": 900, "completion": 20,
+                                  "cached": 400}, "ms": 1200, "turns": 2}},
+            session="s-1")
+        self.assertEqual((c.kind, c.session), ("challenge", "s-1"))
+        self.assertEqual((c.prompt, c.completion, c.cached), (900, 20, 400))
+        self.assertEqual((c.ms, c.turns), (1200, 2))
+
+    def test_partial_or_missing_meta_never_raises(self):
+        for meta in (None, {}, {"stats": None}, {"stats": {"tokens": None}}):
+            c = runlog.ExecutorCall.from_meta("attempt", meta)
+            self.assertEqual((c.prompt, c.completion, c.ms), (0, 0, 0))
+
+    def test_tokens_is_both_directions(self):
+        self.assertEqual(runlog.ExecutorCall("a", prompt=10, completion=3).tokens, 13)
+
+    def test_fresh_prompt_excludes_the_cached_remainder(self):
+        # Reading `prompt` as spend overstates it on a caching endpoint -- the
+        # cached part is not re-billed.
+        c = runlog.ExecutorCall("a", prompt=1000, cached=750)
+        self.assertEqual(c.fresh_prompt, 250)
+
+    def test_fresh_prompt_never_goes_negative(self):
+        self.assertEqual(runlog.ExecutorCall("a", prompt=10, cached=99).fresh_prompt, 0)
+
+    def test_cost_prices_this_call_alone(self):
+        c = runlog.ExecutorCall("challenge", prompt=1_000_000, completion=1_000_000)
+        self.assertAlmostEqual(c.cost(self.PROFILE), 40.0)
+
+    def test_cost_on_a_broken_profile_is_zero_not_an_exception(self):
+        # It is a log. A missing price must never take down the record.
+        self.assertEqual(runlog.ExecutorCall("a", prompt=5).cost({}), 0.0)
+
+    def test_as_dict_round_trips_through_json(self):
+        c = runlog.ExecutorCall.from_meta("attempt", {"stats": {"ms": 5}},
+                                          session="s", err="timed out")
+        json.dumps(c.as_dict())
+        self.assertEqual(c.as_dict()["err"], "timed out")
+
+
 class CallLogSpec(unittest.TestCase):
     """Per-executor-call telemetry (the flat `cum` sum cannot answer "what did
     the challenge cost", because a run is no longer one kind of call)."""
@@ -347,6 +399,8 @@ class CallLogSpec(unittest.TestCase):
         self.assertEqual((rec["prompt"], rec["completion"]), (900, 20))
         self.assertEqual(rec["ms"], 1200)
         self.assertEqual(rec["session"], "s-1")
+        # ...and the live object is an ExecutorCall, not the dict it renders to
+        self.assertIsInstance(log.calls[0], runlog.ExecutorCall)
 
     def test_missing_or_partial_meta_never_raises(self):
         log = runlog.CallLog()
@@ -375,6 +429,28 @@ class CallLogSpec(unittest.TestCase):
         self.assertEqual(log.as_record()["calls"][0]["err"],
                          "timed out after 900s")
         self.assertEqual(log.by_kind()["attempt"]["prompt"], 50)
+
+    def test_by_kind_prices_each_kind_when_given_a_profile(self):
+        # The question is asked in money: "are challenge passes worth it".
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 1_000_000}}})
+        log.record("attempt", {"stats": {"tokens": {"prompt": 1_000_000}}})
+        by = log.by_kind({"price_in_per_mtok": 10.0, "price_out_per_mtok": 30.0})
+        self.assertAlmostEqual(by["challenge"]["cost_usd"], 10.0)
+        self.assertAlmostEqual(by["attempt"]["cost_usd"], 10.0)
+
+    def test_without_a_profile_no_money_is_invented(self):
+        log = runlog.CallLog()
+        log.record("attempt", {"stats": {"tokens": {"prompt": 5}}})
+        self.assertNotIn("cost_usd", log.by_kind()["attempt"])
+
+    def test_it_is_iterable_and_sized_like_the_collection_it_is(self):
+        log = runlog.CallLog()
+        log.record("challenge", {})
+        log.record("attempt", {})
+        self.assertEqual(len(log), 2)
+        self.assertEqual([c.kind for c in log], ["challenge", "attempt"])
+        self.assertEqual(len(log.of_kind("attempt")), 1)
 
     def test_the_record_is_json_serialisable(self):
         # It goes into runs.jsonl; anything that cannot serialise silently

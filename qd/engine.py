@@ -1293,6 +1293,10 @@ def _delegate(args, t0_dir):
         "merge": None,
         "challenge": None,
         "calls": CallLog(),
+        # The executor profile, so the run log can price each call KIND.
+        # Not rendered anywhere -- carried for the log, which is the only
+        # reader that needs to turn tokens into money per call.
+        "profile": profile,
         "graph_line": None,
         "refs_added": [],
         "cost_usd": 0.0,

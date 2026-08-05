@@ -347,8 +347,78 @@ def _tok_zero():
     return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "thoughts": 0}
 
 
+class ExecutorCall:
+    """One invocation of the executor, with the arithmetic that belongs to it.
+
+    Was a dict inside CallLog.record. The fields were the same; what a dict
+    could not carry is the arithmetic every reader had to redo -- summing its
+    tokens, pricing it, deciding whether it counted as an attempt. Those live
+    here now, so "what did the challenge cost in dollars" is one call rather
+    than a formula copied to wherever the question is asked.
+
+    Kinds are open by design ("challenge", "attempt", and whatever a later pass
+    adds). A closed enum would have to be edited in step with every new call
+    site, and a log that rejects a call it does not recognise records less than
+    one that accepts it and labels it honestly.
+    """
+
+    __slots__ = ("kind", "session", "prompt", "completion", "cached",
+                 "ms", "turns", "err")
+
+    def __init__(self, kind, session=None, prompt=0, completion=0, cached=0,
+                 ms=0, turns=0, err=None):
+        self.kind = kind
+        self.session = session or None
+        self.prompt = int(prompt or 0)
+        self.completion = int(completion or 0)
+        self.cached = int(cached or 0)
+        self.ms = int(ms or 0)
+        self.turns = int(turns or 0)
+        self.err = err or None
+
+    @classmethod
+    def from_meta(cls, kind, meta, session=None, err=None):
+        """Build from run_executor's `meta`. Missing or partial never raises --
+        an unmeasured call is still a call, and dropping it would under-report
+        exactly the runs worth investigating."""
+        st = (meta or {}).get("stats") or {}
+        tok = st.get("tokens") or {}
+        return cls(kind, session=session,
+                   prompt=tok.get("prompt"), completion=tok.get("completion"),
+                   cached=tok.get("cached"), ms=st.get("ms"),
+                   turns=st.get("turns"), err=err)
+
+    @property
+    def tokens(self):
+        return self.prompt + self.completion
+
+    @property
+    def fresh_prompt(self):
+        """Input actually paid for. On a caching endpoint the cached remainder
+        is not re-billed, and reading `prompt` as spend overstates it."""
+        return max(0, self.prompt - self.cached)
+
+    def cost(self, profile):
+        """USD for this call alone -- the per-KIND question in money."""
+        try:
+            from qd.profiles import cost_usd
+            return float(cost_usd(profile, self.prompt, self.completion))
+        except Exception:
+            return 0.0
+
+    def as_dict(self):
+        return {"kind": self.kind, "session": self.session,
+                "prompt": self.prompt, "completion": self.completion,
+                "cached": self.cached, "ms": self.ms, "turns": self.turns,
+                "err": self.err}
+
+    def __repr__(self):
+        return (f"ExecutorCall({self.kind!r}, prompt={self.prompt}, "
+                f"completion={self.completion}, ms={self.ms})")
+
+
 class CallLog:
-    """Per-executor-call telemetry for one delegation.
+    """The ExecutorCalls one delegation made.
 
     `accum_stats` sums everything into one `cum` dict, which answered the only
     question a run used to raise: what did this delegation cost? A run was one
@@ -358,7 +428,9 @@ class CallLog:
     pass, then N attempts, each with its own tokens and its own reason for
     existing. Folded into one sum they are indistinguishable, so "what do
     challenge passes cost us" -- the question that decides whether default-on
-    is worth it -- had no answer anywhere in the system.
+    is worth it -- had no answer anywhere in the system. It has one now, and it
+    is what overturned the warm-handoff default: cold vs warm was only
+    measurable because the two calls are logged apart.
 
     An object rather than a list of dicts for the same reason `EndpointGuard`
     is one: the append and the totalling belong to the thing being logged, and
@@ -373,38 +445,43 @@ class CallLog:
 
     def record(self, kind, meta, session=None, err=None):
         """Append one call. `meta` is run_executor's meta; None is fine."""
-        st = (meta or {}).get("stats") or {}
-        tok = st.get("tokens") or {}
-        self.calls.append({
-            "kind": kind,
-            "session": session or None,
-            "prompt": int(tok.get("prompt") or 0),
-            "completion": int(tok.get("completion") or 0),
-            "cached": int(tok.get("cached") or 0),
-            "ms": int(st.get("ms") or 0),
-            "turns": int(st.get("turns") or 0),
-            "err": err or None,
-        })
-        return self.calls[-1]
+        call = ExecutorCall.from_meta(kind, meta, session=session, err=err)
+        self.calls.append(call)
+        return call
 
-    def by_kind(self):
-        """{kind: {calls, prompt, completion, ms}} -- the aggregate that makes
-        'what did challenges cost' answerable without re-reading every line."""
+    def __len__(self):
+        return len(self.calls)
+
+    def __iter__(self):
+        return iter(self.calls)
+
+    def of_kind(self, kind):
+        return [c for c in self.calls if c.kind == kind]
+
+    def by_kind(self, profile=None):
+        """{kind: {calls, prompt, completion, ms, cost_usd?}} -- the aggregate
+        that makes 'what did challenges cost' answerable without re-reading
+        every line. `profile` adds money to the answer."""
         out = {}
         for c in self.calls:
-            agg = out.setdefault(c["kind"], {"calls": 0, "prompt": 0,
-                                             "completion": 0, "ms": 0})
+            agg = out.setdefault(c.kind, {"calls": 0, "prompt": 0,
+                                          "completion": 0, "ms": 0})
             agg["calls"] += 1
-            for k in ("prompt", "completion", "ms"):
-                agg[k] += c[k]
+            agg["prompt"] += c.prompt
+            agg["completion"] += c.completion
+            agg["ms"] += c.ms
+            if profile is not None:
+                agg["cost_usd"] = round(
+                    agg.get("cost_usd", 0.0) + c.cost(profile), 6)
         return out
 
-    def as_record(self):
+    def as_record(self, profile=None):
         """The shape that goes into the run log. Empty stays empty rather than
         writing `{"calls": []}` into every historical-looking record."""
         if not self.calls:
             return {}
-        return {"calls": list(self.calls), "calls_by_kind": self.by_kind()}
+        return {"calls": [c.as_dict() for c in self.calls],
+                "calls_by_kind": self.by_kind(profile)}
 
 
 def leverage_record(tool, cwd, status, verdict, stats, peak,

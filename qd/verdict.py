@@ -1029,7 +1029,10 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # write and nothing to read until you ask.
     calls = ctx.get("calls")
     if calls is not None and hasattr(calls, "as_record"):
-        extra.update(calls.as_record())
+        # The profile prices each KIND, so the log answers "what did challenge
+        # passes cost us" in money and not only in tokens -- which is the form
+        # the question gets asked in.
+        extra.update(calls.as_record(ctx.get("profile")))
     write_runlog(cwd, leverage_record(
         "qwen_delegate", cwd, status, verdict, cum, ctx.get("peak", 0),
         executor=executor or "qwen-local",
