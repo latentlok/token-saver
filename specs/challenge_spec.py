@@ -229,9 +229,9 @@ class Receipt(unittest.TestCase):
 
 
 class WarmHandoff(Decision):
-    """The build resumes the challenge's session instead of starting cold.
+    """The build MAY resume the challenge's session (`challenge_warm`, off).
 
-    The builder inherits the reading the challenge just did. NOT a saving --
+    The builder would inherit the reading the challenge just did. NOT a saving --
     measured live at +50% input tokens and +16% wall against a cold build,
     because a resumed session re-sends its whole history on every turn. The
     design predicted the opposite ("one prefill instead of two"); the numbers
@@ -259,11 +259,13 @@ class WarmHandoff(Decision):
         self.assertTrue(engine.CHALLENGE_CLEARED.startswith("---"))
         self.assertTrue(engine.CHALLENGE_CLEARED.endswith("\n\n"))
 
-    def test_warm_is_the_default_and_false_is_honoured(self):
+    def test_cold_is_the_default_because_warm_measured_worse(self):
+        # Not taste: warm cost +50% input and +16% wall on a live A/B, because
+        # a resumed session re-sends its history every turn.
         w = engine._warm_challenge
-        self.assertTrue(w({}, {}))                          # nobody says -> on
-        self.assertFalse(w({"challenge_warm": False}, {}))  # caller declines
-        self.assertFalse(w({}, {"challenge_warm": False}))  # project declines
+        self.assertFalse(w({}, {}))                         # nobody says -> COLD
+        self.assertTrue(w({"challenge_warm": True}, {}))    # caller opts in
+        self.assertTrue(w({}, {"challenge_warm": True}))    # project opts in
         # and `false` is not chained past by a truthy layer behind it
         self.assertFalse(w({"challenge_warm": False}, {"challenge_warm": True}))
 

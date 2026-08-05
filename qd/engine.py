@@ -113,7 +113,20 @@ CHALLENGE_CLEARED = (
 
 
 def _warm_challenge(args, cfg):
-    """Whether the build resumes the challenge's session. Default True.
+    """Whether the build resumes the challenge's session. Default FALSE.
+
+    Default cold, on measurement rather than taste. Resuming looked like the
+    saving -- "one prefill instead of two" -- and is the opposite: a resumed
+    session re-sends its whole history every turn, so the build re-pays the
+    ~46k challenge conversation on each of its own turns. Same brief, same
+    repo, live:
+
+        cold  148,267 in  19.3s  (2 sessions, 4 build turns)
+        warm  222,407 in  22.4s  (1 session,  5 build turns)
+
+    +50% input, +16% wall, and MORE turns -- so not cheaper and not sharper
+    either. `challenge_warm: true` buys context continuity for anyone who wants
+    it; it is not the default because nothing measured says it should be.
 
     Explicit None checks, not `or`: `false` is a real answer and `or` chaining
     would fall through it to the next layer -- the same trap the challenge flag
@@ -123,7 +136,7 @@ def _warm_challenge(args, cfg):
                 _global_config().get("challenge_warm")):
         if src is not None:
             return bool(src)
-    return True
+    return False
 
 # Minted per process, never leaving it. The tool schema does not carry
 # PRECHECK_ARG, but nothing stops a client from sending one anyway -- and
@@ -1373,12 +1386,10 @@ def _delegate(args, t0_dir):
                 "brief contradicts it -- and it cited a path that exists. "
                 "Correct the brief and re-send, or drop `challenge_brief` if "
                 "you have already considered this.")
-        # --- Carry the challenge session into the build (default) ---
-        # The builder inherits the reading the challenge just did. Measured at
-        # +50% input tokens and +16% wall against a cold build (see
-        # _challenge_brief) -- a resumed session re-sends its history every
-        # turn, so this is a continuity lever, NOT a saving. `challenge_warm:
-        # false` builds cold.
+        # --- Carry the challenge session into the build (opt-in) ---
+        # OFF by default: measured at +50% input tokens and +16% wall against a
+        # cold build (see _challenge_brief). `challenge_warm: true` for callers
+        # who want the builder to inherit the reading the review just did.
         #
         # The hand-off line is DETERMINISTIC, written here, never asked of the
         # model. The challenge prompt ends with "Do NOT build anything yet",
