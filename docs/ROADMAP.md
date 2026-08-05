@@ -7,7 +7,9 @@ overlapping, drifting task lists; this is the one place work is tracked.
 | Doc | Role now |
 |---|---|
 | **this file** | the queue — what is open, in what order, and why |
-| [DESIGN-v06-test-first.md](DESIGN-v06-test-first.md) | the *design* for the A14 replacement. Its §12 work items are referenced here, not duplicated |
+| [DESIGN-modular-architecture.md](DESIGN-modular-architecture.md) | the **active** design — restructure so features are units |
+| [DESIGN-v06-test-first.md](DESIGN-v06-test-first.md) | the design for the A14 replacement. Its work items are parked until the restructure lands |
+| [PARKED.md](PARKED.md) | everything specified but not being built, and why |
 | [PLAN-v06-ledger.md](PLAN-v06-ledger.md) | historical: what the v0.6 code round closed, and the reasoning. Its "Done" table is the record |
 | [archive/plugin-improvement.md](archive/plugin-improvement.md) | evidence: the 23 field findings. Read only when a finding's cost is in question |
 | [PENDING.md](PENDING.md) | the longer-horizon v4 list — unchanged, not merged here |
@@ -244,6 +246,10 @@ which is exactly where A21 happened.
 ---
 
 ## 6b. The active work: modularity
+
+**Design: [DESIGN-modular-architecture.md](DESIGN-modular-architecture.md)** —
+a run becomes an object, a feature becomes a unit, and an 8-step migration where
+every step ships green.
 
 Everything not listed here is **parked** in [PARKED.md](PARKED.md) — specified,
 designed, not being built until the structure can hold it.

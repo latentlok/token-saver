@@ -5,7 +5,8 @@ restructure ([ROADMAP.md](ROADMAP.md) → modularity) comes first. Nothing here 
 abandoned; each item says what it needs and where its design lives.
 
 **Why parked:** every item below adds code to `_delegate` (1,111 lines) or
-`verdict.render` (888 lines). Adding features to those two is what made them
+`verdict.render` (888 lines). The structure that replaces them is designed in
+[DESIGN-modular-architecture.md](DESIGN-modular-architecture.md). Adding features to those two is what made them
 that size — today alone `_delegate` grew 1,041 → 1,111 and `delegate()` went
 from 58 to 61 graph edges. Build the structure, then land these into it.
 

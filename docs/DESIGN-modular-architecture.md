@@ -1,0 +1,342 @@
+# Design — modular architecture: a run is an object, a feature is a unit
+
+**Status: design, nothing built.** Supersedes nothing; the parked queue
+([PARKED.md](PARKED.md)) lands *into* this once it exists.
+
+The goal in one sentence: **adding or removing a feature should be a local
+change**, and today it is not.
+
+---
+
+## 1. The problem, measured
+
+Adding `challenge_brief` took **five edits across four modules**:
+
+| module | edit |
+|---|---|
+| `engine.py` | a constant, a resolver function, a block inserted mid-procedure, a `ctx` key, an accumulator call |
+| `verdict.py` | the wire-format constant, a parser key, a receipt branch |
+| `schemas.py` | the parameter |
+| `runlog.py` | the telemetry |
+
+Nothing groups those sites. Nothing can *enumerate* features. Removing one
+means rediscovering all five and hoping none were missed.
+
+The pressure lands on two functions:
+
+| file | lines | longest function |
+|---|---|---|
+| `qd/engine.py` | 2,134 | **`_delegate` — 1,111 lines, 105 distinct locals** |
+| `qd/verdict.py` | 1,042 | **`render` — 888 lines, 20 inline receipt branches** |
+| `qd/server.py` | 937 | `submit_delegate` — 88 |
+| `qd/invoke.py` | 836 | `_stream_process` — 130 |
+| `qd/gittree.py` | 707 | `mocked_seams` — 58 |
+
+And the interface between them is undeclared: engine writes **28** `ctx` keys,
+`verdict.render` reads **57**. Nothing says which are required, which are
+optional, or which are dead.
+
+**It compounds.** In one working day: `_delegate` 1,041 → 1,111, `engine.py`
+1,947 → 2,134, `delegate()` 58 → 61 graph edges. Every feature added makes the
+next one harder to add *and* harder to remove.
+
+---
+
+## 2. What is NOT wrong
+
+Stated up front, because the fix must not damage it.
+
+**Module layering is sound.** The import graph is acyclic:
+
+```
+server → engine → {bootstrap, gittree, invoke, profiles, runlog, verdict}
+verdict → {gittree, invoke, runlog}        invoke, runlog → profiles
+bootstrap, graph → {gittree, runlog}
+```
+
+**Every other module is healthy.** Outside the two god functions, the longest
+function in the package is 130 lines.
+
+**The detectors are already the right shape.** They are pure functions with
+honest signatures, and they are already spec-covered:
+
+```python
+never_executed(cwd, changed, verify_cmd)
+mocked_seams(cwd, changed, limit)
+uncalled_symbols(cwd, pubs, limit)
+dodge_markers(cwd, pre_sha, pre_status)
+new_public_symbols(cwd)
+```
+
+**This is the finding that shrinks the job.** The logic is not tangled — the
+*wiring* is. Detectors are called inline in `_delegate` and rendered inline in
+`render`. Moving to a registry is largely declarative work, not a rewrite.
+
+So: **do not reorganise modules.** Reorganise how features attach to them.
+
+---
+
+## 3. The core idea
+
+Today there is no object representing a run — there is a function with 105 loose
+variables standing in for one. Three things follow:
+
+1. **A run becomes an object** carrying its plan, its scope, its facts, its
+   findings.
+2. **A feature becomes a unit** — a function plus one registry entry — instead
+   of a set of edits scattered across four files.
+3. **The pipeline becomes fixed and small**, and knows nothing about any
+   particular feature.
+
+---
+
+## 4. Facts vs Findings — the load-bearing distinction
+
+This is the correction that came out of attacking the first draft, and
+everything else depends on it.
+
+**The trap:** if features can compute or write shared state, they depend on each
+other. `never_executed` needs `changed` *and* the gate command; the seam
+demotion needs `new_public_symbols` *and* `mocked_seams`. Let each feature
+gather its own and you re-run git calls N times. Let them share a mutable bag
+and you have rebuilt `ctx` with a nicer name — including its ordering
+dependencies, now hidden in a list's order.
+
+**The rule:**
+
+> **FACTS are computed once, by the pipeline, in dependency order.
+> FINDINGS are pure functions of facts. A feature may read facts. A feature may
+> never write them.**
+
+Consequence: **features have no ordering between them.** That is the property
+that makes add/remove safe, and the first draft did not have it.
+
+If two features in the same phase ever appear to need ordering, that is a bug —
+it means they are competing over a fact that should have been computed once,
+upstream.
+
+```
+Facts     changed files · new public symbols · mocked modules · commits during
+          run · blast radius · dirty-at-T0 snapshot · gate output
+             ↓ read-only, shared
+Findings  UNCALLED: · MOCKED SEAM: · NEVER EXECUTED: · TEST DODGE: · STRAY: ·
+          TOUCH SCOPE: · SEAM CROSSED: · CHALLENGE: ...
+```
+
+---
+
+## 5. The module map
+
+```
+qd/
+  core/
+    plan.py       args + config  →  RunPlan  (frozen)
+    scope.py      RunScope: container, session, call log  (lifecycle)
+    facts.py      tree + run observations, computed once, read-only
+    pipeline.py   the fixed phase sequence
+    findings.py   Finding record + severity/priority
+
+  adapters/       ← ALREADY EXISTS as gittree / invoke / worktrees / profiles
+    git · executor · worktrees · locks · config
+
+  features/
+    gates/        may refuse a run          (few)
+    detectors/    facts → finding, pure     (many)
+
+  surface/
+    schema.py     the frozen wire contract — hand-written, verified not generated
+    receipt.py    findings → the caller's text, by declared priority
+    runlog.py     findings + per-call telemetry → runs.jsonl
+```
+
+### `core/plan.py` — *what was asked for*
+
+Resolves the call's arguments against project config, machine config and
+built-in defaults into **one frozen record**, once. Nothing downstream
+re-resolves anything.
+
+*Why:* roughly a third of the 105 locals are resolved settings, and
+`preflight_expect` is currently resolved in **two different places** — the exact
+class of bug a single resolution point removes.
+
+### `core/scope.py` — *what this run owns*
+
+The container (worktree **or** repo lock), the executor session, the `CallLog`.
+Acquired at the start, released in `finally`.
+
+*Why:* the genuinely object-shaped thing here. Lifetime is what plain functions
+handle badly — the same argument that makes `EndpointGuard` an object, and the
+one that made the chain worktree a real bug until it had an owner.
+
+### `core/facts.py` — *what is true*
+
+Computes the observations once, in dependency order, and hands out a read-only
+record. See §4.
+
+*Why:* the single most important module. It is what makes features independent,
+and it stops the same `git` call being paid for by three detectors.
+
+### `core/pipeline.py` — *the order things happen in*
+
+```
+prepare → gate → build (attempt loop) → observe → report
+```
+
+Fixed, short, feature-agnostic.
+
+*Why:* the sequence really is a sequence. What it must never do again is
+*contain* the features — that is precisely what made `_delegate` 1,111 lines.
+
+### `features/gates/` — *the few things that can stop a run*
+
+`challenge_brief`, `preflight_expect`, `trust="self"` gate synthesis, and the
+parked red gate. Each answers one question: **refuse, or proceed?**
+
+### `features/detectors/` — *the many things that observe*
+
+Seams, dodge markers, strays, touch-scope violations, unproven fixtures,
+uncalled symbols. Each is `facts → Finding | None`. **These already exist** —
+they change from being called inline to being registered.
+
+*Why two roles rather than one interface:* refusing and reporting are different
+powers. A single `Feature` interface would force ~10 detectors to implement
+empty veto hooks — a fat interface, and one that invites a detector to start
+refusing things.
+
+### `surface/receipt.py` — *what the caller reads*
+
+Renders findings in a declared priority order. **A list, not a cascade.**
+
+*Why:* today every feature edits an 888-line function to add its line. This is
+the change that most directly buys "easy to add / easy to remove."
+
+### `surface/schema.py` — *the frozen contract*
+
+Hand-written and unchanged. A spec asserts it covers every registered feature.
+
+*Why:* C9 is explicit — *"existing names, enums and required lists never change;
+a caller's working call must keep working."* Generating the schema from code
+would make the wire contract a function of code structure, so a refactor could
+silently move it. **Verify, do not generate.**
+
+---
+
+## 6. Task types
+
+| type | container | features |
+|---|---|---|
+| **delegate** | its own worktree, or the repo lock under `worktree: "off"` | the full set |
+| **chain** | **one worktree shared by all links** | delegate's set + shared container, handoff forwarding, challenge-once-at-head |
+| **batch** | one per item, isolated from each other | per item, by that item's own type |
+| **query** | none — read-only | **stays outside this design** |
+
+**`query` is deliberately excluded.** `queries.py` is 193 lines, one function,
+and shares exactly one thing with delegate — the executor adapter. No gate, no
+container, no attempt loop, no retry, different receipt. Forcing it into this
+pipeline would make it a run with nearly every feature switched off: an
+abstraction paying rent for nobody. It is also the one part of this system that
+has never been hard to change.
+
+Selection is a **table**, not a class hierarchy:
+
+```python
+DELEGATE = [trust_self, spec_guard, touch_scope, strays, fixtures, seams, dodge]
+CHAIN    = DELEGATE + [shared_container, handoff, challenge_at_head]
+```
+
+---
+
+## 7. Patterns
+
+### Adopted
+
+| Pattern | Where | The problem it removes |
+|---|---|---|
+| **Builder** | `RunPlan` | four layers of precedence resolved inline, in two places |
+| **Composite** | a *runnable* is a Run **or** a chain of Runs | `_batch_item`'s hand-written type check; makes "nesting is one level" a property rather than a refusal message |
+| **Strategy** | the gate | `verify` / self-gate / red gate are interchangeable; the parked red gate currently has nowhere to plug in |
+| **Registry + Pipeline** | features | features have no home and cannot be enumerated |
+| **Decorator** | the prompt | `task_suffix` + `HANDOFF` + `FINDINGS` + `CHALLENGE` + the chain preamble are string concatenation across three files |
+
+### Already present — named here so they are not deleted by accident
+
+| Pattern | Where | Why it matters |
+|---|---|---|
+| **Adapter** | `invoke.py`, `gittree.py` | why Ollama → vLLM was a config change |
+| **Bridge** | argv template + executor profile | why an API-class executor is config-only |
+| **Proxy** | `scoped_hook.py` | a protection proxy over the worker's tool calls |
+| **Memento** | `snapshot_contents` / `restore_paths` | saves T0 **bytes**; its docstring records why `git checkout <sha>` destroyed a caller's uncommitted edits |
+| **Multiton** | `_repo_locks`, `_endpoint_sems` | one lock per repo, one semaphore per endpoint |
+| **Prototype** | `BRIEF_KEYS` + `_inherit` | already carries the pattern's hard question — `amend_brief` is excluded because a stored copy would re-amend on every retry |
+| **Facade** | `server.py` over `engine.py` | keeps the MCP surface thin |
+
+### Rejected, with reasons
+
+| Pattern | Why not |
+|---|---|
+| **Abstract Factory** | for *families* of products across variants; there is one product with different feature lists |
+| **Observer** | reintroduces the ordering dependency §4 exists to remove |
+| **Singleton** for the worktree | a worktree is per-run **by design**; sharing one is corruption, not reuse |
+| **Template Method** | the inheritance form of Pipeline; composition gives the same result without dragging pure functions into a hierarchy |
+| **Flyweight** | shares memory across thousands of identical objects; there are a handful of runs |
+| **Mediator** | centralises communication between components that barely talk — which is the good news, not the problem |
+| **Visitor** | for stable structures with many varying operations; here the operations are stable and the data varies |
+| **Chain of Responsibility** | already present procedurally in `_preconditions`; formalising buys little |
+| **State** | runs have statuses, not behavioural modes. A status is data |
+
+**The rule:** a pattern earns its place by removing a problem that exists here.
+Builder removes measured duplication. Abstract Factory would guard an empty room.
+
+---
+
+## 8. Migration — no rewrite, every step ships green
+
+Ordered so each step is independently valuable and independently revertable.
+
+| # | Step | Why here |
+|---|---|---|
+| 1 | **Extract `_delegate`'s post-run block** | ~190 lines out, zero behaviour change. Proves the seam before anything depends on it |
+| 2 | **`Facts` record** — compute observations once, pass read-only | §4. Must precede findings; everything downstream reads it |
+| 3 | **`Finding` record + detector registry** — detectors return findings instead of writing `ctx` | the detectors already have the right signatures |
+| 4 | **Receipt as a list** — `render`'s 20 branches become registered blocks | kills the second god function; after this, adding a feature never touches the renderer |
+| 5 | **Gate strategy** — the three gates behind one interface | gives the parked red gate a socket |
+| 6 | **`RunScope`** — container + session + call log under one lifetime | absorbs today's chain-worktree handling |
+| 7 | **`RunPlan` builder** | biggest change, smallest risk once 1–6 have drained the function |
+| 8 | **Composite runnable** — Run / ChainOfRuns | last, because it is the only step that changes an external shape |
+
+Steps 1–4 deliver most of the benefit. After step 4 a feature can be added
+without touching the renderer; after step 5 there is a template to copy.
+
+---
+
+## 9. Risks
+
+**This refactors the most spec-covered code in the repo.** 1,000+ tests are the
+safety net, and a green suite after a move only proves nothing *tested* broke.
+Every step should be **mutation-checked**, not merely green — the same standard
+used for the teardown and chain work.
+
+**Step 2 is the one that can go quietly wrong.** If a fact is computed in the
+wrong order, or a detector silently receives a stale one, receipts stay green
+and say the wrong thing. Facts need their own spec asserting order and
+freshness, not just their values.
+
+**Do not migrate features and change them in the same commit.** A moved feature
+must be byte-identical in behaviour; anything else makes a bisect useless.
+
+**The `ctx` 28-vs-57 gap must be resolved, not carried.** Some of those 57 reads
+are defensive, some are legacy, and some may be dead. Enumerate them during step
+3 rather than reproducing the ambiguity in a new shape.
+
+---
+
+## 10. What this does NOT fix
+
+- **A21** — identities coupled by coincidence. No structure closes it.
+  *Delegate modules; gate seams yourself.*
+- **Schema deletion stays manual.** By design: the wire contract is frozen, so
+  removing a parameter must be a deliberate act, not a side effect of deleting
+  a module.
+- **The attempt loop stays a loop.** It is genuinely stateful, it carries the
+  guards, and it is where a subtle change costs correctness. It shrinks because
+  facts and findings leave it — it does not become declarative.
