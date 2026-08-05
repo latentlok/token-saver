@@ -523,6 +523,51 @@ class ExplicitlyNarrowedPermissions(Fixture):
                          ["^pytest\\b"])
 
 
+class GatesAreNotHostageToTheChallenge(Fixture):
+    """Declining one gate must not switch off the others.
+
+    Found by mutation while wiring the red gate in: the gate registry call sat
+    INSIDE `if challenge and not report`, so `challenge_brief: false` -- a
+    caller declining one advisory opinion -- silently disabled every refusal in
+    the system, including the red gate. Nothing in 1,096 tests noticed.
+
+    The shape is familiar by now: the failure looks like success. A caller who
+    switches off the brief review gets runs that proceed, which is exactly what
+    they asked for, and no sign that a different protection went with it.
+    """
+
+    # Red at preflight, and red for a reason the red gate must reject: the
+    # delivered test does not parse.
+    BROKEN = ('python3 -c "print(\'SyntaxError: invalid syntax\'); raise SystemExit(1)"')
+
+    def test_the_red_gate_still_refuses_when_the_challenge_is_declined(self):
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(verify=self.BROKEN, preflight_expect="red",
+                          challenge_brief=False, max_iterations=1)
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("RED GATE", r["result_text"])
+
+    def test_it_refuses_with_the_challenge_enabled_too(self):
+        # The control: the refusal must come from the RED gate, not from the
+        # challenge happening to object.
+        self.steps([{"result": "no objection here\n"},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(verify=self.BROKEN, preflight_expect="red",
+                          challenge_brief=True, max_iterations=1)
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("RED GATE", r["result_text"])
+
+    def test_a_legible_red_is_allowed_through(self):
+        # And the gate must not simply refuse everything: a missing symbol is
+        # what a correct test-first test produces.
+        legible = ('python3 -c "print(\'ImportError: cannot import name add\');'
+                   ' print(\'Ran 1 test\'); raise SystemExit(1)"')
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(verify=legible, preflight_expect="red",
+                          challenge_brief=False, max_iterations=1)
+        self.assertNotEqual(r["status"], "refused")
+
+
 class SpecGuard(Fixture):
     def test_worker_spec_edit_reverted_and_attempt_fails(self):
         self.steps([{"write": {"guard_spec.py": "WEAKENED = 1\n",

@@ -1374,6 +1374,7 @@ def _delegate(args, t0_dir):
     # brief that makes no claim about the code, so there is nothing for the
     # code to contradict. One attempt is the whole shape of a report run, and
     # doubling its executor calls to ask an unanswerable question is pure cost.
+    objection = None
     if challenge and not report:
         objection, ch_meta, ch_session = _challenge_brief(
             profile, task, work_cwd, timeout, session_id)
@@ -1384,14 +1385,6 @@ def _delegate(args, t0_dir):
         ctx["calls"].record("challenge", ch_meta, session=ch_session)
         ctx["challenge"] = {"ran": True, "warm": False,
                             "unverified": (ch_meta or {}).get("challenge_unverified")}
-        # Step 4: the DECISION lives in qd/features/gates/, not here. What the
-        # engine still owns is running the pass that produces the evidence --
-        # that needs the profile and the timeout, which are scope and plan, so
-        # it moves in steps 5-6. A1's parked red gate registers alongside
-        # `challenge` and this call site does not change to accept it.
-        _decision = gates.run_all(gates.GATES, gates.GateRun(objection=objection))
-        if not _decision.ok:
-            return refuse(_decision.reason)
         # --- Carry the challenge session into the build (opt-in) ---
         # OFF by default: measured at +50% input tokens and +16% wall against a
         # cold build (see _challenge_brief). `challenge_warm: true` for callers
@@ -1407,6 +1400,23 @@ def _delegate(args, t0_dir):
             task = CHALLENGE_CLEARED + task
             ctx["challenge"]["warm"] = True
             ctx["session_hint"] = session_id
+
+    # --- The gates (step 4) ---
+    # ONE call, and deliberately outside the challenge branch above: it used to
+    # sit inside it, so `challenge_brief: false` would have silently switched
+    # off every other gate as well -- a caller declining one opinion losing all
+    # the refusals with it. A1's red gate registers alongside `challenge` and
+    # this call site does not change to accept it.
+    #
+    # Placed here, after the preflight, because that is where the evidence
+    # exists: the red gate judges the gate's own output, and the challenge's
+    # objection was gathered above.
+    _decision = gates.run_all(gates.GATES, gates.GateRun(
+        objection=objection,
+        gate_output=preflight_out,
+        expect=preflight_expect))
+    if not _decision.ok:
+        return refuse(_decision.reason)
 
     # --- Live limits (config: project > machine > builtin) ---
     # Both are ceilings on how wrong a run may go before we stop paying for it,
