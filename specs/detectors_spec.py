@@ -148,5 +148,65 @@ class HealthyTreeUnchanged(Fixture):
                        check=True)
 
 
+class ReachesTheReceipt(Fixture):
+    """Each finding must arrive in the text the caller actually reads.
+
+    The gap this class closes. TEST DODGE and STRAYS were already pinned at the
+    receipt (engine_spec: "TEST DODGE: ... adds pytest.mark.xfail", "STRAYS: 1
+    file(s) not named in the task"). The three SEAM findings were not pinned
+    anywhere but seams_spec, which calls the gittree functions directly and so
+    proves only that the greps work -- not that anything renders what they
+    return. A detector whose finding never reaches the receipt is a detector
+    that does not exist, and until now that failure was invisible.
+
+    This matters most for the step-2 move: it is the net under it. A refactor
+    that severs the wire between a detector and the renderer fails HERE, and
+    nowhere else in the suite.
+    """
+
+    def receipt(self, **over):
+        args = {"task": "build out.py with MARKER", "cwd": self.cwd,
+                "verify": "grep -q MARKER out.py",
+                "approval_mode": "auto-edit", "executor": "stub",
+                "max_iterations": 3, "challenge_brief": False}
+        args.update(over)
+        return engine.run(args)
+
+    def test_uncalled_reaches_the_receipt(self):
+        # A new public symbol referenced by nothing outside its own file:
+        # built and wired to nothing, or built for a caller that does not
+        # exist yet. The receipt says which line names it.
+        self.steps([{"write": {"out.py": "MARKER\n"
+                                         "def run_threads():\n    return 1\n"}}])
+        out = self.receipt()
+        self.assertIn("STATUS: success", out)
+        self.assertIn("UNCALLED:", out)
+        self.assertIn("run_threads", out)
+
+    def test_mocked_seam_reaches_the_receipt(self):
+        # The field case seams_spec records: the unit mocked the store, the
+        # suite never executed the SQL, and a SELECT of a column that never
+        # existed shipped green and died on first live contact.
+        self.steps([{"write": {
+            "out.py": "MARKER\n",
+            "store.py": "def get_job_sources():\n    return []\n",
+            "test_store_qwen.py": "from unittest import mock\n"
+                                  "def test_it():\n"
+                                  "    with mock.patch('store.get_job_sources'):\n"
+                                  "        pass\n"}}])
+        out = self.receipt()
+        self.assertIn("MOCKED SEAM:", out)
+        self.assertIn("store.py", out)
+
+    def test_never_executed_reaches_the_receipt(self):
+        # A delivered test file the gate command does not name. Written, never
+        # run, so nothing here proves it passes -- and the gate is green.
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "test_new_qwen.py": "def test_a():\n    pass\n"}}])
+        out = self.receipt()
+        self.assertIn("NEVER EXECUTED:", out)
+        self.assertIn("test_new_qwen.py", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
