@@ -19,8 +19,23 @@ Your job is the restructure. Everything else is parked and mapped.
 | [docs/README-walkthroughs.md](docs/README-walkthroughs.md) | how delegate / chain / query behave, end to end, in plain language |
 | [docs/PRINCIPLES.md](docs/PRINCIPLES.md), [docs/HLD.md](docs/HLD.md) | the standing doctrine and the architecture as it is today |
 
-Do **not** read `docs/archive/plugin-improvement.md` unless you need a finding's
-original cost. It is evidence, it is long, and the roadmap quotes what matters.
+**Reference — open only when a specific question sends you there:**
+
+| Doc | When |
+|---|---|
+| [docs/USAGE.md](docs/USAGE.md) | how a caller uses the plugin; every setting and its default |
+| [docs/LLD.md](docs/LLD.md) | module-by-module detail behind HLD |
+| [docs/OVERVIEW.md](docs/OVERVIEW.md) | the one-page pitch |
+| [docs/FINDINGS.md](docs/FINDINGS.md) | measured results from earlier rounds |
+| [docs/RELEASING.md](docs/RELEASING.md) | the release sequence (0.6.0 is bumped; PR → CI → tag remains) |
+| [docs/DESIGN-v06-test-first.md](docs/DESIGN-v06-test-first.md) | the A14 replacement design — parked, lands after the restructure |
+| [docs/PLAN-v06-ledger.md](docs/PLAN-v06-ledger.md) | historical: what the v0.6 code round closed and why |
+| [docs/PENDING.md](docs/PENDING.md) | the longer-horizon v4 list |
+
+That is every doc in the repo. Nothing else needs finding.
+
+Do **not** read `docs/archive/` unless you need a finding's original cost. It is
+evidence, it is long, and the roadmap quotes what matters.
 
 ---
 
