@@ -9,6 +9,7 @@ from qd.runlog import (
     write_runlog, leverage_record, digest, ledger_summary, brief_summary,
 )
 from qd import limits, refs
+from qd.features.detectors import find as _finding
 
 
 RESULT_CAP = 3000
@@ -214,7 +215,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     _denied = len(denials or []) + len(ctx.get("meta", {}).get("blocked") or [])
     if _denied:
         run_parts.append(f"{_denied} denied")
-    _strays = ctx.get("strays") or []
+    _strays = _finding(ctx.get("detections"), "strays") or []
     if _strays:
         run_parts.append(f"{len(_strays)} strays")
     body.append("RUN: " + " · ".join(run_parts))
@@ -313,7 +314,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # where the receipt is otherwise indistinguishable from honest work, and
     # suppressing it on the compact green path would hide it precisely when it
     # matters most.
-    for path, marks in sorted((ctx.get("dodge") or {}).items())[:5]:
+    for path, marks in sorted(
+            (_finding(ctx.get("detections"), "dodge") or {}).items())[:5]:
         body.append(
             f"TEST DODGE: {path} adds {', '.join(marks[:4])} -- an added skip "
             f"in delivered tests can hide the very failure the task was about; "
@@ -758,7 +760,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # priority 1 is shared with the all-green ADVISORY block; the cap's drop
     # loop sorts stably, so on a tie the block appended FIRST goes first --
     # advisory-green, which is the one whose absence costs the least.
-    strays = ctx.get("strays") or []
+    strays = _finding(ctx.get("detections"), "strays") or []
     if strays:
         c2_blocks.append((
             f"STRAYS: {len(strays)} file(s) not named in the task: "
@@ -817,7 +819,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # accounting lines because a dead symbol matters more than a token count.
     facts = ctx.get("tree_facts") or {}
 
-    uncalled = facts.get("uncalled") or {}
+    uncalled = _finding(ctx.get("detections"), "uncalled") or {}
     if uncalled:
         flat = [f"{n} ({p})" for p, names in uncalled.items() for n in names]
         c2_blocks.append((
@@ -827,7 +829,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             + " -- built and wired to nothing, or intended for a caller that "
               "does not exist yet. Confirm which.", True, 1))
 
-    seams = facts.get("mocked_seams") or []
+    seams = _finding(ctx.get("detections"), "mocked_seams") or []
     if seams:
         pairs = [f"{t} mocks {m}" for t, m in seams]
         c2_blocks.append((
@@ -836,7 +838,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             + " -- the gate replaced a boundary this run also changed, so the "
               "boundary is the one thing it did not test.", True, 1))
 
-    unrun = facts.get("never_executed") or []
+    unrun = _finding(ctx.get("detections"), "never_executed") or []
     if unrun:
         c2_blocks.append((
             f"NEVER EXECUTED: {len(unrun)} delivered test file(s) the gate "

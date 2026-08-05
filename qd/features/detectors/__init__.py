@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""The registry: every detector, enumerable, in one place.
+
+Step 2 of docs/DESIGN-modular-architecture.md. What this buys, concretely --
+before it, adding a sixth detector meant finding where the other five were
+called (five statements inside a 1,111-line function, with nothing naming them
+as a group), and removing one meant proving nothing downstream had come to rely
+on what it wrote into the shared record. Now adding one is a file plus a line
+here, and removing one is deleting both.
+
+**The detectors have no order.** They are independent questions about the same
+facts, so `DETECTORS` is a tuple only because something has to be written down
+first. Nothing may come to depend on the order: the renderer looks findings up
+by kind, and a detector cannot see another's output at all. If two ever appear
+to need ordering, that is a bug -- it means they are competing over something
+that should have been computed once, upstream, as a fact (§4).
+"""
+
+from . import dodge, mocked_seams, never_executed, strays, uncalled
+
+DETECTORS = (uncalled, mocked_seams, never_executed, dodge, strays)
+
+
+def run_all(facts, inputs):
+    """Run every detector against one set of facts.
+
+    Returns `(findings, failed)` -- the findings that fired, and the KINDs of
+    detectors that raised.
+
+    Two lists rather than one, because three outcomes have to stay
+    distinguishable and a single list collapses two of them:
+
+        fired    -> a Finding in `findings`
+        silent   -> in neither list; the detector ran and found nothing
+        broke    -> its KIND in `failed`; nothing is known either way
+
+    Silence and breakage reading the same is the failure PRINCIPLES §IV names:
+    a zero meaning "nothing found" and a zero meaning "nothing was measured"
+    have to be distinguishable, or every zero becomes worthless as evidence.
+    These are greps over a tree another process was writing moments ago, so
+    breakage is a real outcome and not a theoretical one.
+
+    Each detector is guarded individually: its failure costs its own finding and
+    nothing else. Pinned by specs/detectors_spec.py, which was written against
+    the old inline form first -- back then one failed grep discarded every fact
+    the run had collected.
+    """
+    findings, failed = [], []
+    for detector in DETECTORS:
+        try:
+            got = detector.detect(facts, inputs)
+        except Exception:
+            failed.append(detector.KIND)
+            continue
+        if got is not None:
+            findings.append(got)
+    return findings, failed
+
+
+def find(findings, kind, default=None):
+    """The payload of one kind of finding, or `default` if it did not fire.
+
+    Consumers ask by kind rather than by position -- position is exactly the
+    ordering dependency this module exists to remove.
+    """
+    for f in findings or ():
+        if f.kind == kind:
+            return f.data
+    return default

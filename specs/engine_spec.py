@@ -42,7 +42,8 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from qd import engine  # noqa: E402
+from qd import engine
+from qd.features import detectors  # noqa: E402
 from qd import limits  # noqa: E402
 
 # The scenario stub: each invocation pops the next step from steps.json, writes
@@ -124,6 +125,20 @@ echo "$@" >> "$STUB_PYTEST_LOG"
 cat .pytest_out 2>/dev/null
 exit $(cat .pytest_rc 2>/dev/null || echo 0)
 """
+
+
+
+def detected(r, kind, default):
+    """One detector's payload, out of the findings list.
+
+    Step 2 moved these out of `ctx` and into `ctx["detections"]`: a detector now
+    RETURNS a finding rather than writing its result into the record it read
+    from. The assertions below are unchanged -- only where the value is read
+    from moved. What they pin (a skip added to delivered tests is a dodge; a
+    created file the task never names is debris) is behaviour; which key holds
+    it was always an incidental.
+    """
+    return detectors.find(r["ctx"]["detections"], kind, default)
 
 
 class Fixture(unittest.TestCase):
@@ -1674,7 +1689,8 @@ class TestDodge(Fixture):
                                                 "def test_a():\n    pass\n"}}])
         r = self.delegate()
         self.assertEqual(r["status"], "success")
-        self.assertEqual(r["ctx"]["dodge"], {"test_thing.py": ["@unittest.skip"]})
+        self.assertEqual(detected(r, "dodge", {}),
+                         {"test_thing.py": ["@unittest.skip"]})
 
     def test_it_renders_on_a_green_receipt(self):
         self.add_test_file("def test_a():\n    pass\n")
@@ -1694,7 +1710,7 @@ class TestDodge(Fixture):
                            "def test_a():\n    pass\n")
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         r = self.delegate()
-        self.assertEqual(r["ctx"]["dodge"], {})
+        self.assertEqual(detected(r, "dodge", {}), {})
 
     def test_prose_about_skipping_does_not_fire(self):
         self.add_test_file("def test_a():\n    pass\n")
@@ -1702,7 +1718,7 @@ class TestDodge(Fixture):
                                "test_thing.py": "# we skipped the slow ones\n"
                                                 "def test_a():\n    pass\n"}}])
         r = self.delegate()
-        self.assertEqual(r["ctx"]["dodge"], {})
+        self.assertEqual(detected(r, "dodge", {}), {})
 
     def test_a_brand_new_test_file_is_scanned_whole(self):
         self.steps([{"write": {"out.py": "MARKER\n",
@@ -1711,13 +1727,13 @@ class TestDodge(Fixture):
                                                     "    @unittest.expectedFailure\n"
                                                     "    def test_x(self): pass\n"}}])
         r = self.delegate()
-        self.assertEqual(r["ctx"]["dodge"],
+        self.assertEqual(detected(r, "dodge", {}),
                          {"tests/test_new.py": ["expectedFailure"]})
 
     def test_a_skip_in_ordinary_source_is_not_a_test_dodge(self):
         self.steps([{"write": {"out.py": "MARKER\n@skip\n"}}])
         r = self.delegate()
-        self.assertEqual(r["ctx"]["dodge"], {})
+        self.assertEqual(detected(r, "dodge", {}), {})
 
 
 class Strays(Fixture):
@@ -1737,28 +1753,28 @@ class Strays(Fixture):
                                "scratch_dump.py": "print(1)\n"}}])
         r = self.delegate()
         self.assertEqual(r["status"], "success")
-        self.assertEqual(r["ctx"]["strays"], ["scratch_dump.py"])
+        self.assertEqual(detected(r, "strays", []), ["scratch_dump.py"])
 
     def test_a_file_the_task_names_is_expected_not_debris(self):
         self.steps([{"write": {"out.py": "MARKER\n", "helper.py": "h = 1\n"}}])
         r = self.delegate(task="build out.py with MARKER, plus helper.py")
-        self.assertEqual(r["ctx"]["strays"], [])
+        self.assertEqual(detected(r, "strays", []), [])
 
     def test_naming_the_basename_is_enough(self):
         self.steps([{"write": {"out.py": "MARKER\n",
                                "pkg/util/helper.py": "h = 1\n"}}])
         r = self.delegate(task="build out.py with MARKER and a helper.py")
-        self.assertEqual(r["ctx"]["strays"], [])
+        self.assertEqual(detected(r, "strays", []), [])
 
     def test_a_touch_scope_file_is_expected_too(self):
         self.steps([{"write": {"out.py": "MARKER\n", "helper.py": "h = 1\n"}}])
         r = self.delegate(touch_scope=["out.py", "helper.py"])
-        self.assertEqual(r["ctx"]["strays"], [])
+        self.assertEqual(detected(r, "strays", []), [])
 
     def test_qwen_scratch_files_are_the_sanctioned_convention(self):
         self.steps([{"write": {"out.py": "MARKER\n", "calc_qwen.py": "t = 1\n"}}])
         r = self.delegate()
-        self.assertEqual(r["ctx"]["strays"], [])
+        self.assertEqual(detected(r, "strays", []), [])
 
     def test_caller_co_work_is_never_called_debris(self):
         # Attribution active, and the extra file is NOT in the write log: the
@@ -1768,20 +1784,20 @@ class Strays(Fixture):
                      "write_log": self.abs("out.py")}])
         r = self.delegate(approval_mode="scoped")
         self.assertEqual(r["ctx"]["attribution"], "hook")
-        self.assertEqual(r["ctx"]["strays"], [])
+        self.assertEqual(detected(r, "strays", []), [])
 
     def test_an_attributed_extra_file_still_is_debris(self):
         self.steps([{"write": {"out.py": "MARKER\n",
                                "scratch_dump.py": "print(1)\n"},
                      "write_log": self.abs("out.py", "scratch_dump.py")}])
         r = self.delegate(approval_mode="scoped")
-        self.assertEqual(r["ctx"]["strays"], ["scratch_dump.py"])
+        self.assertEqual(detected(r, "strays", []), ["scratch_dump.py"])
 
     def test_an_edited_pre_existing_file_is_not_created_by_this_run(self):
         self.steps([{"write": {"out.py": "MARKER\n",
                                "other.py": "EDITED = 1\n"}}])
         r = self.delegate()
-        self.assertEqual(r["ctx"]["strays"], [])
+        self.assertEqual(detected(r, "strays", []), [])
 
     def test_the_receipt_counts_and_names_them(self):
         self.steps([{"write": {"out.py": "MARKER\n",

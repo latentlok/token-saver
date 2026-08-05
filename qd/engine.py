@@ -26,13 +26,15 @@ from qd.invoke import (
 from qd.gittree import (
     git, is_git_repo, file_sha,
     snapshot, violated_specs, revert_specs, untracked_files,
-    snapshot_contents, restore_paths, dodge_markers,
+    snapshot_contents, restore_paths,
     # committed_during_run / head_sha / new_public_symbols / numstat_map moved
-    # to qd/core/facts.py -- the engine no longer computes tree facts, it asks
-    # for them. The detectors below stay for now; they leave in step 2.
-    uncalled_symbols, mocked_seams, never_executed,
+    # to qd/core/facts.py, and uncalled_symbols / mocked_seams / never_executed
+    # / dodge_markers to qd/features/detectors/ -- the engine neither computes
+    # tree facts nor observes the tree any more. It asks, and renders the answer.
     _project_config, _global_config,
 )
+from qd.features import detectors
+from qd.features.detectors.inputs import DetectorInputs
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
     bootstrap_notice, bootstrap_failed_refusal,
@@ -377,51 +379,6 @@ def _created(cwd, changed, pre_status, pre_tracked, writes, hooked):
     if hooked:
         out = [p for p in out if p in (writes or [])]
     return sorted(out)
-
-
-def _detect(fn):
-    """Run one detector. Its failure costs its own finding and nothing more.
-
-    These are greps over a tree another process was writing moments ago, so any
-    of them can raise. What that USED to cost was wildly unequal: the three seam
-    greps shared one `try`, so one failing took the other two with it, and
-    `dodge_markers`/`_strays` sat inside the handler that sets
-    `tree_facts = None` -- so one failed grep discarded EVERY fact, and the
-    receipt lost CHANGED and COMMITTED and fell back to the v1 re-read path with
-    nothing anywhere saying why. Pinned by specs/detectors_spec.py.
-
-    Returns None on failure rather than an empty result. A finding that could
-    not be computed and one that came back empty are different facts about the
-    run (PRINCIPLES §IV), and collapsing them makes every empty finding
-    worthless as evidence -- the reader cannot tell "clean" from "unmeasured".
-    """
-    try:
-        return fn()
-    except Exception:
-        return None
-
-
-def _strays(created, task, touch_scope):
-    """Created files the task never names (U4.3).
-
-    A delegation that leaves a scratch script, a second copy of a module or a
-    debug dump behind reads exactly like one that did not: the gate is green
-    either way and CHANGED lists the file without judgement. Named in the task
-    (by path OR basename) or listed in touch_scope means expected, not debris.
-    `*_qwen.*` files are excluded -- they are the sanctioned self-test scratch
-    convention, already surfaced by the C8 prefilter's NOTES line.
-    """
-    text = task or ""
-    scope = set(touch_scope or [])
-    out = []
-    for p in created:
-        if "_qwen." in p or p in scope:
-            continue
-        base = os.path.basename(p)
-        if p in text or (base and base in text):
-            continue
-        out.append(p)
-    return out
 
 
 def _fixture_files(paths, segments):
@@ -1354,9 +1311,16 @@ def _delegate(args, t0_dir):
         # C3 features (U4.1/U4.2/U4.3): every one of these renders nothing when
         # its param was never passed.
         "report": report,
+        # The worker's OWN reported findings, parsed out of its reply. Not to be
+        # confused with `detections` below, which is what the detectors observed
+        # about the tree -- one is the worker's account, the other is evidence
+        # taken against it.
         "findings": None,
-        "strays": [],
-        "dodge": {},
+        # Findings from qd/features/detectors/, and the KINDs of any detector
+        # that raised. Empty means every detector ran and had nothing to say;
+        # a KIND in `detections_failed` means nothing is known either way.
+        "detections": [],
+        "detections_failed": [],
         "fixtures_unproven": [],
         # U5.1: the conforming result block (verbatim) and, when it did not
         # conform, what was wrong with it.
@@ -1992,30 +1956,23 @@ def _delegate(args, t0_dir):
         final_changed = ctx["tree_facts"]["changed"]
     except Exception:
         ctx["tree_facts"] = None
-    # Only the FACTS collection can cost the facts. Each detector below runs
-    # under its own guard (`_detect`) because a failed grep is evidence about
-    # that grep and about nothing else -- see specs/detectors_spec.py.
+    # The detectors READ the facts and RETURN findings; nothing writes back into
+    # the record (§4). They observe the same tree at the same moment as the facts
+    # above -- after a worktree run's commit/release there is nothing left to
+    # scan. Adding or removing one is a file in qd/features/detectors/; this call
+    # site does not change.
     if ctx["tree_facts"] is not None:
-        tf = ctx["tree_facts"]
-        # Seam risk (v0.6). Three greps over what the run already changed --
-        # nothing executes. A unit gate cannot assert "this is wired to that",
-        # so these do not verify the seam; they name the places a green
-        # receipt is silent about.
-        tf["uncalled"] = _detect(
-            lambda: uncalled_symbols(work_cwd, tf["pubs"]))
-        tf["mocked_seams"] = _detect(
-            lambda: mocked_seams(work_cwd, final_changed))
-        tf["never_executed"] = _detect(
-            lambda: never_executed(work_cwd, final_changed, verify))
-        # U4.2/U4.3, captured from the same tree and the same moment as the
-        # facts above -- after a worktree run's commit/release there is nothing
-        # left to scan.
-        ctx["dodge"] = _detect(
-            lambda: dodge_markers(work_cwd, pre_sha_full, pre_status))
-        ctx["strays"] = _detect(lambda: _strays(
-            _created(work_cwd, final_changed, pre_status, pre_tracked,
-                     ctx.get("writes"), hooked),
-            task, touch_scope))
+        ctx["detections"], ctx["detections_failed"] = detectors.run_all(
+            ctx["tree_facts"],
+            DetectorInputs(
+                work_cwd=work_cwd,
+                pre_status=pre_status,
+                pre_sha_full=pre_sha_full,
+                created=_created(work_cwd, final_changed, pre_status,
+                                 pre_tracked, ctx.get("writes"), hooked),
+                verify=verify,
+                task=task,
+                touch_scope=touch_scope))
     ctx["work_cwd"] = work_cwd
     # Extracted here rather than at render time so the one line a report run
     # exists to produce survives the receipt's result-text truncation.
