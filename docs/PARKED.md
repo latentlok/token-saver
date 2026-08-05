@@ -12,6 +12,50 @@ from 58 to 61 graph edges. Build the structure, then land these into it.
 
 ---
 
+## When each of these can start
+
+The eight refactoring steps are in
+[DESIGN-modular-architecture.md](DESIGN-modular-architecture.md) §8:
+
+> 1 Facts · 2 Findings · 3 Receipt-as-list · 4 Gates · 5 Scope · 6 Plan ·
+> 7 Composite · 8 Query
+
+Each parked item below needs some of them finished before it has anywhere to
+land. This is the mapping — **not a merge**; the restructure list stays one
+thing and this list stays another.
+
+| Parked item | Blocked until | Then it lives in |
+|---|---|---|
+| **A1** red gate | step 4 | `features/gates/` |
+| **A2** contract pinning | steps 1–3 | facts + a detector + a receipt block |
+| **A3** tier map | step 6 | `core/plan.py` (it is config resolution) |
+| **A4** clause coverage as link 1's gate | step 4 | `features/gates/` |
+| **A5** `SEAM CROSSED` | steps 1–3 | a detector reading existing facts |
+| **A6** `*_qwen` naming check | steps 1–2 | a detector |
+| **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
+| **D** `PAID:` receipt line | step 3 | a receipt block |
+| **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
+
+### Not blocked by anything — can ship whenever
+
+These need no restructure at all, and are only parked because attention is
+elsewhere:
+
+| Item | Why it is free |
+|---|---|
+| **A7** the two playbooks | markdown documents |
+| **A8** contract lifecycle check | a doctor check; doctor is not being restructured |
+| **C** the skill pass | prose. *Best done after* the restructure so it is rewritten once, not twice — a scheduling choice, not a dependency |
+| **D** server lifecycle (A0d) | server startup; untouched by this work |
+| **D** document `advisory_gates` | documentation of something already shipped |
+| **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |
+| **F** decisions owed | version bump, `reset_worktree()`, the `challenge_brief` false-positive rate |
+
+**The useful read:** most of the pipeline work waits on steps 1–4, and *nothing*
+waits past step 6. Roughly half the list is not blocked at all.
+
+---
+
 ## A. The test-first pipeline (A14 replacement)
 
 Fully designed in [DESIGN-v06-test-first.md](DESIGN-v06-test-first.md). The
