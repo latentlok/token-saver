@@ -45,13 +45,13 @@ All 23 findings (plus sub-IDs) against current state. **Done** = shipped in `5c9
 | A16 | BUG | **done** | mark-not-substring |
 | A17 | BUG | **done** | `state: "starting"` before first token |
 | A18 | DEALBREAKER | **done** | `NEVER EXECUTED:` |
-| A19 | PRODUCT | **shape is ours now** | it was another repo's bug — but the identical hole exists in `_SELF_GATE` today → §2.2 (D1) |
+| A19 | PRODUCT | **done** | another repo's bug; the identical hole in `_SELF_GATE` is closed (`8cb677b`) → §2.2 |
 | A20 | DEALBREAKER | **done** | `MOCKED SEAM:` |
 | A21 | DEALBREAKER (method) | **not fixable in code** — see §5 | |
 | A22 | DEALBREAKER | **done** | `UNCALLED:` |
 | A23 | DEALBREAKER | open — **and its priority changed** | → §3.0 |
 
-**Score: 17 done, 1 partial, 5 open, 1 designed, 1 methodological.**
+**Score: 18 done, 1 partial, 4 open, 1 designed, 1 methodological.**
 
 Plus five defects found while *designing* the A14 replacement (DESIGN §9). Three exist
 today and are not in the ledger at all: **D1** the vacuous-pass guard counts skipped
@@ -99,13 +99,21 @@ acceptable. A batch-of-chains shape would still be nicer; it is not load-bearing
 (refusing a second call cleanly) was only ever a workaround for this defect, and is no
 longer needed.
 
-### 2.2 D1 — the vacuous-pass guard counts skipped tests
+### 2.2 ~~D1 — the vacuous-pass guard counts skipped tests~~ — **DONE** (`8cb677b`)
 
-Independent of everything else and live right now. `_SELF_GATE` sums
-`Ran N tests|N passed`; five `@unittest.skip` tests satisfy `min_tests: 5` and the gate
-exits 0. The pytest path is worse — `5 skipped` parses as no count and passes anyway.
+The two runners are counted separately now, because their totals mean different things:
+unittest's `Ran N` includes skips (subtracted), pytest's `N passed` already excludes them
+(not double-discounted). A parse finding no count but *some* skips fails instead of
+falling through to "guard inactive".
 
-A regex plus a fail-on-skip branch. **Ship this first; it waits on nothing.**
+```
+before:  5 skipped, min_tests 5  -> exit 0
+after:   SELF-GATE: only 0 test(s) actually ran (5 skipped -- a skip is not
+         evidence) -- write a real suite (>= 5 tests)   -> exit 1
+```
+
+A skip is deliberately still not a *failure* — `test_a_real_suite_beside_a_skip_still_passes`
+pins that direction so this cannot become the next detector that cries wolf.
 
 ### 2.3 ~~Chain plumbing~~ — **DONE** (`4af4936`, `95278a7`)
 
@@ -156,9 +164,12 @@ unmaintainable), then the red gate generator, then contract pinning.
 
 ### 3.3 Policy
 
-DESIGN §12 items 3–10: tier map, clause coverage as link 1's gate, seam demotion,
-`_qwen` naming enforcement, the two playbooks, contract lifecycle check, handoff
-forwarding, per-link continuity grade.
+DESIGN §12 items 3–8: tier map, clause coverage as link 1's gate, seam demotion,
+`_qwen` naming enforcement, the two playbooks, contract lifecycle check.
+
+*(Item 9, handoff forwarding, shipped early in `14934f9` — it completed the chain rather
+than waiting on the pipeline it was filed under. Item 10's continuity grades are
+half-built: `none` and `handoff` exist via `carry`; `structured` and `session` do not.)*
 
 ---
 
@@ -232,6 +243,7 @@ which is exactly where A21 happened.
 1. **D1** (§2.2) — live hole, waits on nothing, one regex
 2. **A23 `challenge_brief`** (§3.0) — prerequisite for the pipeline being honest
 3. ~~**Chain plumbing**~~ — **done** (`4af4936`), plus batch-of-chains (`95278a7`)
-4. **Extract `_delegate`'s post-run block** (§3.2) — before adding to it
+4. **Extract `_delegate`'s post-run block** (§3.2) — 183 lines of independent analyses in a
+   1041-line function the design adds four more things to. **Next up.**
 5. **Design mechanism, then policy** (§3.2–3.3)
 6. **Skill pass** (§4.1) — last, after the prose it deletes is gone
