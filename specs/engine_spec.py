@@ -301,6 +301,79 @@ class Loop(Fixture):
         self.assertEqual(r["status"], "unverified")
 
 
+class StuckNoProgress(Fixture):
+    """G3: a run that never moved must not read like a run that failed once.
+
+    The loop already NOTICES repetition -- `_retry_prompt(..., repeated=True)`
+    switches the worker to Reflexion ("you have failed the SAME check again...
+    do not retry a variation of it"). What it never did was tell the CALLER.
+    Three attempts producing byte-identical gate output terminated as
+    `verify_failed`, indistinguishable from one attempt that failed once.
+
+    The two call for opposite responses, which is why one status cannot serve
+    both. A run that failed once and moved is a candidate for another attempt;
+    a run that produced the same bytes three times is not converging, and
+    spending more attempts on it buys nothing. PRINCIPLES §II: when nothing you
+    do moves the needle, suspect the needle -- but only someone who knows the
+    needle did not move can act on that.
+    """
+
+    # Content-dependent so the PREFLIGHT output (no file yet) differs from the
+    # attempts' output. Identical preflight-and-attempt-1 output is a different
+    # diagnosis entirely (`gate_suspect`, a broken gate) and must not be
+    # confused with a worker that cannot converge.
+    GATE = ("python3 -c \"import sys,os; "
+            "s=open('out.py').read() if os.path.exists('out.py') else 'NOFILE'; "
+            "sys.exit(0 if 'MARKER' in s else print('GATE saw: '+s.strip()) or 1)\"")
+
+    def test_identical_failures_get_their_own_status(self):
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "wrong\n"}}])
+        r = self.delegate(verify=self.GATE)
+        self.assertEqual(r["status"], "stuck_no_progress")
+        self.assertEqual(len(r["trail"]), 3)
+
+    def test_a_run_that_keeps_moving_is_only_verify_failed(self):
+        # The control, and the reason this cannot be implemented as "any
+        # exhausted run is stuck". Three DIFFERENT failures are three real
+        # attempts; the worker was converging, it just ran out of road.
+        self.steps([{"write": {"out.py": "aaa\n"}},
+                    {"write": {"out.py": "bbb\n"}},
+                    {"write": {"out.py": "ccc\n"}}])
+        r = self.delegate(verify=self.GATE)
+        self.assertEqual(r["status"], "verify_failed")
+
+    def test_one_attempt_cannot_be_stuck(self):
+        # Nothing to compare against. A single failure is a failure.
+        self.steps([{"write": {"out.py": "wrong\n"}}])
+        r = self.delegate(verify=self.GATE, max_iterations=1)
+        self.assertEqual(r["status"], "verify_failed")
+
+    def test_a_late_repeat_still_counts(self):
+        # The needle stopped moving partway. What matters is the state the run
+        # ENDED in, not whether it ever made progress.
+        self.steps([{"write": {"out.py": "aaa\n"}},
+                    {"write": {"out.py": "bbb\n"}},
+                    {"write": {"out.py": "bbb\n"}}])
+        r = self.delegate(verify=self.GATE)
+        self.assertEqual(r["status"], "stuck_no_progress")
+
+    def test_the_receipt_says_what_to_do_about_it(self):
+        # A status nobody can act on is a status nobody reads. The remedy is
+        # NOT another attempt, and the receipt has to say so -- otherwise the
+        # obvious response to a failed run is exactly the wrong one.
+        self.steps([{"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "wrong\n"}},
+                    {"write": {"out.py": "wrong\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd, "verify": self.GATE,
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "max_iterations": 3, "challenge_brief": False})
+        self.assertIn("STATUS: stuck_no_progress", out)
+        self.assertIn("NO PROGRESS:", out)
+        self.assertIn("identical", out)
+
+
 class SpecGuard(Fixture):
     def test_worker_spec_edit_reverted_and_attempt_fails(self):
         self.steps([{"write": {"guard_spec.py": "WEAKENED = 1\n",

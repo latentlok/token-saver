@@ -248,6 +248,20 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     body = [f"STATUS: {status}", f"SESSION: {session_id or 'unknown'}"]
     body.append(f"ATTEMPTS: {len(trail)}/{max_iter}")
 
+    # G3: the obvious response to a failed run is another attempt, and here
+    # that is precisely the wrong one -- the last two attempts produced
+    # byte-identical gate output, so a third produces this same receipt. The
+    # remedy is upstream, in the brief or the gate.
+    #
+    # In the FIXED region and beside the status it explains, because a caller
+    # who reads `stuck_no_progress` without this line will answer it by
+    # retrying, which is the exact behaviour the status exists to stop.
+    if status == "stuck_no_progress":
+        body.append(
+            "NO PROGRESS: the last two attempts produced identical gate "
+            "output -- the worker is not converging on this brief. Change the "
+            "brief or the gate; another attempt returns this same receipt.")
+
     # RUN: one fixed telemetry line on every receipt -- the numbers a caller
     # otherwise pieced together from four scattered sections (or investigated).
     run_parts = [f"{len(trail)} attempt(s)"]

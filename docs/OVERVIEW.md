@@ -254,6 +254,7 @@ Or call the tool directly for something already specified:
 | **co-work attribution** | changes with no logged worker write are reported, never rolled back over |
 | **pre-flight** | if the gate was already green, says so — the pass proves nothing |
 | **gate_suspect** | identical output before/after ⇒ your gate is broken, not the code |
+| **stuck_no_progress** | the last two attempts produced identical gate output ⇒ the worker is not converging; the remedy is the brief or the gate, not another attempt |
 | **rollback** | exact command, with a safety judgment from pre-run state |
 | **handoff** | `HANDOFF/FILES/NEXT`, with `FILES` cross-checked against disk |
 | **retry_of** | a red run replays its stored brief cold, with your one-line correction |

@@ -35,7 +35,6 @@ thing and this list stays another.
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
 | **G2** whole-chain brief contradiction | steps 4, 7 | `features/gates/`, on the composite |
-| **G3** `stuck_no_progress` status | step 3 | engine status + a receipt block |
 | **G4** brief-vs-diff advisory | step 4 | `features/gates/` (advisory only) |
 
 ### Not blocked by anything — can ship whenever
@@ -198,16 +197,14 @@ committed into the shared worktree. **Why steps 4 and 7:** it is a gate (step 4
 gives gates one shape) whose subject is the *chain*, which only becomes an
 addressable thing when a chain-of-runs is itself a runnable (step 7).
 
-**G3 — three identical failures render as one failure.** The retry loop already
-sends the worker the exact gate output, and already detects repetition:
-`_retry_prompt(..., repeated=True)` switches to Reflexion — *"you have failed
-the SAME check again… do not retry a variation of it."* What the **caller**
-never learns is that it happened. Attempt 3 of 3 failing identically to attempt
-1 terminates as `verify_failed`, the same status a single-shot failure produces.
-§II says when nothing moves the needle, suspect the needle — the worker is told,
-the caller is not. Wants a distinct terminal status. **Why step 3:** the status
-itself is a small engine edit, but the receipt line explaining it is one more
-branch in the cascade step 3 exists to delete.
+~~**G3 — three identical failures render as one failure.**~~ **DONE.** The loop
+already switched the WORKER to Reflexion on the first repeat; the signal is now
+retained past the loop and the caller gets `stuck_no_progress` plus a
+`NO PROGRESS:` line saying the remedy is the brief or the gate, not another
+attempt. A subtype of `verify_failed` and last in the status cascade, because
+every branch above it is a more specific diagnosis. Controls in the spec pin the
+half that matters: three DIFFERENT failures stay `verify_failed`, and one
+attempt can never be stuck.
 
 **G4 — nothing asks "is this what was asked for?" after the build.** The gate
 proves the tests pass. The detectors prove nothing was left behind, nothing is

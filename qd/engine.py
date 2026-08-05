@@ -1451,6 +1451,7 @@ def _delegate(args, t0_dir):
     writes_all = []
     allowed_all = []
     last_verify = None
+    no_progress = False
     prev_v_out = None
 
     def schema_gate(attempt, note):
@@ -1870,6 +1871,12 @@ def _delegate(args, t0_dir):
             prev_v_out is not None
             and v_out.strip() == prev_v_out.strip()
         )
+        # G3: kept past the loop. The worker is already told (Reflexion, in
+        # _retry_prompt); until now the CALLER was not, so a run that produced
+        # the same bytes three times was indistinguishable from one that failed
+        # once and was worth another go. `= repeated`, not `or repeated`: what
+        # matters is the state the run ENDED in, not whether it ever stalled.
+        no_progress = repeated
         prev_v_out = v_out
 
         if attempt < max_iter:
@@ -1918,6 +1925,11 @@ def _delegate(args, t0_dir):
         status = "fixture_unproven"
     elif "no verify supplied" in trail[-1]:
         status = "unverified"
+    elif no_progress:
+        # G3. A subtype of verify_failed, and last in the chain because every
+        # branch above is a MORE specific diagnosis -- a stalled run that also
+        # violated scope is a scope violation first.
+        status = "stuck_no_progress"
     else:
         status = "verify_failed"
 
@@ -1929,7 +1941,8 @@ def _delegate(args, t0_dir):
     # Note: `reported` is neither ok nor stopped, so the LEDGER line counts it
     # in the red bucket -- accepted, since a report IS an open problem.
     if report and status in ("success", "success_but_preflight_passed",
-                             "verify_failed", "gate_suspect", "unverified"):
+                             "verify_failed", "stuck_no_progress",
+                             "gate_suspect", "unverified"):
         status = "reported"
 
     # U3.2 (decision 4): the demotion happens HERE, not at render time. Chains,

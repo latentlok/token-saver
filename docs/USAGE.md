@@ -656,6 +656,13 @@ Green receipt ≈ 8 lines. What to actually look at:
   `SHELL APPROVAL NEEDED` (judge the command alone), `gate_suspect` (fix the gate,
   never iterate), `PREFLIGHT` (the gate proved nothing — tighten it), `TEST DODGE`
   (a skip added beside the delivery), `STRAYS` (files the task never asked for).
+- **`stuck_no_progress` + `NO PROGRESS:`** — the run ended with two attempts
+  producing byte-identical gate output. Distinct from `verify_failed` because the
+  two want opposite responses: a run that failed once and moved may be worth
+  another attempt, a run that has stopped moving will return the same receipt.
+  Change the brief or the gate. The worker was already told mid-run (it is
+  switched to diagnose-before-editing on the first repeat); this is the caller
+  being told.
 - **`SUPPRESSED:`** names any of the above that did NOT report — either the
   size cap shed it to fit, or the check itself failed. Read it as *this
   receipt is not telling you those checks were clean*, because a missing
