@@ -94,7 +94,7 @@ class Fixture(unittest.TestCase):
         sh(self.cwd, "git", "commit", "-qm", msg)
         return sh(self.cwd, "git", "rev-parse", "HEAD").stdout.strip()
 
-    def seed(self, sha, status="fresh", reason=None):
+    def seed(self, sha, status="indexed", reason=None):
         graph.refresh_sync  # ensure import ok
         os.makedirs(os.path.dirname(graph.sidecar_path(self.cwd)),
                     exist_ok=True)
@@ -136,12 +136,17 @@ class Staleness(Fixture):
 
 
 class Sidecar(Fixture):
-    def test_refresh_success_fresh_at_new_head(self):
+    def test_refresh_success_records_indexed_at_new_head(self):
+        # "indexed", never "fresh": the sidecar records that an index
+        # COMPLETED at this sha. Freshness is a live comparison against HEAD
+        # and cannot be stored -- it goes false on the next commit, and a
+        # stored "fresh" then lies to everyone who reads the file.
         self._commit("b.py", "y = 2\n", "c2")
         head = sh(self.cwd, "git", "rev-parse", "HEAD").stdout.strip()
         graph.refresh_sync(self.cwd, ["b.py"])
         st = graph.read_state(self.cwd)
-        self.assertEqual(st["status"], "fresh")
+        self.assertEqual(st["status"], "indexed")
+        self.assertNotEqual(st["status"], "fresh")
         self.assertEqual(st["indexed_sha"], head)
         self.assertTrue(os.path.isfile(self.argv_rec))   # graphify was run
 
@@ -174,7 +179,7 @@ class Async(Fixture):
         self.assertTrue(th.daemon)   # a hung refresh must never block exit
         self.assertEqual(graph.read_state(self.cwd)["status"], "indexing")
         th.join(timeout=10)
-        self.assertEqual(graph.read_state(self.cwd)["status"], "fresh")
+        self.assertEqual(graph.read_state(self.cwd)["status"], "indexed")
 
 
 class GraphifyCmd(Fixture):

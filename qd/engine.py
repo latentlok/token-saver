@@ -13,9 +13,11 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
 from qd.profiles import resolve, cost_usd
+from qd import invoke
 from qd.invoke import (
     run_executor, accum_stats, cum_zero,
     was_compacted_since_ack, ack_compaction, compaction_counts,
@@ -26,6 +28,7 @@ from qd.gittree import (
     snapshot, violated_specs, revert_specs, untracked_files,
     snapshot_contents, restore_paths, dodge_markers,
     committed_during_run, head_sha, new_public_symbols, numstat_map,
+    uncalled_symbols, mocked_seams, never_executed,
     _project_config, _global_config,
 )
 from qd.bootstrap import (
@@ -301,17 +304,89 @@ def _run_verify_timed(cmd, cwd, timeout):
     trigger that. `ms` is what a retry pays to run this gate again.
     """
     t0 = time.monotonic()
+    # Own session/group + killpg on timeout. `subprocess.run(timeout=)` kills
+    # ONLY the direct child -- here the shell -- so a gate like
+    # `uv run pytest` left `uv` and `pytest` running under init after the
+    # server had already written the refusal and closed the run. Nothing
+    # recorded them, they compounded (one per refused run), and they competed
+    # for CPU with the very timing used to set this timeout.
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, shell=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
     try:
-        v = subprocess.run(
-            cmd, cwd=cwd, shell=True,
-            capture_output=True, text=True, timeout=timeout,
-        )
-        out = ((v.stdout or "") + (v.stderr or "")).strip()
-        return (v.returncode == 0, out,
+        stdout, stderr = proc.communicate(timeout=timeout)
+        out = ((stdout or "") + (stderr or "")).strip()
+        return (proc.returncode == 0, out,
                 int((time.monotonic() - t0) * 1000), False)
     except subprocess.TimeoutExpired:
+        invoke._terminate(proc)
+        try:                       # drain the pipes the killed tree left open
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
         return (False, f"verify command timed out after {timeout}s",
                 int((time.monotonic() - t0) * 1000), True)
+
+
+# --- Pre-flight sharing (A13) ---------------------------------------------
+#
+# The pre-flight asks one question: "does `verify` pass BEFORE any work?" For
+# a batch, every item is cut from the SAME base commit into its own clean
+# worktree, so that answer is identical for every item by construction -- and
+# the plugin used to run it N times, concurrently, on one machine. A two-item
+# batch put two full suites on the box at once; each ran ~N x slower through
+# CPU and DB contention while `verify_timeout_sec` stayed a fixed per-gate
+# constant, so both timed out and BOTH refused with "fix the gate or raise
+# verify_timeout_sec" -- blaming a gate that was provably fine serially.
+#
+# That is a scaling failure, not a tuning problem: the wider the fan-out, the
+# likelier every item refuses. Fan-out is the feature and fan-out is what
+# broke it.
+#
+# Cached ONLY for worktree runs. A worktree branches from HEAD and is clean,
+# so (base sha, gate command) fully determines the answer. An in-tree run sees
+# a working tree that anything may have touched between two runs, so it always
+# executes its own gate -- a shared verdict there would be a guess.
+_PREFLIGHT_LOCK = threading.Lock()
+_PREFLIGHT = {}            # (sha, cwd_root, cmd) -> (passed, out, ms, timed_out)
+
+
+def _preflight_once(cmd, work_cwd, timeout, base_sha, isolated):
+    """`_run_verify_timed`, executed once per (base sha, gate) across a batch.
+
+    Items that share a base and a gate share the verdict. The FIRST caller
+    runs it while the others wait on the lock rather than racing it -- waiting
+    is what stops them starving each other, so the lock is held across the run
+    deliberately, not just around the dict.
+    """
+    if not isolated or not base_sha:
+        return _run_verify_timed(cmd, work_cwd, timeout)
+
+    key = (base_sha, os.path.realpath(os.path.dirname(work_cwd)), cmd)
+    with _PREFLIGHT_LOCK:
+        if key in _PREFLIGHT:
+            return _PREFLIGHT[key]
+        result = _run_verify_timed(cmd, work_cwd, timeout)
+        # A timeout is NOT cached: it says the box was busy, not that the gate
+        # is red, and caching it would spread one item's bad luck to the whole
+        # batch. Every other verdict is a real answer about this commit.
+        if not result[3]:
+            _PREFLIGHT[key] = result
+        return result
+
+
+def _preflight_forget(base_sha=None):
+    """Drop cached verdicts. Called when a batch finishes: the tree can move
+    between calls, and a verdict outliving its commit is exactly the stale
+    state this project keeps removing."""
+    with _PREFLIGHT_LOCK:
+        if base_sha is None:
+            _PREFLIGHT.clear()
+        else:
+            for k in [k for k in _PREFLIGHT if k[0] == base_sha]:
+                del _PREFLIGHT[k]
 
 
 def _run_advisory(gates, cwd, timeout):
@@ -400,7 +475,7 @@ BRIEF_KEYS = (
     "shell_feedback", "trust", "max_iterations", "timeout_sec",
     "verify_timeout_sec", "preflight_expect", "worktree", "executor",
     "report_dont_fix", "fixture_provenance", "advisory_gates",
-    "result_schema", "on_compaction", "workers",
+    "result_schema", "on_compaction",
     # U6: a retry replays the same DOCUMENT, not a frozen copy of its text.
     # `amend_brief` is deliberately NOT here: stored, it would re-amend the
     # document on every later retry of that session.
@@ -792,12 +867,21 @@ def _delegate(args, t0_dir):
     report = bool(args.get("report_dont_fix"))
     if report:
         max_iter = 1
-    timeout = args.get("timeout_sec") or cfg.get("timeout_sec") \
-        or _DEFAULT_TIMEOUT
+    # When nobody states a timeout, FIT one from this project's own finished
+    # runs instead of using a static 900. The static default killed large
+    # tasks mid-write, and the documented remedy was a regression formula the
+    # caller applied by hand -- with no access to the telemetry it needs. The
+    # server has that telemetry. A first run in a fresh project has no history
+    # and falls back to the old default, which is the one case where a guess
+    # is unavoidable.
+    timeout = args.get("timeout_sec") or cfg.get("timeout_sec")
     if timeout:
         timeout = max(30, min(7200, int(timeout)))
     else:
-        timeout = _DEFAULT_TIMEOUT
+        try:
+            timeout = limits.suggested_timeout(cwd, _DEFAULT_TIMEOUT)
+        except Exception:
+            timeout = _DEFAULT_TIMEOUT
     session_id = args.get("session_id")
     # "refuse" is the default: compaction is the documented fabrication trigger, so a
     # run that reaches it has already exceeded what one delegation can hold honestly.
@@ -912,8 +996,8 @@ def _delegate(args, t0_dir):
     gate_timed_out = False
     self_min = None
     if verify:
-        preflight, preflight_out, gate_ms, gate_timed_out = _run_verify_timed(
-            verify, work_cwd, verify_timeout)
+        preflight, preflight_out, gate_ms, gate_timed_out = _preflight_once(
+            verify, work_cwd, verify_timeout, pre_sha_full, wt is not None)
         if self_gate and preflight:
             # Incremental ratchet: an existing suite is already green, so this
             # gate proves nothing -- and every later feature would read as
@@ -993,6 +1077,11 @@ def _delegate(args, t0_dir):
         "pre_clean": pre_clean,
         "peak": 0,
         "meta": {},
+        # What the fan-out actually got. Resolved here because this is where
+        # the profile is resolved; rendered only on a batch (see verdict.py).
+        "dispatch": profile.get("dispatch"),
+        "endpoint": profile.get("endpoint_cfg"),
+        "batch_size": args.get("_batch_size", 1),
         "timeout": timeout,
         "approval_mode": approval_mode,
         "task": task,
@@ -1086,7 +1175,12 @@ def _delegate(args, t0_dir):
     progress = None
     if burn:
         runlog_dir(cwd)
-        progress = limits.Progress(cwd, session_id=session_id)
+        progress = limits.Progress(cwd, session_id=session_id,
+                                   run_id=args.get(RUN_ID_ARG))
+        # Truncate the sidecar NOW, at submit, so the gap between "submitted"
+        # and the first token shows this run starting rather than a previous
+        # run's final state sitting at the path the submit just advertised.
+        progress._write()
     on_line = limits.compose(burn, progress) if burn else None
 
     # U1.4: run auto-edit as yolo + the PreToolUse hook so attribution exists
@@ -1219,6 +1313,11 @@ def _delegate(args, t0_dir):
         # --- Executor error ---
         if err:
             trail.append(f"attempt {attempt}: {err}")
+            # The kill is the one failure whose remedy is a NUMBER, and the
+            # receipt can compute it (limits.timeout_line) instead of telling
+            # the caller to derive one.
+            if "timed out after" in err:
+                ctx["timed_out"] = True
             if "run stopped:" in err:
                 # A stopped run's output is exactly what was not graded; on
                 # attempt 2+ result_text still holds the PREVIOUS attempt's
@@ -1606,6 +1705,17 @@ def _delegate(args, t0_dir):
             "head_now": head_sha(work_cwd),
             "pubs": new_public_symbols(work_cwd),
         }
+        # Seam risk (v0.6). Three greps over what the run already changed --
+        # nothing executes. A unit gate cannot assert "this is wired to that",
+        # so these do not verify the seam; they name the places a green
+        # receipt is silent about.
+        try:
+            tf = ctx["tree_facts"]
+            tf["uncalled"] = uncalled_symbols(work_cwd, tf["pubs"])
+            tf["mocked_seams"] = mocked_seams(work_cwd, final_changed)
+            tf["never_executed"] = never_executed(work_cwd, final_changed, verify)
+        except Exception:
+            pass
         # U4.2/U4.3, captured from the same tree and the same moment as the
         # facts above -- after a worktree run's commit/release there is nothing
         # left to scan.

@@ -363,9 +363,13 @@ def new_public_symbols(cwd):
         net = [s for s in dict.fromkeys(added) if added.count(s) > removed.count(s)]
         if net:
             out[path] = net
-    # 2. brand-new untracked source files: every public symbol is new
-    for path, code in status_map(cwd).items():
-        if code != "??" or any(t in path for t in _TESTY):
+    # 2. brand-new untracked source files: every public symbol is new.
+    # Through untracked_files(), NOT status_map(): `git status --porcelain`
+    # collapses a brand-new directory into a single `engine/` entry, so a run
+    # that delivered a whole new module package reported ZERO new public
+    # surface -- the larger the unit, the more completely it was missed.
+    for path in untracked_files(cwd):
+        if any(t in path for t in _TESTY):
             continue
         full = os.path.join(cwd, path)
         try:
@@ -381,14 +385,210 @@ def new_public_symbols(cwd):
     return out
 
 
+# --- Seam detectors (v0.6) -------------------------------------------------
+#
+# The three cheapest findings in the whole friction ledger, and they share one
+# premise: a unit brief describes ONE module, its gate runs with the rest of
+# the system mocked, and `preflight_expect` only proves the gate could fail
+# *for that module*. So the workflow can never assert "and this is wired to
+# that" -- and sixteen field defects landed with ZERO inside a delegated unit.
+# Every one lived in a join.
+#
+# None of these verifies a seam. They make seam RISK visible, statically, from
+# what the run already changed. All three are greps; nothing extra executes.
+
+
+def uncalled_symbols(cwd, pubs, limit=40):
+    """{file: [names]} for new public symbols nothing else references.
+
+    DETERMINISTIC (no model). A symbol defined by this run and mentioned
+    nowhere outside its own file and its own tests is, right now, dead code:
+    built, gated, merged, and called by nothing. **Six** such units shipped
+    green in one field build -- `run_threads`, `run_memos`, `set_job_contract`,
+    `write_counter` and two more -- each passing a gate that could not ask the
+    only question that mattered.
+
+    This is a claim about the tree as it stands, not about intent: a public
+    API meant for an outside caller is legitimately uncalled here, which is
+    why the receipt reports it as something to confirm rather than a failure.
+    """
+    out = {}
+    for path, names in (pubs or {}).items():
+        dead = [n for n in names[:limit]
+                if not _referenced_outside(cwd, n, path)]
+        if dead:
+            out[path] = dead
+    return out
+
+
+def _referenced_outside(cwd, name, defining_path):
+    """True if `name` appears in any file that is not its definition or a test.
+
+    Tests are excluded deliberately: a symbol referenced ONLY by the test the
+    same run delivered is exactly the shape being looked for -- the unit and
+    its gate agree with each other and nothing else knows the symbol exists.
+    """
+    rc, out = git(cwd, "grep", "-l", "-w", "--untracked", "-I", "-e", name)
+    if rc != 0:                      # 1 = no match, >1 = grep failure
+        return False
+    for hit in out.splitlines():
+        hit = hit.strip()
+        if not hit or hit == defining_path:
+            continue
+        if any(t in hit for t in _TESTY):
+            continue
+        return True
+    return False
+
+
+# Mock targets: the dotted string forms (`patch("a.b.c")`,
+# `monkeypatch.setattr("a.b", ...)`) plus `patch.object(mod, ...)`, whose
+# first argument is an imported module name rather than a string.
+_MOCK_STR = re.compile(
+    r"""(?:mock\.)?patch(?:\.object)?\s*\(\s*["']([\w\.]+)["']"""
+    r"""|monkeypatch\.(?:setattr|delattr)\s*\(\s*["']([\w\.]+)["']""")
+_MOCK_OBJ = re.compile(r"""(?:mock\.)?patch\.object\s*\(\s*([A-Za-z_][\w\.]*)""")
+
+
+def mocked_seams(cwd, changed, limit=200):
+    """[(test_file, module)] where a delivered test mocks a module this run
+    also CHANGED.
+
+    DETERMINISTIC (no model). The rule, stated generally: a self-graded gate
+    tests what the worker can observe, so anything it replaces with a mock is
+    by construction the thing its gate does not test -- and the mocked seam is
+    therefore exactly where the work fails, with a green receipt every time.
+    Measured: three live failures in one session, all mocked boundaries, all
+    green (SQL against a column that never existed; a config resolved one way
+    in the guard and another in production; constants invented for a live
+    search the worker could not observe).
+
+    The intersection with CHANGED is what makes it a signal rather than noise.
+    Mocking a stable third-party boundary is ordinary and reported nowhere;
+    mocking the module you are in the middle of rewriting is the finding.
+    """
+    changed = list(changed or [])
+    tests = [p for p in changed if any(t in p for t in _TESTY)]
+    if not tests:
+        return []
+    # Module paths this run touched, as importable dotted prefixes.
+    touched = {}
+    for p in changed:
+        if p.endswith(".py") and not any(t in p for t in _TESTY):
+            touched[p[:-3].replace("/", ".").replace("\\", ".")] = p
+    if not touched:
+        return []
+
+    found, seen = [], set()
+    for tf in tests[:limit]:
+        try:
+            full = os.path.join(cwd, tf)
+            if not os.path.isfile(full) or os.path.getsize(full) > 2_000_000:
+                continue
+            with open(full, errors="replace") as f:
+                body = f.read()
+        except Exception:
+            continue
+        targets = set()
+        for m in _MOCK_STR.finditer(body):
+            targets.add(m.group(1) or m.group(2))
+        targets.update(m.group(1) for m in _MOCK_OBJ.finditer(body))
+        for target in targets:
+            if not target:
+                continue
+            for dotted, path in touched.items():
+                # `patch("qd.engine.run")` targets module `qd.engine`; a bare
+                # `patch.object(engine, ...)` names only the tail.
+                if (target == dotted or target.startswith(dotted + ".")
+                        or dotted.endswith("." + target.split(".")[0])
+                        or dotted == target.split(".")[0]):
+                    key = (tf, path)
+                    if key not in seen:
+                        seen.add(key)
+                        found.append(key)
+                    break
+    return found
+
+
+def never_executed(cwd, changed, verify_cmd):
+    """Delivered test files the gate command does not run.
+
+    DETERMINISTIC (no model). A test file written by the run and not executed
+    by its own gate is a test that has never run -- it cannot have passed, and
+    a green receipt says nothing about it. In the field this was an entire
+    directory (`gate_tests/`, skipped by default) whose files were authored
+    under a green delegation and first executed three weeks later, when one
+    turned out to be unsatisfiable: its assertions needed live observations
+    the worker had no way to make, so its ceiling was zero against a floor of
+    three. `preflight_expect="red"` is blind to that by construction -- an
+    unsatisfiable gate is red before AND after, which is what an honest
+    greenfield gate looks like right up until it runs.
+
+    Conservative on purpose. A gate naming no paths (`make test`, `npm test`)
+    is assumed to run everything, because guessing at a build tool's coverage
+    would produce exactly the false accusations this receipt has spent a phase
+    removing. Only a gate that names paths can convict.
+    """
+    cmd = (verify_cmd or "").strip()
+    tests = [p for p in (changed or []) if any(t in p for t in _TESTY)]
+    if not cmd or not tests:
+        return []
+    # A token is a path iff it EXISTS in the tree. Shape heuristics cannot
+    # tell `unit_tests` (a directory) from `pytest` (a program) -- the
+    # filesystem can, and it is the same tree the gate will run against.
+    named = []
+    for tok in re.split(r"[\s;&|]+", cmd):
+        tok = tok.strip("'\"")
+        if not tok or tok.startswith("-"):
+            continue
+        if os.path.exists(os.path.join(cwd, tok)):
+            named.append(tok)
+    if not named:
+        return []                    # whole-suite runner: assume full coverage
+    out = []
+    for t in tests:
+        covered = False
+        for n in named:
+            n = n.rstrip("/")
+            if not n:
+                continue
+            if t == n or t.startswith(n + "/") or n.endswith(t):
+                covered = True
+                break
+        if not covered:
+            out.append(t)
+    return out
+
+
 # Test-dodge markers. Case-sensitive and anchored on the DECORATOR/attribute
 # forms on purpose: a bare `skip` match also fires on "skipped 3 files" in a
 # docstring, and a receipt line that cries wolf on prose is one nobody reads.
 # The three alternatives cover `@skip`/`@unittest.skip` (attribute after one
 # dot), `pytest.mark.skip|xfail` (two dots, so the first alternative cannot
 # reach it), and unittest's `expectedFailure`, which is a name, not a call.
-_DODGE = re.compile(r"@\w*\.?(?:skip|xfail)|pytest\.mark\.(?:skip|xfail)"
+_DODGE = re.compile(r"@\w*\.?(?:skip|xfail)(?!if)\b"
+                    r"|pytest\.mark\.(?:skip|xfail)(?!if)\b"
                     r"|expectedFailure")
+
+# `skipif` is the REPAIR, not the dodge -- converting a hard skip into a
+# conditional one is what a correct fix looks like -- so the alternatives
+# above exclude it explicitly. Without the lookahead every `pytest.mark.skipif`
+# read as an added `skip`: measured 4 false positives in a single run whose
+# whole purpose was skip -> skipif, on the one line the skill says always to
+# read on a green receipt. A detector that cries wolf on the signal you are
+# told to trust is worse than no detector.
+#
+# String and comment tokens are stripped before matching for the same reason:
+# the fourth false positive was a test's own guard assertion,
+# `text.count("@pytest.mark.skip(")`, which exists to PROVE no skip was added.
+_STRINGS = re.compile(r"'''.*?'''|\"\"\".*?\"\"\"|'[^'\n]*'|\"[^\"\n]*\"",
+                      re.S)
+
+
+def _code_only(line):
+    """`line` with string literals and trailing comments blanked out."""
+    line = _STRINGS.sub("", line)
+    return line.split("#", 1)[0]
 
 
 def dodge_markers(cwd, pre_sha, pre_status=None):
@@ -418,7 +618,7 @@ def dodge_markers(cwd, pre_sha, pre_status=None):
         for line in diff.splitlines():
             if not line.startswith("+") or line.startswith("+++"):
                 continue
-            for m in _DODGE.finditer(line[1:]):
+            for m in _DODGE.finditer(_code_only(line[1:])):
                 if m.group(0) not in found:
                     found.append(m.group(0))
         if found:
@@ -440,7 +640,7 @@ def dodge_markers(cwd, pre_sha, pre_status=None):
             found = []
             with open(full, errors="replace") as f:
                 for line in f:
-                    for m in _DODGE.finditer(line):
+                    for m in _DODGE.finditer(_code_only(line)):
                         if m.group(0) not in found:
                             found.append(m.group(0))
             if found:

@@ -40,10 +40,6 @@ TOOL = json.loads(r'''
         "type": "integer",
         "description": "Attempts before giving up (default: project config, else 3; max 10)."
       },
-      "workers": {
-        "type": "integer",
-        "description": "Best-of-N independent candidates; first gate-pass wins (default 1, max 8; needs `verify` and a committed base)."
-      },
       "on_compaction": {
         "type": "string",
         "enum": [

@@ -127,7 +127,7 @@ class Fixture(unittest.TestCase):
             "settings_overlay": None,
             "price_in_per_mtok": 0, "price_out_per_mtok": 0,
             "rules_file": "QWEN.md", "altitude": "lld",
-            "defaults": {"workers": 1, "max_iterations": 3, "timeout": 30},
+            "defaults": {"max_iterations": 3, "timeout": 30},
             "endpoint_cfg": {"name": "stub-ep", "parallel_max": 1},
         }
         p.update(over)
@@ -306,8 +306,7 @@ class Failures(Fixture):
 
     def test_timeout_default_comes_from_profile(self):
         p = self.profile(env={"STUB_OUT": self.out, "STUB_SLEEP": "5"},
-                         defaults={"workers": 1, "max_iterations": 3,
-                                   "timeout": 1})
+                         defaults={"max_iterations": 3, "timeout": 1})
         text, _, _, err, _ = self.run_exec(profile=p)
         self.assertIn("timed out after 1s", err)
 

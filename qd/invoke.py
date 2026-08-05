@@ -5,6 +5,7 @@ Executor invocation, behavior frozen by specs/invoke_spec.py.
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -98,16 +99,43 @@ def stream_argv(argv):
     return argv
 
 
-def _terminate(proc):
-    """Stop the executor: ask, then insist. Never raises."""
+def _signal_group(proc, sig):
+    """Send `sig` to the child's whole process GROUP, falling back to the
+    child alone. Never raises.
+
+    The child is spawned with start_new_session=True, so it leads its own
+    group and every grandchild inherits it. Signalling the group is the only
+    way to stop what the child spawned: an executor that shells out (`uv` ->
+    `pytest`, a wrapper script -> the real command) leaves the grandchildren
+    running when only the direct child is killed, and they reparent to init
+    and keep burning CPU with nothing recording that they exist.
+    """
     try:
-        proc.terminate()
+        os.killpg(os.getpgid(proc.pid), sig)
+        return
+    except Exception:
+        pass
+    try:                                  # no group (Windows, or already reaped)
+        proc.kill() if sig == signal.SIGKILL else proc.terminate()
+    except Exception:
+        pass
+
+
+def _terminate(proc):
+    """Stop the executor and everything it spawned: ask, then insist.
+
+    Never raises. SIGTERM to the group, then SIGKILL to whatever ignored it --
+    a `wait()` on the direct child is not proof the group is gone, but it is
+    the only completion signal available, so the SIGKILL is unconditional
+    after the grace period rather than conditional on the child surviving.
+    """
+    try:
+        _signal_group(proc, signal.SIGTERM)
         try:
             proc.wait(timeout=5)
-            return
         except subprocess.TimeoutExpired:
             pass
-        proc.kill()
+        _signal_group(proc, signal.SIGKILL)
     except Exception:
         pass
 
@@ -194,6 +222,12 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
+            # Its own session/process group, so _terminate can reap the whole
+            # tree. Without this a timeout or an abort kills the executor and
+            # orphans everything it spawned (measured: four separate leaks --
+            # a gate suite, a cancelled query's worker, and two dropped-
+            # transport workers, all still running minutes later under init).
+            start_new_session=True,
         )
     except FileNotFoundError:
         return None, "", None, f"binary not found ({argv[0]})", None

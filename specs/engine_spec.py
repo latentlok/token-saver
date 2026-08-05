@@ -699,7 +699,9 @@ class GraphWiring(Fixture):
                     "approval_mode": "auto-edit", "executor": "stub"})
         st = self._wait_sidecar(self.cwd)
         self.assertIsNotNone(st)
-        self.assertEqual(st["status"], "fresh")
+        # "indexed", not "fresh": the sidecar records that an index completed
+        # at this sha, never that it is still current -- see qd/graph.py.
+        self.assertEqual(st["status"], "indexed")
 
     def test_worktree_success_does_not_refresh_main(self):
         from qd import graph
@@ -726,7 +728,9 @@ class GraphWiring(Fixture):
         self.assertIn("STATUS: success_but_preflight_passed", out)
         st = self._wait_sidecar(self.cwd)
         self.assertIsNotNone(st)
-        self.assertEqual(st["status"], "fresh")
+        # "indexed", not "fresh": the sidecar records that an index completed
+        # at this sha, never that it is still current -- see qd/graph.py.
+        self.assertEqual(st["status"], "indexed")
 
     def test_failure_does_not_refresh(self):
         from qd import graph

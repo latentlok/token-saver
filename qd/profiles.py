@@ -26,7 +26,7 @@ _defaults = {
     "price_out_per_mtok": 0,
     "rules_file": "QWEN.md",
     "altitude": "lld",
-    "defaults": {"workers": 1, "max_iterations": 3, "timeout": 900},
+    "defaults": {"max_iterations": 3, "timeout": 900},
 }
 
 QWEN_LOCAL = {
@@ -49,7 +49,7 @@ QWEN_LOCAL = {
     "endpoint": "local",
     "rules_file": "QWEN.md",
     "altitude": "lld",
-    "defaults": {"workers": 1, "max_iterations": 3, "timeout": 900},
+    "defaults": {"max_iterations": 3, "timeout": 900},
 }
 
 
@@ -73,18 +73,17 @@ def dispatch_mode(cwd):
     Precedence: project .qwen-delegate.json `dispatch` > machine
     ~/.qwen-delegate/config.json `dispatch`.
 
-    `"serial"` pins every endpoint to ONE in-flight request whatever its
-    parallel_max says -- one local endpoint is one GPU, and concurrent requests
-    do not get a private context each (on Ollama the loaded context is split
-    across parallel slots), so fan-out buys wall-clock at the price of a
-    shorter effective context per request, which is how a turn gets truncated
-    mid tool-call.
+    A KILL SWITCH, not the concurrency knob. Capacity is declared per endpoint
+    as `parallel_max`; this exists to clamp every endpoint to ONE in-flight
+    request whatever they declare, for the case where a box is misbehaving and
+    the fastest diagnosis is "stop everything overlapping".
 
-    Unset is not "parallel": with no endpoints section every endpoint already
-    holds one slot, so the out-of-the-box behaviour is serial. Setting this
-    only matters where an endpoint declares parallel_max > 1 -- there, an
-    explicit `"serial"` overrules it and `"parallel"` leaves it alone. Any
-    other value reads as "serial": a typo must not turn concurrency on.
+    Unset is the normal state and is not "parallel": with no endpoints section
+    every endpoint already holds one slot, so out of the box everything is
+    serial anyway. Declaring `parallel_max` is the opt-in; setting this only
+    matters where an endpoint has declared more than one slot to overrule. Any
+    value other than "parallel" reads as "serial": a typo must not turn
+    concurrency on.
     """
     for path in (os.path.join(cwd or ".", ".qwen-delegate.json"),
                  _machine_config_path()):
@@ -144,14 +143,14 @@ def _resolve(name, profiles, endpoints):
             f"Endpoint '{ep}' referenced by profile '{profile['name']}' "
             "does not exist in endpoints section"
         )
-    if ep in ep_section:
-        pm = ep_section[ep].get("parallel_max", 1)
-        profile["endpoint_cfg"] = {
-            "name": ep,
-            "parallel_max": max(pm, 1),
-        }
-    else:
-        profile["endpoint_cfg"] = {"name": ep, "parallel_max": 1}
+    # `parallel_max` is the ONE concurrency declaration: how many requests
+    # this endpoint serves at once. Every endpoint is an OpenAI-compatible
+    # API -- self-hosted vLLM and a hosted key are the same thing to this
+    # plugin, an argv template plus a base URL -- so there is no local/remote
+    # distinction to model and no second knob to reconcile with this one.
+    # Want an endpoint serial? Give it one slot.
+    pm = (ep_section.get(ep) or {}).get("parallel_max", 1)
+    profile["endpoint_cfg"] = {"name": ep, "parallel_max": max(pm, 1)}
     return profile
 
 
@@ -161,16 +160,27 @@ def resolve(cwd, call_executor=None):
     Precedence: call_executor arg > project .qwen-delegate.json 'executor'
     > machine file 'default' > builtin qwen-local.
 
-    The resolved profile carries the EFFECTIVE dispatch policy (see
-    dispatch_mode): a configured "serial" pins the endpoint to one slot
-    whatever its parallel_max says, enforced here -- the one place every
-    caller already reads -- so no call site can route around the policy.
+    Concurrency comes from ONE place: the endpoint's `parallel_max`. Each
+    endpoint holds that many slots, machine-wide, and items queue on the
+    endpoint they actually target -- so a fleet of endpoints with different
+    capacities needs no coordination beyond declaring each one.
+
+    `dispatch: "serial"` (project or machine config) stays as a KILL SWITCH,
+    not a policy layer: it clamps every endpoint to one slot for debugging a
+    box that is misbehaving. It is deliberately blunt and deliberately global.
+    Anything that is not exactly "parallel" reads as serial -- a typo must
+    never turn concurrency on.
+
+    `dispatch` carried on the returned profile is derived, never configured:
+    it is just "did this call get more than one slot", which is what the
+    receipt's DISPATCH line reports.
     """
     profile = _resolve_profile(cwd, call_executor)
+    cfg = profile["endpoint_cfg"]
     if dispatch_mode(cwd) == "serial":
-        profile["endpoint_cfg"]["parallel_max"] = 1
+        cfg["parallel_max"] = 1
     profile["dispatch"] = (
-        "serial" if profile["endpoint_cfg"]["parallel_max"] <= 1 else "parallel")
+        "serial" if cfg["parallel_max"] <= 1 else "parallel")
     return profile
 
 
@@ -212,8 +222,13 @@ def _resolve_profile(cwd, call_executor=None):
             data.get("endpoints"),
         )
 
-    # Level 4: builtin
-    return _resolve(QWEN_LOCAL["name"], {}, None)
+    # Level 4: builtin. `endpoints` is passed THROUGH: the minimal machine
+    # file -- declare capacity for the builtin profile, define no custom
+    # profile -- parsed fine, validated fine and did nothing, because this
+    # level used to hardcode None. Capacity was silently ignored unless the
+    # file also named `"default": "qwen-local"`, which nothing documents.
+    return _resolve(QWEN_LOCAL["name"], {},
+                    data.get("endpoints") if data else None)
 
 
 def render_argv(profile, task, mode, resume):

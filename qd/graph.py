@@ -128,12 +128,20 @@ def _do_refresh(cwd, files, prior_sha):
             })
             return
 
-        # Success — capture current HEAD
+        # Success — capture current HEAD.
+        # "indexed", NOT "fresh": freshness is a comparison against HEAD *now*,
+        # so it cannot be stored -- it goes false the next time anyone commits.
+        # The field used to read "fresh", and did: after a package conversion
+        # it claimed fresh while 32 of 32 files were stale and the whole graph
+        # was uncached. Anyone reading the sidecar to answer "is my graph
+        # current?" -- the obvious thing to do -- got a confident wrong answer.
+        # What IS storable is that an index completed at this SHA; whether that
+        # is still current is staleness()'s job, computed live from git.
         rc, head = git(cwd, "rev-parse", "HEAD")
         _write_sidecar(cwd, {
             "indexed_sha": head if rc == 0 else prior_sha,
             "ts": now_iso(),
-            "status": "fresh",
+            "status": "indexed",
         })
     except FileNotFoundError:
         _write_sidecar(cwd, {
@@ -215,6 +223,9 @@ def graph_line(cwd, will_refresh=False):
     if state is None:
         return "GRAPH: none \u2014 run graphify once to index"
 
+    # Only the states that CANNOT be recomputed are read from the file:
+    # "indexing" and "failed" are facts about a write, not about the tree.
+    # Everything else is derived live below -- never read from disk.
     status = state.get("status", "none")
     if status == "indexing":
         return "GRAPH: indexing"
@@ -222,7 +233,6 @@ def graph_line(cwd, will_refresh=False):
         reason = state.get("reason") or "unknown"
         return f"GRAPH: failed: {reason}"
 
-    # fresh or stale
     s = staleness(cwd)
     sha_short = (s["indexed_sha"] or "?")[:7]
     if s["status"] == "fresh" or not s["stale"]:

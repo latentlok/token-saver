@@ -6,11 +6,12 @@ Claude-authored gate (never delegate this file -- it defines what correct means)
 
 R2 (PLAN-v3-l5) retired crane equality for receipt TEXT: clean green runs render
 compact (trail/CONTEXT/TIME/TOOLS/CONTINUE/NEXT only on non-success or flags).
-parse_handoff/strip_handoff remain crane-equal. The v2 seams, unchanged:
+The frozen v1 oracle is gone entirely -- every assertion here is against this
+module's own contract. The seams, unchanged:
 
   1. C2 receipt lines (NOTES/WORKTREE/MERGE/GRAPH/REFS/COST) insert immediately
      BEFORE the "--- qwen result ---" block, in C2 order, each only when
-     applicable. With no v2 ctx keys present, output is byte-identical to v1.
+     applicable.
   2. N1 cap: the receipt never exceeds 3,000 chars; C2 lines are dropped WHOLE,
      reverse-priority (BURN first, then COST, then REFS, then GRAPH, then
      NOTES); when nothing droppable remains, the qwen-result tail shrinks to a
@@ -18,13 +19,13 @@ parse_handoff/strip_handoff remain crane-equal. The v2 seams, unchanged:
      never dropped.
   3. C5 log seam: the run-log record written by render carries executor and
      cost_usd from ctx (defaults "qwen-local"/0.0).
-  4. Sha normalization: v2 ctx["pre_sha"] is the FULL sha (gittree contract);
-     v1 used short. Equality tests feed each its own form and normalize.
+  4. Sha normalization: ctx["pre_sha"] is the FULL sha (gittree contract);
+     rendered shas are normalized to "SHA" before assertion.
 
 Public surface pinned here:
     qd.verdict.render(status, session_id, trail, result_text, denials,
                       max_iter, ctx, last_verify=None) -> str
-    qd.verdict.parse_handoff, qd.verdict.strip_handoff  (ports; crane-equal)
+    qd.verdict.parse_handoff, qd.verdict.strip_handoff
 
 Run:  python3 specs/verdict_spec.py
 """
@@ -38,7 +39,6 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import _ref_impl as server  # noqa: E402  (frozen v1 oracle, test-only)
 from qd import verdict  # noqa: E402
 
 
@@ -94,35 +94,29 @@ class Fixture(unittest.TestCase):
         c.update(over)
         return c
 
-    def both(self, status="success", trail=None, result=RESULT_TEXT,
-             denials=None, last_verify=None, v1_over=None, v2_over=None):
+    def receipt(self, status="success", trail=None, result=RESULT_TEXT,
+                denials=None, last_verify=None, v2_over=None):
         trail = trail or ["attempt 1: VERIFY PASS"]
-        v1 = server.render(status, "s-1", list(trail), result,
-                           list(denials or []), 3,
-                           self.ctx(self.short_sha, **(v1_over or {})),
-                           last_verify)
-        v2 = verdict.render(status, "s-1", list(trail), result,
-                            list(denials or []), 3,
-                            self.ctx(self.full_sha, **(v2_over or {})),
-                            last_verify)
-        return (v1.replace(self.short_sha, "SHA"),
-                v2.replace(self.full_sha, "SHA").replace(self.short_sha, "SHA"))
+        text = verdict.render(status, "s-1", list(trail), result,
+                              list(denials or []), 3,
+                              self.ctx(self.full_sha, **(v2_over or {})),
+                              last_verify)
+        return text.replace(self.full_sha, "SHA").replace(self.short_sha, "SHA")
 
 
 class CompactGreen(Fixture):
     """R2 (PLAN-v3-l5): a clean success renders COMPACT -- diagnostics appear
-    only when something needs the manager's judgment. Amends the C2 'v1 frozen'
-    clause; crane equality for receipt text is retired (helpers below remain
-    crane-equal)."""
+    only when something needs the manager's judgment. Receipt text is asserted
+    against its own contract; there is no frozen v1 to compare with."""
 
     def test_green_keeps_the_essentials(self):
-        _, v2 = self.both()
+        v2 = self.receipt()
         for tag in ("STATUS: success", "SESSION:", "ATTEMPTS: 1/3",
                     "CHANGED", "HANDOFF:", "ROLLBACK:"):
             self.assertIn(tag, v2)
 
     def test_green_drops_the_boilerplate(self):
-        _, v2 = self.both(v2_over={"meta": {"stats": {
+        v2 = self.receipt(v2_over={"meta": {"stats": {
             "ms": 60000, "tools": 9, "tool_names": ["edit"], "tool_fail": 2},
             "blocked": []}})
         for tag in ("  - attempt", "CONTEXT:", "TIME:", "TOOLS:",
@@ -130,29 +124,29 @@ class CompactGreen(Fixture):
             self.assertNotIn(tag, v2)
 
     def test_green_public_surface_is_one_line(self):
-        _, v2 = self.both()
+        v2 = self.receipt()
         line = [l for l in v2.splitlines()
                 if l.startswith("NEW PUBLIC SURFACE")][0]
         self.assertEqual(line, "NEW PUBLIC SURFACE: made (built.py)")
         self.assertNotIn("names others can depend on", v2)
 
     def test_green_receipt_is_small(self):
-        _, v2 = self.both()
+        v2 = self.receipt()
         self.assertLess(len(v2), 900)
 
     def test_misreport_still_fires_on_green(self):
-        _, v2 = self.both(result="done\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing\n")
+        v2 = self.receipt(result="done\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing\n")
         self.assertIn("MISREPORT", v2)
 
     def test_near_compaction_context_shown_even_on_green(self):
-        _, v2 = self.both(v2_over={"peak": 150000})
+        v2 = self.receipt(v2_over={"peak": 150000})
         self.assertIn("APPROACHING COMPACTION", v2)
 
     def test_stale_verify_output_dropped_on_green(self):
         # Success-after-retry: last_verify holds attempt 1's FAILURE output.
         # Found live (trust=self slugify run): a green receipt carried 1.3k
         # chars of stale red output and read as a failure.
-        _, v2 = self.both(trail=["attempt 1: verify failed",
+        v2 = self.receipt(trail=["attempt 1: verify failed",
                                  "attempt 2: VERIFY PASS"],
                           last_verify="AssertionError: stale attempt-1 noise")
         self.assertEqual(v2.splitlines()[0], "STATUS: success")
@@ -164,7 +158,7 @@ class VerboseRed(Fixture):
     """Non-success keeps the full diagnostics."""
 
     def test_red_keeps_trail_context_and_verify_output(self):
-        _, v2 = self.both(status="verify_failed",
+        v2 = self.receipt(status="verify_failed",
                           trail=["attempt 1: verify failed",
                                  "attempt 2: verify failed"],
                           last_verify="AssertionError: expected 3 got 2")
@@ -173,22 +167,22 @@ class VerboseRed(Fixture):
             self.assertIn(tag, v2)
 
     def test_gate_suspect_explains(self):
-        _, v2 = self.both(status="gate_suspect")
+        v2 = self.receipt(status="gate_suspect")
         self.assertIn("GATE SUSPECT", v2)
         self.assertIn("Fix the gate before retrying", v2)
 
     def test_preflight_pass_is_not_clean(self):
-        _, v2 = self.both(v2_over={"preflight": True})
+        v2 = self.receipt(v2_over={"preflight": True})
         self.assertIn("PREFLIGHT: the verify command ALREADY PASSED", v2)
         self.assertIn("  - attempt", v2)
 
     def test_dirty_tree_rollback_warns(self):
-        _, v2 = self.both(v2_over={"pre_clean": False})
+        v2 = self.receipt(v2_over={"pre_clean": False})
         self.assertIn("unsafe to blanket-revert", v2)
 
     def test_blocked_shell_compact_but_present_on_green(self):
         over = {"meta": {"stats": {}, "blocked": ["rm -rf x (destructive)"]}}
-        _, v2 = self.both(denials=[{"tool_name": "run_shell_command"}],
+        v2 = self.receipt(denials=[{"tool_name": "run_shell_command"}],
                           v2_over=over)
         self.assertIn("SHELL APPROVAL NEEDED", v2)
         self.assertIn("rm -rf x (destructive)", v2)
@@ -197,13 +191,24 @@ class VerboseRed(Fixture):
 
 
 class Helpers(Fixture):
-    def test_handoff_helpers_crane_equal(self):
-        for text in (RESULT_TEXT, "no handoff here", "",
-                     "x\nHANDOFF: a\nFILES: f.py\nNEXT: b\n"):
-            self.assertEqual(server.parse_handoff(text),
-                             verdict.parse_handoff(text))
-            self.assertEqual(server.strip_handoff(text),
-                             verdict.strip_handoff(text))
+    def test_handoff_helpers(self):
+        # Was a crane-equality test against the frozen v1. Pinned to the
+        # contract itself: the parse keeps the three handoff keys, and the
+        # strip leaves the prose WITHOUT them (a receipt that shows both
+        # prints the handoff twice).
+        cases = [
+            (RESULT_TEXT,
+             {"HANDOFF": "module built and traced against the spec",
+              "FILES": "qd/example.py", "NEXT": "nothing"},
+             "I did the work."),
+            ("no handoff here", {}, "no handoff here"),
+            ("", {}, ""),
+            ("x\nHANDOFF: a\nFILES: f.py\nNEXT: b\n",
+             {"HANDOFF": "a", "FILES": "f.py", "NEXT": "b"}, "x"),
+        ]
+        for text, parsed, stripped in cases:
+            self.assertEqual(verdict.parse_handoff(text), parsed)
+            self.assertEqual(verdict.strip_handoff(text), stripped)
 
 
 class C2Lines(Fixture):

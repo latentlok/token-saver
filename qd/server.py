@@ -329,30 +329,41 @@ def run_batch(items, handler, on_partial=None):
         with progress_lock:
             _announce(on_partial, _joined(results, BATCH_SEP))
 
-    # Under the serial policy the items would queue on a one-slot endpoint
-    # anyway; running them in order instead of racing for that slot keeps N
-    # worktrees from being cut for work that executes one at a time, and makes
-    # the receipt order the submitted order.
-    serial = True
+    # Every item runs on its own thread and blocks on ITS OWN endpoint's
+    # guard. There is deliberately no serial/parallel branch here any more.
+    #
+    # There used to be one, and it read the dispatch policy of items[0] and
+    # applied it to the whole batch. When every item shares an endpoint that
+    # was merely redundant -- the guards already enforce capacity, so a
+    # one-slot endpoint serializes its items whether or not the loop does.
+    # When items target DIFFERENT endpoints it was wrong: an item on a
+    # one-slot endpoint at the head of the batch pinned every item behind it,
+    # and a batch that happened to start on a wide endpoint let a narrow one
+    # run over capacity. Capacity belongs to an endpoint, so only the endpoint
+    # may decide it.
+    #
+    # The two things the serial branch was protecting are both still true:
+    #   - Worktrees are NOT cut early. A worktree is acquired inside
+    #     engine.run, which a thread only reaches after its guard is taken, so
+    #     a one-slot endpoint still cuts one tree at a time.
+    #   - Receipt order is submission order regardless: results are written by
+    #     index and joined in order, not in completion order.
+    # Guards are acquired endpoint-then-repo by every thread, so the fixed
+    # ordering keeps a mixed batch from deadlocking on them.
+    threads = [threading.Thread(target=one, args=(i, a), daemon=True)
+               for i, a in enumerate(items)]
     try:
-        if items:
-            first = items[0] or {}
-            serial = profiles.resolve(
-                first.get("cwd") or ".",
-                first.get("executor"))["dispatch"] == "serial"
-    except Exception:
-        serial = True
-
-    if serial:
-        for i, a in enumerate(items):
-            one(i, a)
-    else:
-        threads = [threading.Thread(target=one, args=(i, a), daemon=True)
-                   for i, a in enumerate(items)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+    finally:
+        # The shared pre-flight verdict lives exactly as long as the batch
+        # that shares it. The tree can move between calls, and a verdict that
+        # outlives its commit is the same class of stale state as the sidecar
+        # that claimed "fresh" -- so it is dropped on every exit path.
+        from qd import engine
+        engine._preflight_forget()
     return BATCH_SEP.join(
         r if r is not None else "STATUS: error\n(no result)" for r in results)
 
@@ -455,10 +466,47 @@ def run_delegate_batch(args, on_partial=None):
     if refusal:
         return engine.refusal_receipt(refusal)
     if args.get("chain"):
-        return run_chain(args["chain"], engine.run, on_partial=on_partial)
+        return run_chain(_inherit(args, args["chain"]), engine.run,
+                         on_partial=on_partial)
     if args.get("batch"):
-        return run_batch(args["batch"], engine.run, on_partial=on_partial)
+        return run_batch(_inherit(args, args["batch"]), engine.run,
+                         on_partial=on_partial)
     return engine.run(args)
+
+
+# Call-level fields an item inherits when it does not state its own. `cwd` is
+# the one that mattered: it is a REQUIRED top-level parameter, so every caller
+# passes it at the call, and the skill's own example says items carry "the same
+# fields per item" -- which reads as "per-item fields are the ones that VARY".
+# Items without it reached engine.run() and came back as a bare
+# `KeyError('cwd')` for the whole receipt, with no field name and no hint that
+# the batch items were at fault. The rest are here for the same reason they are
+# call-level at all: they describe the RUN, not the item.
+_INHERITED = ("cwd", "executor", "worktree", "trust", "approval_mode",
+              "timeout_sec", "verify_timeout_sec", "max_iterations",
+              "on_compaction", "shell_allow", "mcp_allow")
+
+
+def _inherit(args, items):
+    """Items with call-level defaults filled in. An item's own value always
+    wins; only keys the item is SILENT about are inherited.
+
+    `_batch_size` rides along so each item's receipt can state what the
+    fan-out actually did (the DISPATCH line) -- the engine resolves the
+    capacity but only the caller knows how many items were sent.
+    """
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        merged = dict(item)
+        for k in _INHERITED:
+            if merged.get(k) is None and args.get(k) is not None:
+                merged[k] = args[k]
+        merged["_batch_size"] = len(items)
+        out.append(merged)
+    return out
 
 
 def _held(guards, fn):

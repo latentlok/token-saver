@@ -308,6 +308,13 @@ def main(argv=None):
     findings = check(settings)
     print(report(findings))
 
+    # The project half. Separate from the executor half because the two have
+    # different owners: one is machine config, the other is this repo's.
+    proj = project_check(os.getcwd())
+    if proj:
+        print("\n--- this project ---")
+        print(report(proj))
+
     if "--fix" in argv:
         want = RECOMMENDED_MAX_TOKENS
         tail = argv[argv.index("--fix") + 1:]
@@ -325,6 +332,127 @@ def main(argv=None):
         print(f"\nWrote maxTokens={want:,} to {path} (backup: {path}.bak).")
     return 1 if any(f["severity"] == "high" for f in findings) else 0
 
+
+# --- Project checks (v0.6) --------------------------------------------------
+#
+# `check()` above inspects the EXECUTOR settings. These inspect the PROJECT and
+# the machine, and they exist because every one of them was a silent trap that
+# cost real time in the field. All are static: nothing runs, nothing is guessed.
+
+def project_check(cwd):
+    """Findings about this project's delegation config. Same shape as check().
+
+    Never raises: doctor is what a confused caller reaches for, so a fault in
+    a check must not be the thing that stops them getting the other answers.
+    """
+    out = []
+    try:
+        from qd import gittree, profiles, runlog
+    except Exception:
+        return out
+
+    try:
+        cfg = gittree._project_config(cwd)
+    except Exception:
+        cfg = {}
+
+    # A9: the gate the server synthesises for trust="self" comes from
+    # `test_command`. The architect's own gates live in specs/ by the plugin's
+    # own convention and are auto-reverted if the worker edits them -- but if
+    # test_command does not REACH them, that protection guards a file the gate
+    # never runs. A trust="self" call then grades against a suite that cannot
+    # fail for the reason the delegation existed, and reports green.
+    cmd = (cfg.get("test_command") or "").strip()
+    if cmd:
+        try:
+            globs = gittree.spec_globs(cwd)
+        except Exception:
+            globs = []
+        roots = {g.split("*")[0].strip("/") for g in globs if g.split("*")[0].strip("/")}
+        if roots and not any(r in cmd for r in roots):
+            out.append({
+                "id": "gate-misses-specs", "severity": "high", "fixable": False,
+                "text": ("`test_command` (%s) names none of the protected spec "
+                         "locations (%s), so a trust=\"self\" gate cannot run "
+                         "your own spec -- it would grade against a suite that "
+                         "cannot fail for the reason you delegated."
+                         % (cmd, ", ".join(sorted(roots)))),
+            })
+
+    # A0: a project whose suite is slower than the per-gate kill guarantees
+    # that every trust="self" run refuses BEFORE the worker starts. Read from
+    # this project's own history rather than by running the suite: doctor must
+    # stay cheap enough to run on a whim.
+    try:
+        vt = int(cfg.get("verify_timeout_sec") or 300)
+        worst = 0
+        for rec in runlog.completed_runs(cwd):
+            worst = max(worst, int(rec.get("gate_ms") or 0))
+        if worst and worst > vt * 1000 * 0.7:
+            out.append({
+                "id": "gate-near-timeout", "severity": "high", "fixable": False,
+                "text": ("A pre-flight gate here has taken %.0fs against a "
+                         "verify_timeout_sec of %ds. Past that kill the run is "
+                         "REFUSED before the worker starts, and the refusal "
+                         "blames the gate. Raise verify_timeout_sec."
+                         % (worst / 1000.0, vt)),
+            })
+    except Exception:
+        pass
+
+    # A4: capacity declared and unreachable, or fan-out that will silently
+    # serialise. Either way a batch costs N x wall-clock for 1x throughput.
+    try:
+        prof = profiles.resolve(cwd, None)
+        slots = prof["endpoint_cfg"]["parallel_max"]
+        if slots <= 1:
+            out.append({
+                "id": "no-fanout", "severity": "info", "fixable": False,
+                "text": ("Endpoint '%s' holds 1 slot, so `batch` runs its items "
+                         "one at a time. Declare `parallel_max` in the endpoints "
+                         "section of the machine executors file to fan out."
+                         % prof["endpoint_cfg"]["name"]),
+            })
+    except Exception:
+        pass
+
+    # A0d: several servers, possibly of different plugin versions, sharing one
+    # .qwen-delegate/ directory and one machine-wide lock namespace. Eleven
+    # were once alive on one box, the oldest three days stale.
+    n, versions = _server_count()
+    if n > 1:
+        out.append({
+            "id": "stale-servers", "severity": "high", "fixable": False,
+            "text": ("%d token-saver servers are running (%s). They share this "
+                     "project's .qwen-delegate/ state and the machine-wide "
+                     "endpoint lock; an upgrade or /reload-plugins starts a new "
+                     "one without stopping the old. Kill the stale ones."
+                     % (n, ", ".join(versions) or "unknown versions")),
+        })
+
+    order = {"high": 0, "info": 1}
+    return sorted(out, key=lambda f: order.get(f["severity"], 1))
+
+
+def _server_count():
+    """(count, versions) of running token-saver servers. (0, []) if unknown."""
+    import re as _re
+    import subprocess as _sp
+    # The command line must be an INTERPRETER running the server script, not
+    # merely a line mentioning it. A loose `token-saver.*server.py` matched the
+    # shell that was running the check itself, so the count depended on how it
+    # was invoked -- a detector whose answer changes with the observer.
+    real = _re.compile(r"\bpython[0-9.]*\s+\S*token-saver\S*/server\.py")
+    try:
+        p = _sp.run(["pgrep", "-af", "server.py"],
+                    capture_output=True, text=True, timeout=5)
+        lines = [l for l in (p.stdout or "").splitlines()
+                 if l.strip() and real.search(l) and str(os.getpid()) not in l.split()[:1]]
+        versions = sorted({m.group(1) for l in lines
+                           for m in [_re.search(r"/(\d+\.\d+\.\d+)/", l)] if m})
+        return len(lines), versions
+    except Exception:
+        return 0, []
 
 if __name__ == "__main__":
     sys.exit(main())

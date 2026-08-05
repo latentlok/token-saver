@@ -8,11 +8,21 @@ from qd.invoke import context_window, compaction_thresholds, cum_zero, compactio
 from qd.runlog import (
     write_runlog, leverage_record, digest, ledger_summary, brief_summary,
 )
-from qd import refs
+from qd import limits, refs
 
 
 RESULT_CAP = 3000
 VERIFY_CAP = 2500
+
+# Tool names that cannot write. A denial of one of these has a legal
+# substitute the worker can reach on its own, so it costs time rather than
+# trust. Mirrors scoped_hook.READ_ONLY, kept here rather than imported because
+# the hook is a standalone script the server never loads into its own process.
+READ_ONLY_TOOLS = frozenset((
+    "read_file", "read_many_files", "glob", "grep", "grep_search",
+    "search_file_content", "list_directory", "ls", "find_files",
+    "read_folder", "list_dir",
+))
 
 # A run past this many INPUT tokens is reported as heavy. Set where a 27B-class
 # local model spends roughly an hour of GPU: enough headroom that ordinary work
@@ -629,11 +639,35 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # skill's session rules carry the same information at ~1/20th the tokens.)
 
     if denials:
-        names = ", ".join(sorted({d.get("tool_name", "?") for d in denials}))
-        body.append(
-            f"DENIALS: {len(denials)} blocked ({names}) -- Qwen may have worked around "
-            f"this; treat the result as suspect."
-        )
+        # Split by whether the denial could have changed the RESULT. A denied
+        # read has an obvious legal substitute -- the worker greps another way
+        # and reaches the same place -- so it costs time, not trust. A denied
+        # WRITE or state-changing command may have been routed around, and only
+        # that justifies distrusting the verdict.
+        #
+        # It used to be one bucket, and the line said "treat the result as
+        # suspect" for all of them. Measured: ~150 denials across twelve builds,
+        # every one a well-formed read-only search or a test command carrying
+        # `2>&1` -- so the receipt invalidated its own verdict on twelve runs
+        # that were fine, which is the plugin undermining itself for reasons
+        # that have nothing to do with the worker.
+        harmless, material = [], []
+        for d in denials:
+            name = d.get("tool_name", "?")
+            (harmless if name in READ_ONLY_TOOLS else material).append(name)
+        if material:
+            names = ", ".join(sorted(set(material)))
+            body.append(
+                f"DENIALS: {len(material)} blocked ({names}) -- effect-shaped, so "
+                f"Qwen may have worked around this; treat the result as suspect."
+            )
+        if harmless:
+            names = ", ".join(sorted(set(harmless)))
+            body.append(
+                f"DENIALS (read-only): {len(harmless)} blocked ({names}) -- cost "
+                f"the worker time, not the result its trust. Widen `shell_allow` "
+                f"to speed the next run."
+            )
 
     # On a clean green, last_verify is a STALE earlier failure (the pass that
     # decided status produced no saved output) -- showing it misreads as red.
@@ -702,6 +736,68 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             c2_blocks.append(
                 (f"MERGE: CONFLICT -- contract overlap with "
                  f"{worktree['branch']}; escalate, do not force", False, -1))
+
+    # TIMEOUT: the budget, fitted from this run's own telemetry. Priority 0 --
+    # above the diagnostics, because a killed run's remedy is a single number
+    # and without it the caller re-runs into the same wall.
+    try:
+        t_line = limits.timeout_line(ctx)
+    except Exception:
+        t_line = None
+    if t_line:
+        c2_blocks.append((t_line, True, 0))
+
+    # --- Seam risk (v0.6) ---
+    # A green receipt is evidence about a MODULE and is routinely read as
+    # evidence about a product. These three lines say where that reading is
+    # unsupported. Drop priority 1: they are diagnostics, so they yield to
+    # STATUS/CHANGED/ROLLBACK under the size cap, but they sit ABOVE the
+    # accounting lines because a dead symbol matters more than a token count.
+    facts = ctx.get("tree_facts") or {}
+
+    uncalled = facts.get("uncalled") or {}
+    if uncalled:
+        flat = [f"{n} ({p})" for p, names in uncalled.items() for n in names]
+        c2_blocks.append((
+            f"UNCALLED: {len(flat)} new public symbol(s) referenced by nothing "
+            f"outside their own file/tests: " + ", ".join(flat[:6])
+            + (" ..." if len(flat) > 6 else "")
+            + " -- built and wired to nothing, or intended for a caller that "
+              "does not exist yet. Confirm which.", True, 1))
+
+    seams = facts.get("mocked_seams") or []
+    if seams:
+        pairs = [f"{t} mocks {m}" for t, m in seams]
+        c2_blocks.append((
+            f"MOCKED SEAM: " + "; ".join(pairs[:4])
+            + (" ..." if len(pairs) > 4 else "")
+            + " -- the gate replaced a boundary this run also changed, so the "
+              "boundary is the one thing it did not test.", True, 1))
+
+    unrun = facts.get("never_executed") or []
+    if unrun:
+        c2_blocks.append((
+            f"NEVER EXECUTED: {len(unrun)} delivered test file(s) the gate "
+            f"does not run: " + ", ".join(unrun[:4])
+            + (" ..." if len(unrun) > 4 else "")
+            + " -- written, never run, so nothing here proves they pass.",
+            True, 1))
+
+    # DISPATCH: what the fan-out ACTUALLY did. The capacity a call gets is
+    # resolved from three files (call arg > project > machine) and was visible
+    # nowhere, so a batch that silently serialised looked exactly like one that
+    # fanned out -- N x wall-clock for 1x throughput, with the skill asking the
+    # caller to hold the whole precedence chain in their head to predict it.
+    # Only on a fan-out: a single delegation has nothing to serialise.
+    dispatch = ctx.get("dispatch")
+    if dispatch and ctx.get("batch_size", 0) > 1:
+        endpoint = ctx.get("endpoint") or {}
+        slots = endpoint.get("parallel_max", 1)
+        line = (f"DISPATCH: {dispatch} · endpoint {endpoint.get('name', '?')} "
+                f"· {slots} slot(s) · {ctx['batch_size']} item(s)")
+        if dispatch == "serial" and ctx["batch_size"] > 1:
+            line += " -- items ran IN ORDER, not concurrently"
+        c2_blocks.append((line, True, 2))
 
     # GRAPH accountability: count the worker's graphify reads (C10 allow-log)
     # so a groomed-but-never-consulted graph is visible instead of invisible.

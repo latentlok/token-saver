@@ -146,17 +146,32 @@ class Progress:
         anything.
     """
 
-    def __init__(self, cwd, session_id=None):
+    def __init__(self, cwd, session_id=None, run_id=None):
         self._cwd = cwd
         self.session_id = session_id
+        # The run id, stamped at construction -- BEFORE the first token.
+        # `session` is not an identity for the window that matters: a cold run
+        # only learns its session from the first reply, so the heartbeat read
+        # `"session": null` for the entire live period and carried no
+        # identifier of ANY kind during the only window it is the sole signal.
+        # Worse, the documented "is it hung?" check then read a PREVIOUS run's
+        # `"state": "done"` and reported success for work that had not started.
+        # A consumer must be able to assert progress["run"] == <my run id>
+        # before believing a single field.
+        self.run_id = run_id
         self._records = 0
         self._input_tokens = 0
         self._last_type = None
         self.attempt = 0
-        self.state = "running"
+        self.state = "starting"      # not "running": nothing has run yet
 
     def __call__(self, record):
         try:
+            # First token: the run is no longer merely submitted. The caller
+            # owns `state` for every OTHER transition (attempt/done), but this
+            # one is only observable from the stream.
+            if self.state == "starting":
+                self.state = "running"
             self._records += 1
 
             self._input_tokens += record_input_tokens(record)
@@ -198,6 +213,7 @@ class Progress:
             updated = ""
 
         snapshot = {
+            "run": self.run_id,
             "session": self.session_id,
             "records": self._records,
             "input_tokens": self._input_tokens,
@@ -266,3 +282,99 @@ def read_progress(cwd):
             return json.load(f)
     except Exception:
         return None
+
+
+# --- Timeout fitting (v0.6) -------------------------------------------------
+#
+# This replaces a REGRESSION FORMULA THE SKILL ASKED CLAUDE TO APPLY BY HAND:
+#
+#     seconds ~ turns*avg_context/10,882 + output_tokens/70,
+#     avg_context ~ (22k + peak)/2 ... then set ~3x
+#
+# Four lines of arithmetic, resident in every session, re-derived per call by a
+# model that cannot see the telemetry it needs. The server has all three inputs
+# on every finished run and writes them to the runlog already, so it can do the
+# arithmetic once and say the answer. A number the machine can compute is not a
+# judgement call.
+
+FIT_CTX_PER_SEC = 10_882.0     # fitted over 198 measured calls
+FIT_OUT_PER_SEC = 70.0
+FIT_BASE_CTX = 22_000          # cold-start context, before the task grows it
+TIMEOUT_HEADROOM = 3.0         # p90 ran ~3x median; over-setting costs nothing
+TIMEOUT_FLOOR = 900            # never advise BELOW the historical default
+TIMEOUT_CEILING = 7200         # the engine's own clamp
+
+
+def fitted_seconds(turns, peak_context, out_tokens):
+    """Seconds this shape of run needs, from its own telemetry. None if the
+    run reported nothing measurable (an error before the worker spoke)."""
+    try:
+        turns = int(turns or 0)
+        peak = int(peak_context or 0)
+        out = int(out_tokens or 0)
+    except Exception:
+        return None
+    if turns <= 0 and out <= 0:
+        return None
+    avg_ctx = (FIT_BASE_CTX + peak) / 2.0
+    return int(turns * avg_ctx / FIT_CTX_PER_SEC + out / FIT_OUT_PER_SEC)
+
+
+def suggested_timeout(cwd, default=TIMEOUT_FLOOR):
+    """A `timeout_sec` for THIS project, fitted from its own finished runs.
+
+    Takes the worst observed requirement rather than the mean: the cost of
+    over-setting is nothing (the kill is a ceiling, not a schedule) while the
+    cost of under-setting is a large task killed mid-write, which is the exact
+    failure the 900s default produced. Falls back to `default` for a project
+    with no history -- a first run cannot be fitted and must not be guessed at.
+    """
+    from qd import runlog
+    worst = 0
+    for rec in runlog.completed_runs(cwd):
+        tokens = rec.get("tokens") or {}
+        need = fitted_seconds(rec.get("turns"),
+                              rec.get("peak_context"),
+                              tokens.get("completion"))
+        if need:
+            worst = max(worst, need)
+    if not worst:
+        return default
+    return max(default, min(TIMEOUT_CEILING, int(worst * TIMEOUT_HEADROOM)))
+
+
+def timeout_line(ctx):
+    """A `TIMEOUT:` receipt line, or None when the budget was comfortable.
+
+    Speaks only when it has something actionable: the run was killed, or it
+    used enough of its budget that the next slightly larger task will be. A
+    line on every receipt would be noise, and a noisy line stops being read.
+    """
+    budget = int(ctx.get("timeout") or 0)
+    cum = ctx.get("cum") or {}
+    tokens = cum.get("tokens") or {}
+    used = int((cum.get("ms") or 0) / 1000)
+    need = fitted_seconds(cum.get("turns"), ctx.get("peak"),
+                          tokens.get("completion"))
+    if not budget or not need:
+        return None
+    advise = max(TIMEOUT_FLOOR, min(TIMEOUT_CEILING,
+                                    int(need * TIMEOUT_HEADROOM)))
+    if ctx.get("timed_out"):
+        # A killed run reports only what it streamed BEFORE the kill, so its
+        # telemetry is truncated and `need` is a floor, never the requirement.
+        # The one thing known exactly is that it needed more than the budget --
+        # so the advice is anchored on the budget, and the fitted figure is
+        # offered as evidence rather than as the answer.
+        advise = max(TIMEOUT_FLOOR,
+                     min(TIMEOUT_CEILING,
+                         max(budget * 2, int(need * TIMEOUT_HEADROOM))))
+        return (f"TIMEOUT: killed at {budget}s -- it needed more. "
+                f"(It had done ~{need}s of measurable work when killed; that "
+                f"is a floor, not the total, because a kill truncates the "
+                f"telemetry.) Set timeout_sec={advise} and re-run. A kill "
+                f"lands mid-write, so nothing here is a finished state.")
+    if used and used >= 0.7 * budget:
+        return (f"TIMEOUT: used {used}s of {budget}s. This shape fits ~{need}s; "
+                f"a larger task will not. Set timeout_sec={advise}.")
+    return None

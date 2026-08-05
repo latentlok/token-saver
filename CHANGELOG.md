@@ -1,10 +1,69 @@
 # Changelog
 
+## 0.6.0-dev — unreleased (the friction-ledger round)
+
+The first round driven by a field ledger rather than a design doc: 23 findings from
+building a real project with the plugin, **none of which had been fixed**. One
+insight organises all of it — *almost every finding is the plugin knowing something
+and not acting on it* — so the round replaces prose that instructs with code that
+acts. Live tracker: `docs/PLAN-v06-ledger.md`; evidence: `docs/archive/plugin-improvement.md`.
+
+**Stops losing work**
+- Child processes now die with their parent (`start_new_session` + `killpg` on both
+  spawn sites). Four confirmed leaks — an orphaned gate suite, a cancelled query's
+  worker, two dropped-transport workers — were one missing teardown. The leaked
+  suites also poisoned the timing used to set the timeout that produced them.
+- A batch's pre-flight runs ONCE per (base commit, gate) instead of N times
+  concurrently. Fan-out was starving its own gates into `GATE UNUSABLE`, so the wider
+  the fan-out the likelier everything refused.
+
+**Sees the seams**
+- `UNCALLED:` — a new public symbol nothing outside its own file/tests references.
+- `MOCKED SEAM:` — a delivered test mocks a module the run also changed.
+- `NEVER EXECUTED:` — a delivered test file the gate does not run.
+  Three greps, nothing executes. In the field these three cover six of ten defects
+  that sixteen green receipts and 1,717 passing tests could not see.
+- `new_public_symbols` no longer misses whole new directories (it read
+  `git status --porcelain`, which collapses one to a single entry).
+
+**Concurrency**
+- `parallel_max` per endpoint is the single knob. Every executor is an
+  OpenAI-compatible API, so there is no local/remote distinction to model.
+- `run_batch` schedules per item instead of applying items[0]'s policy to the batch.
+- `DISPATCH:` receipt line states what a fan-out actually got.
+
+**Stops lying**
+- The graph sidecar stores `"indexed"`, never `"fresh"` — freshness is computed live.
+- `progress.json` stamps the run id at submit and opens `state: "starting"`.
+- `TEST DODGE` matches the mark, not the substring: `skipif` (the repair) and string
+  literals no longer fire.
+- `DENIALS:` splits effect-shaped from read-only; a denied search no longer makes the
+  receipt call its own verdict suspect.
+
+**Fewer decisions left to the model**
+- `timeout_sec` is fitted from the project's own history instead of being a
+  regression formula the caller applied by hand. A `TIMEOUT:` line states the number.
+- `qd.doctor` gained `project_check()`: gate cannot reach the specs, gate near its
+  timeout, no fan-out capacity, stale servers sharing state.
+- The CLAUDE.md managed block shrank 524 -> 193 tokens.
+
+**Removed**
+- `_ref_impl.py` (2,293 lines). The v1 differential oracle outlived the migration;
+  crane equality had already been retired in `verdict_spec`'s own docstring while the
+  scaffolding kept rendering a full v1 receipt 12 times per run and discarding it.
+- `workers` (best-of-N) — advertised in the schema, never ported to `qd/`. Passing it
+  silently got you one candidate. Deferred until wanted; git history has the v1 loop.
+
+**Breaking**
+- Endpoint `parallel_max` is now honoured from an `endpoints`-only machine file
+  (previously ignored unless the file also named `"default": "qwen-local"`).
+- `batch`/`chain` items inherit `cwd` and run-level fields from the call.
+
 ## 0.5.1 — 2026-08-01
 
 The vLLM cutover release: everything that shipped dark in 0.5.0 exercised against a
 live endpoint, plus the two fences and two accounting fixes the exercise demanded.
-Runbook in `handoff-v05/VLLM-ROUND.md`.
+Runbook in `docs/archive/handoff-v05/VLLM-ROUND.md`.
 
 ### vLLM cutover round (A1–A4, B1–B4, C1)
 - **Executor profiles proven live.** Endpoint/model/sampling pinned per profile via

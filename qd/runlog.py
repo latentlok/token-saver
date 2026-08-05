@@ -110,6 +110,34 @@ def write_runlog(cwd, record):
         pass
 
 
+def completed_runs(cwd, tool="qwen_delegate", limit=200):
+    """The last `limit` FINISHED run records for this project, oldest first.
+
+    Submission markers (`status: "running"`, U5.2) are skipped: they carry no
+    telemetry, and counting them would let an in-flight run steer a decision
+    about how long runs take. Tolerant line-by-line parse; never raises.
+    """
+    out = []
+    try:
+        path = os.path.join(cwd, RUNLOG_DIR, RUNLOG_FILE)
+        if not os.path.isfile(path):
+            return out
+        with open(path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict) or rec.get("tool") != tool:
+                    continue
+                if (rec.get("status") or "") == "running":
+                    continue
+                out.append(rec)
+    except Exception:
+        return out
+    return out[-limit:]
+
+
 def ledger_summary(cwd):
     """Aggregate of this project's qwen_delegate history, for the LEDGER line.
 

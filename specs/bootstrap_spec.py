@@ -45,7 +45,6 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import _ref_impl as server  # noqa: E402  (frozen v1 oracle, test-only)
 from qd import bootstrap  # noqa: E402
 
 
@@ -64,14 +63,12 @@ def put(d, rel, content=""):
 
 
 class DetectTable(unittest.TestCase):
-    """Case 1: detection matches the crane AND the expected command."""
+    """Case 1: detection returns the expected command for each marker file."""
 
     def check(self, setup, expected):
         d = tempfile.mkdtemp()
         setup(d)
         self.assertEqual(bootstrap.detect_test_cmd(d), expected)
-        self.assertEqual(bootstrap.detect_test_cmd(d),
-                         server.detect_test_cmd(d))
 
     def test_npm(self):
         self.check(lambda d: put(d, "package.json",
@@ -105,10 +102,10 @@ class DetectTable(unittest.TestCase):
 
 
 class RenderRules(unittest.TestCase):
-    def test_crane_equal_with_and_without_cmd(self):
-        for cmd in ("npm test", ""):
-            self.assertEqual(bootstrap.render_worker_rules(cmd),
-                             server.render_worker_rules(cmd))
+    def test_detected_command_reaches_the_rules_file(self):
+        # Was a crane-equality test against the frozen v1. The contract that
+        # actually matters: whatever was detected is what the worker is told.
+        self.assertIn("npm test", bootstrap.render_worker_rules("npm test"))
 
     def test_no_placeholder_ever(self):
         for cmd in ("cargo test", ""):
@@ -171,36 +168,51 @@ class Bootstrap(unittest.TestCase):
 
 
 class StatusAndNotices(unittest.TestCase):
-    def test_status_crane_equal_across_states(self):
+    """Was crane equality against the frozen v1. Pinned to the contracts the
+    engine and the receipts actually read: the STATE, and the load-bearing
+    facts each notice must carry. Deliberately not byte-equality on prose --
+    a wording change is not a regression, a missing path is."""
+
+    def test_status_across_states(self):
         # missing / ok / subdirectory-of-configured
         d = mkrepo()
-        self.assertEqual(bootstrap.worker_rules_status(d),
-                         server.worker_rules_status(d))
+        self.assertEqual(bootstrap.worker_rules_status(d), ("missing", None))
         bootstrap.bootstrap_worker_rules(d)
-        self.assertEqual(bootstrap.worker_rules_status(d),
-                         server.worker_rules_status(d))
+        state, path = bootstrap.worker_rules_status(d)
+        self.assertEqual(state, "ok")
+        self.assertEqual(os.path.basename(path), "QWEN.md")
+        # A deep subdirectory walks up to the SAME configured file: the worker
+        # is governed by the repo's rules wherever in the tree it is invoked.
         sub = os.path.join(d, "src", "deep")
         os.makedirs(sub)
-        self.assertEqual(bootstrap.worker_rules_status(sub),
-                         server.worker_rules_status(sub))
+        self.assertEqual(bootstrap.worker_rules_status(sub), (state, path))
 
-    def test_notices_crane_equal(self):
+    def test_bootstrap_notice_names_the_file_and_the_command(self):
+        with_cmd = bootstrap.bootstrap_notice("npm test", "/p/QWEN.md")
+        self.assertIn("/p/QWEN.md", with_cmd)
+        self.assertIn("npm test", with_cmd)
+        self.assertIn("uncommitted", with_cmd)
+        # No command detected: the notice must ASK rather than leave a blank,
+        # because a silently empty test command is a gate that cannot fail.
+        without = bootstrap.bootstrap_notice("", "/p/QWEN.md")
+        self.assertIn("/p/QWEN.md", without)
+        self.assertIn("could not detect a test command", without)
+
+    def test_unconfigured_notice_embeds_the_cwd(self):
+        # The message names the directory it is talking about; a notice that
+        # says "no QWEN.md governs" without saying where is unactionable.
         d = mkrepo()
-        self.assertEqual(bootstrap.bootstrap_notice("npm test", "/p/QWEN.md"),
-                         server.bootstrap_notice("npm test", "/p/QWEN.md"))
-        self.assertEqual(bootstrap.bootstrap_notice("", "/p/QWEN.md"),
-                         server.bootstrap_notice("", "/p/QWEN.md"))
-        state, path = server.worker_rules_status(d)
-        self.assertEqual(bootstrap.unconfigured_notice(d, state, path),
-                         server.unconfigured_notice(d, state, path))
-        # SAME path on both sides: the message embeds cwd, and feeding the two
-        # implementations different tempdirs made this equality impossible --
-        # which the worker "solved" by editing server.py to drop the path.
-        # (See FINDINGS: the crane must be protected, and a spec bug is a
-        # manager bug.) Never turn this into two mkdtemp() calls again.
+        state, path = bootstrap.worker_rules_status(d)
+        notice = bootstrap.unconfigured_notice(d, state, path)
+        self.assertIn(d, notice)
+        self.assertIn("QWEN.md", notice)
+
+    def test_nongit_refusal_is_an_error_receipt_naming_the_path(self):
         nong = tempfile.mkdtemp()
-        self.assertEqual(bootstrap.nongit_refusal(nong),
-                         server.nongit_refusal(nong))
+        refusal = bootstrap.nongit_refusal(nong)
+        self.assertTrue(refusal.startswith("STATUS: error"))
+        self.assertIn(nong, refusal)
+        self.assertIn("git init", refusal)   # the fix, not just the diagnosis
 
 
 class TestLocation(unittest.TestCase):
