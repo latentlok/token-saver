@@ -33,7 +33,7 @@ from qd.gittree import (
     # tree facts nor observes the tree any more. It asks, and renders the answer.
     _project_config, _global_config,
 )
-from qd.features import detectors
+from qd.features import detectors, gates
 from qd.features.detectors.inputs import DetectorInputs
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
@@ -1371,14 +1371,14 @@ def _delegate(args, t0_dir):
         ctx["calls"].record("challenge", ch_meta, session=ch_session)
         ctx["challenge"] = {"ran": True, "warm": False,
                             "unverified": (ch_meta or {}).get("challenge_unverified")}
-        if objection:
-            why, evidence = objection
-            return refuse(
-                f"BRIEF CHALLENGED: {why}\nEVIDENCE: {evidence}\n\n"
-                "Nothing was built. The worker read the code and says the "
-                "brief contradicts it -- and it cited a path that exists. "
-                "Correct the brief and re-send, or drop `challenge_brief` if "
-                "you have already considered this.")
+        # Step 4: the DECISION lives in qd/features/gates/, not here. What the
+        # engine still owns is running the pass that produces the evidence --
+        # that needs the profile and the timeout, which are scope and plan, so
+        # it moves in steps 5-6. A1's parked red gate registers alongside
+        # `challenge` and this call site does not change to accept it.
+        _decision = gates.run_all(gates.GATES, gates.GateRun(objection=objection))
+        if not _decision.ok:
+            return refuse(_decision.reason)
         # --- Carry the challenge session into the build (opt-in) ---
         # OFF by default: measured at +50% input tokens and +16% wall against a
         # cold build (see _challenge_brief). `challenge_warm: true` for callers

@@ -26,16 +26,16 @@ thing and this list stays another.
 
 | Parked item | Blocked until | Then it lives in |
 |---|---|---|
-| **A1** red gate | step 4 | `features/gates/` |
+| **A1** red gate | ~~step 4~~ **unblocked** | `features/gates/` — a file with `NAME` + `check(run)`, plus one line in `GATES` |
 | **A2** contract pinning | steps 1–3 | facts + a detector + a receipt block |
 | **A3** tier map | step 6 | `core/plan.py` (it is config resolution) |
-| **A4** clause coverage as link 1's gate | step 4 | `features/gates/` |
+| **A4** clause coverage as link 1's gate | ~~step 4~~ **unblocked** | `features/gates/` |
 | **A5** `SEAM CROSSED` | steps 1–3 | a detector reading existing facts |
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
 | **G2** whole-chain brief contradiction | steps 4, 7 | `features/gates/`, on the composite |
-| **G4** brief-vs-diff advisory | step 4 | `features/gates/` (advisory only) |
+| **G4** brief-vs-diff advisory | ~~step 4~~ **unblocked**, but NOT as a gate | `advisory_gates` — see §G4; a witness that can refuse breaks PRINCIPLES §I, and step 4 made "can refuse" a property of the type |
 
 ### Not blocked by anything — can ship whenever
 

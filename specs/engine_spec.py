@@ -374,6 +374,47 @@ class StuckNoProgress(Fixture):
         self.assertIn("identical", out)
 
 
+class GateRefusalReachesTheCaller(Fixture):
+    """A gate that decides to refuse must actually stop the run.
+
+    Found by mutation while building step 4: disabling the engine's response to
+    a gate refusal -- so `challenge_brief` decides "no" and the run proceeds
+    anyway -- passed all 1,057 tests. `BRIEF CHALLENGED` appeared in no spec.
+
+    The pass is DEFAULT ON and its entire job is refusing runs that would build
+    the wrong thing, so it could have stopped refusing at any point and nothing
+    would have said so. The failure it prevents is expensive and quiet: a wrong
+    requirement becomes a worker-written gate asserting the wrong requirement,
+    which then passes, and every signal downstream reads as success.
+
+    This is the end-to-end pin -- the decision reaching the caller -- not the
+    objection logic, which challenge_spec already owns.
+    """
+
+    OBJECTION = ("CHALLENGE: the brief contradicts the code\n"
+                 "EVIDENCE: other.py already defines ORIGINAL\n")
+
+    def test_an_objection_citing_a_real_path_stops_the_run(self):
+        # The stub's first reply is the challenge pass; a second would be the
+        # build. If the refusal works, the build never happens.
+        self.steps([{"result": self.OBJECTION},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(challenge_brief=True)
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("BRIEF CHALLENGED", r["result_text"])
+        self.assertFalse(os.path.exists(os.path.join(self.cwd, "out.py")),
+                         "the run was refused but built anyway")
+
+    def test_the_refusal_tells_the_caller_what_to_do(self):
+        # A refusal costs the caller the whole run and hands back nothing, so
+        # one they cannot act on wastes the time refusing was meant to save.
+        self.steps([{"result": self.OBJECTION},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(challenge_brief=True)
+        self.assertIn("EVIDENCE:", r["result_text"])
+        self.assertIn("Correct the brief and re-send", r["result_text"])
+
+
 class SpecGuard(Fixture):
     def test_worker_spec_edit_reverted_and_attempt_fails(self):
         self.steps([{"write": {"guard_spec.py": "WEAKENED = 1\n",
