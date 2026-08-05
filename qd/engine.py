@@ -27,7 +27,9 @@ from qd.gittree import (
     git, is_git_repo, file_sha,
     snapshot, violated_specs, revert_specs, untracked_files,
     snapshot_contents, restore_paths, dodge_markers,
-    committed_during_run, head_sha, new_public_symbols, numstat_map,
+    # committed_during_run / head_sha / new_public_symbols / numstat_map moved
+    # to qd/core/facts.py -- the engine no longer computes tree facts, it asks
+    # for them. The detectors below stay for now; they leave in step 2.
     uncalled_symbols, mocked_seams, never_executed,
     _project_config, _global_config,
 )
@@ -37,6 +39,7 @@ from qd.bootstrap import (
     nongit_refusal, detect_test_cmd, test_dir as detect_test_dir,
 )
 from qd.runlog import runlog_dir, save_brief, load_brief, BRIEFS_DIR, CallLog
+from qd.core import facts
 from qd import doctor
 from qd import playbook
 from qd import jsonschema
@@ -1958,18 +1961,13 @@ def _delegate(args, t0_dir):
     # The renderer prefers these facts and only re-reads a tree when they are
     # absent (the v1-ctx fallback).
     try:
-        post_status = snapshot(work_cwd)
-        final_changed = sorted(
-            p for p in set(list(post_status.keys()) + list(pre_status.keys()))
-            if post_status.get(p) != pre_status.get(p))
-        ctx["tree_facts"] = {
-            "post_status": post_status,
-            "changed": final_changed,
-            "numstat": numstat_map(work_cwd),
-            "head_moved": committed_during_run(work_cwd, pre_sha_full),
-            "head_now": head_sha(work_cwd),
-            "pubs": new_public_symbols(work_cwd),
-        }
+        # Computed ONCE, here, from the tree the run actually used -- see
+        # qd/core/facts.py for why when-it-runs matters as much as what it
+        # returns. The detectors below still write their results back into this
+        # record, which is the facts/findings confusion the design names; they
+        # move out in step 2.
+        ctx["tree_facts"] = facts.collect(work_cwd, pre_status, pre_sha_full)
+        final_changed = ctx["tree_facts"]["changed"]
         # Seam risk (v0.6). Three greps over what the run already changed --
         # nothing executes. A unit gate cannot assert "this is wired to that",
         # so these do not verify the seam; they name the places a green
