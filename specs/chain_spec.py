@@ -250,6 +250,110 @@ class Routing(Fixture):
         self.assertNotIn(CHAIN_ARG, calls[0])
 
 
+class BatchOfChains(Fixture):
+    """N independent pipelines in one call, each internally ordered.
+
+    `chain` + `batch` at the CALL level stays refused -- one call cannot be
+    both ordered and unordered. A batch OF chains is not that ambiguity, and
+    without it N pipelines cost N separate submits.
+    """
+
+    def chained(self, n_items, links=2):
+        return [{"cwd": self.cwd,
+                 "chain": [{"task": f"p{i}s{j}"} for j in range(1, links + 1)]}
+                for i in range(1, n_items + 1)]
+
+    def test_items_are_chains_and_links_stay_ordered(self):
+        from qd import engine
+        seen = []
+        real = engine.run
+        engine.run = lambda a: (seen.append(a["task"]), GREEN)[1]
+        try:
+            out = server.run_delegate_batch(
+                {"cwd": self.cwd, "batch": self.chained(2)})
+        finally:
+            engine.run = real
+        # Both pipelines ran, and each one's links kept their order.
+        self.assertEqual(sorted(seen), ["p1s1", "p1s2", "p2s1", "p2s2"])
+        self.assertLess(seen.index("p1s1"), seen.index("p1s2"))
+        self.assertLess(seen.index("p2s1"), seen.index("p2s2"))
+        self.assertEqual(out.count("=== chain link 1/2:"), 2)
+
+    def test_a_red_link_halts_only_its_own_pipeline(self):
+        from qd import engine
+        real = engine.run
+        engine.run = lambda a: RED if a["task"] == "p1s1" else GREEN
+        try:
+            out = server.run_delegate_batch(
+                {"cwd": self.cwd, "batch": self.chained(2)})
+        finally:
+            engine.run = real
+        # p1 halted at link 1; p2 is untouched by it -- that is the whole
+        # point of the items being independent.
+        self.assertIn("SKIPPED (chain halted at link 1", out)
+        self.assertIn("=== chain link 2/2: success ===", out)
+
+    def test_a_chain_item_takes_no_batch_level_guard(self):
+        # The correctness point: run_chain takes a guard per LINK. A guard
+        # taken here as well would have the item holding the endpoint slot its
+        # own first link then waits for -- a deadlock on a one-slot endpoint,
+        # not a slowdown.
+        log = []
+        real = server._guards_for
+
+        class G:
+            def acquire(self): log.append("acquire")
+            def release(self): log.append("release")
+
+        server._guards_for = lambda name, args: [G()]
+        realrun = None
+        try:
+            from qd import engine
+            realrun = engine.run
+            engine.run = lambda a: GREEN
+            server.run_batch(self.chained(1, links=2), server._batch_item)
+        finally:
+            server._guards_for = real
+            if realrun:
+                from qd import engine
+                engine.run = realrun
+        # Two links -> two acquire/release pairs, not three.
+        self.assertEqual(log.count("acquire"), 2)
+
+    def test_a_plain_item_still_takes_its_guard(self):
+        log = []
+        real = server._guards_for
+
+        class G:
+            def acquire(self): log.append("acquire")
+            def release(self): log.append("release")
+
+        server._guards_for = lambda name, args: [G()]
+        try:
+            from qd import engine
+            realrun = engine.run
+            engine.run = lambda a: GREEN
+            try:
+                server.run_batch([{"cwd": self.cwd, "task": "solo"}],
+                                 server._batch_item)
+            finally:
+                engine.run = realrun
+        finally:
+            server._guards_for = real
+        self.assertEqual(log, ["acquire", "release"])
+
+    def test_nesting_is_one_level(self):
+        out = server._batch_item({"cwd": self.cwd, "batch": [{"task": "x"}]})
+        self.assertIn("STATUS: error", out)
+        self.assertIn("nesting is one level", out)
+
+    def test_call_level_chain_plus_batch_is_still_refused(self):
+        out = server.run_delegate_batch(
+            {"cwd": self.cwd, "chain": [{"task": "a"}],
+             "batch": [{"task": "b"}]})
+        self.assertIn("mutually exclusive", out)
+
+
 class SharedWorktree(Fixture):
     """One container for the whole chain -- the dependency the shape promises.
 

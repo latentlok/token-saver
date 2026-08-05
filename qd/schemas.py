@@ -115,7 +115,7 @@ TOOL = json.loads(r'''
         "items": {
           "type": "object"
         },
-        "description": "N independent delegations in ONE call (same fields per item), fanned across worktrees with per-item receipts -- the reliable fan-out; separate tool calls serialize."
+        "description": "N independent delegations in ONE call (same fields per item), fanned across worktrees with per-item receipts -- the reliable fan-out. An item may itself carry `chain` for a batch OF pipelines: each item is an ordered chain sharing one worktree, and the items run concurrently. Nesting is one level (no `batch` inside an item)."
       },
       "chain": {
         "type": "array",

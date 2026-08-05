@@ -309,6 +309,22 @@ def run_batch(items, handler, on_partial=None):
     progress_lock = threading.Lock()
 
     def one(idx, args):
+        # A chain ITEM takes its guards per LINK, inside run_chain. Taking one
+        # here as well would leave the item holding the endpoint slot that its
+        # own first link then blocks on -- on a one-slot endpoint that is a
+        # deadlock, not a slowdown. Same rule the `wait: true` path states:
+        # "chain and batch take their guards per link, so only the lone
+        # delegation needs them here."
+        if isinstance(args, dict) and args.get("chain"):
+            try:
+                results[idx] = handler(args)
+            except profiles.ProfileError as e:
+                results[idx] = f"STATUS: error\n{e}"
+            except Exception as e:
+                results[idx] = f"STATUS: error\n{e!r}"
+            with progress_lock:
+                _announce(on_partial, _joined(results, BATCH_SEP))
+            return
         acquired = []
         try:
             for g in _guards_for("qwen_delegate", args):
@@ -546,10 +562,35 @@ def run_delegate_batch(args, on_partial=None):
         return run_chain(_inherit(args, args["chain"]), engine.run,
                          on_partial=on_partial)
     if args.get("batch"):
-        return run_batch(_inherit(args, args["batch"]), engine.run,
+        return run_batch(_inherit(args, args["batch"]), _batch_item,
                          on_partial=on_partial)
     return engine.run(args)
 
+
+def _batch_item(args):
+    """One batch item: a lone delegation, or a whole chain.
+
+    `chain` and `batch` stay mutually exclusive at the CALL level -- one call
+    cannot be both ordered and unordered, which is what `_shape_refusal`
+    refuses. A batch OF chains is not that ambiguity: it is N independent
+    pipelines, each internally ordered, which is exactly the two words meaning
+    what they always meant. Without it, N pipelines cost N submits, and a
+    caller who wanted them in one call had no shape to ask for.
+
+    Nesting is one level. A batch inside a batch item says nothing `batch`
+    does not already say, and would make the receipt's structure depend on how
+    deeply the caller happened to nest.
+    """
+    from qd import engine
+    if not isinstance(args, dict):
+        return engine.run(args)
+    if args.get("batch"):
+        return ("STATUS: error\na batch item may not contain `batch` -- "
+                "nesting is one level. Flatten the items, or use `chain` "
+                "inside the item for an ordered pipeline. Nothing was run.")
+    if args.get("chain"):
+        return run_chain(_inherit(args, args["chain"]), engine.run)
+    return engine.run(args)
 
 
 # Call-level fields an item inherits when it does not state its own. `cwd` is
