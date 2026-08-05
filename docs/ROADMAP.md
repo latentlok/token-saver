@@ -164,11 +164,15 @@ not a checker.
 
 `P1` chain worktree + commits (§2.3 above) · `P2` preflight cache skip · `P3` D1.
 
-### 3.2 Mechanism
+### 3.2 Mechanism → parked
 
-DESIGN §12 items 0–2: **extract `_delegate`'s post-run block first** (it is ~1000 lines
-and the top god node at 58 edges; four more inline additions is how it becomes
-unmaintainable), then the red gate generator, then contract pinning.
+The red gate generator and contract pinning, both parked in
+[PARKED.md](PARKED.md) §A until the restructure gives them somewhere to land.
+
+*(This entry used to say "extract `_delegate`'s post-run block first". That is no
+longer a task: the block is four concerns sharing a region, and it drains across
+steps 1, 2 and 5 of [DESIGN-modular-architecture.md](DESIGN-modular-architecture.md)
+rather than being lifted whole.)*
 
 ### 3.3 Policy
 
@@ -284,7 +288,7 @@ one harder to add and to remove.
 ## 7. Suggested order
 
 0. ~~**A11 transport**~~ — **done** (`f1527b0`), concurrency unblocked
-1. **D1** (§2.2) — live hole, waits on nothing, one regex
+1. ~~**D1**~~ — **done** (`8cb677b`), skipped tests no longer count as evidence
 2. ~~**A23 `challenge_brief`**~~ — **done** (`e7db573`)
 3. ~~**Chain plumbing**~~ — **done** (`4af4936`), plus batch-of-chains (`95278a7`)
 4. **The modularity restructure** (§6b) — **active**. Everything else is parked
