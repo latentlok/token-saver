@@ -1127,6 +1127,25 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         # passes cost us" in money and not only in tokens -- which is the form
         # the question gets asked in.
         extra.update(calls.as_record(ctx.get("profile")))
+    # Where the run's wall-clock went. `duration_ms` (qd/runlog.py:511) reads as
+    # a run total and is not one -- it is ctx["cum"]["ms"], the executor's own
+    # self-reported time and nothing else -- so the shortfall between it and the
+    # run has never been stated anywhere. These three state it: the whole, the
+    # part the log can name, and the remainder it cannot.
+    #
+    # UNCONDITIONAL, unlike verify_timeout_sec and preflight_expect above. A
+    # missing key reads as zero, and "nothing unaccounted for" is the one claim
+    # an absent field must not be able to make.
+    #
+    # NOT clamped at zero. A negative remainder means the calls claim more time
+    # than the run took, which is real evidence of double-counting -- and a
+    # max(0, ...) here would be the same defect one level up: a number that
+    # reads as measured when it was corrected.
+    wall_ms = int(ctx.get("wall_ms") or 0)
+    accounted_ms = sum(int(getattr(c, "ms", 0) or 0) for c in (calls or []))
+    extra["wall_ms"] = wall_ms
+    extra["accounted_ms"] = accounted_ms
+    extra["unaccounted_ms"] = wall_ms - accounted_ms
     write_runlog(cwd, leverage_record(
         "qwen_delegate", cwd, status, verdict, cum, ctx.get("peak", 0),
         executor=executor or "qwen-local",

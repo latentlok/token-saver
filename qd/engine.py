@@ -979,6 +979,20 @@ def delegate(args):
 
 
 def _delegate(args, t0_dir):
+    # --- End-to-end wall clock ---
+    # The only duration the run log carried was `duration_ms`, which reads as a
+    # run total and is not one: it is ctx["cum"]["ms"], fed by the two
+    # accum_stats sites below (:1422 challenge, :1631 attempt), both of them the
+    # executor's own self-reported time. Nothing measured the run. So the gate
+    # runs, the prefilter and the review pass were not merely unattributed --
+    # there was no whole for them to be missing from.
+    #
+    # Here rather than in delegate(): this is the function that owns the ctx the
+    # figure is written onto, and by the time the wrapper's `finally` runs the
+    # ctx has already left. That teardown -- rmtree of the T0 snapshot -- is
+    # also not the run; it happens after the run's answer is fixed.
+    _t0_wall = time.monotonic()
+
     # --- Preconditions (U5.2: also runnable pre-spawn, see precheck) ---
     # Run FIRST when the server has not already run them: resolve_call's
     # amend=True pass below WRITES the amendment, and a run any precondition
@@ -1217,6 +1231,12 @@ def _delegate(args, t0_dir):
     gate_ms = 0
     gate_timed_out = False
     self_min = None
+    # Held until the CallLog exists: both gate runs below happen before the ctx
+    # that owns it is built. A list rather than `gate_ms` alone because the
+    # self-gate ratchet runs the gate a SECOND time and overwrites the first
+    # figure -- recorded off `gate_ms` a self-gate run would report one gate run
+    # where the caller waited for two.
+    preflight_ms = []
     if verify:
         # `_preflight_once` shares one verdict across items keyed on
         # (base sha, worktrees dir, gate), and its stated invariant is that
@@ -1232,6 +1252,7 @@ def _delegate(args, t0_dir):
         shareable = wt is not None and _pos == 1
         preflight, preflight_out, gate_ms, gate_timed_out = _preflight_once(
             verify, work_cwd, verify_timeout, pre_sha_full, shareable)
+        preflight_ms.append(gate_ms)
         if self_gate and preflight:
             # Incremental ratchet: an existing suite is already green, so this
             # gate proves nothing -- and every later feature would read as
@@ -1241,6 +1262,7 @@ def _delegate(args, t0_dir):
             verify = _ensure_self_gate(work_cwd, min_override=self_min)
             preflight, preflight_out, gate_ms, gate_timed_out = \
                 _run_verify_timed(verify, work_cwd, verify_timeout)
+            preflight_ms.append(gate_ms)
 
     # U3.1: fail fast. The same command runs after every attempt, so a gate that
     # cannot finish inside its budget has already decided the run -- left alone
@@ -1378,6 +1400,19 @@ def _delegate(args, t0_dir):
         "result_json": None,
         "result_errors": [],
     }
+    # The pre-flight ran above, before this CallLog existed, so it is recorded
+    # at the first moment it can be. `gate_ms` already drove the GATE SLOW
+    # receipt line (qd/verdict.py:515) and stopped there; the same measurement
+    # now reaches the record, so the receipt and the log are one account of one
+    # gate run rather than two.
+    #
+    # A verdict `_preflight_once` served from its batch cache is recorded here
+    # too. That is the honest reading for an item whose pre-flight answer was
+    # paid for once and used N times; how one gate run divides across N records
+    # is a question no caller has asked yet.
+    for _ms in preflight_ms:
+        ctx["calls"].record("gate_preflight", {"stats": {"ms": _ms}})
+
     chain = args.get(CHAIN_ARG)
     if isinstance(chain, dict):
         ctx["chain"] = {"pos": chain.get("pos"), "of": chain.get("of")}
@@ -1746,6 +1781,11 @@ def _delegate(args, t0_dir):
             test_cmd = detect_test_cmd(cwd)
             if test_cmd:
                 tc = f"./{test_cmd}" if not test_cmd.startswith(".") else test_cmd
+                # Nothing timed this before -- no t0 wrapped it at all. Its
+                # budget is 60s, and the except branch below is reached BY that
+                # timeout, so the unrecorded case was the expensive one: a full
+                # minute of a run's wall-clock belonging to nobody.
+                _t0_pf = time.monotonic()
                 try:
                     pv = subprocess.run(
                         f"{tc} {' '.join(qwen_files)}",
@@ -1760,12 +1800,23 @@ def _delegate(args, t0_dir):
                 except Exception:
                     prefilter_out = "prefilter timed out or errored"
                     prefilter_failed = True
+                ctx["calls"].record(
+                    "prefilter",
+                    {"stats": {"ms": int((time.monotonic() - _t0_pf) * 1000)}})
 
         # --- Run verify ---
         if self_gate:
             # overwrite any worker edit to the gate, keeping the ratcheted bar
             _ensure_self_gate(work_cwd, min_override=self_min)
-        passed, v_out, _, _ = _run_verify_timed(verify, work_cwd, verify_timeout)
+        passed, v_out, verify_ms, _ = _run_verify_timed(
+            verify, work_cwd, verify_timeout)
+        # This `ms` was discarded into `_`. It is paid once per attempt, so at
+        # max_iter 3 a slow suite is three full gate runs -- routinely more of
+        # the run than the work being graded -- and none of it was worth
+        # anything in the log. `err` carries the color, because a red gate and a
+        # green one that cost the same second are not the same fact.
+        ctx["calls"].record("gate_verify", {"stats": {"ms": verify_ms}},
+                            err=None if passed else "gate failed")
 
         if report:
             # On a report run the gate output IS the deliverable: red is the
@@ -1905,16 +1956,37 @@ def _delegate(args, t0_dir):
     # anybody's account of the work. OFF by default; it costs a whole executor
     # pass on a run that has already finished.
     if setting("review_brief", args, cfg, _global_config(), default=False):
-        _rev = advisories.review(
-            lambda text: run_executor(profile, text, work_cwd, "plan",
-                                      verify_timeout, None)[0],
-            task, ctx.get("tree_facts"))
+        def _review_ask(text):
+            # Was `...run_executor(...)[0]`, and that `[0]` threw away the meta
+            # of a WHOLE executor pass. A caller who switched this on paid its
+            # tokens and could not find the charge in BURN, in COST, or in the
+            # log -- the only executor call in the system that billed nobody.
+            # Recorded from the executor's own meta, the same source and the
+            # same convention "challenge" and "attempt" already use, so its
+            # tokens land beside theirs rather than only its time.
+            r_text, _denials, r_sid, r_err, r_meta = run_executor(
+                profile, text, work_cwd, "plan", verify_timeout, None)
+            ctx["calls"].record("review_brief", r_meta, session=r_sid,
+                                err=r_err)
+            return r_text
+
+        _rev = advisories.review(_review_ask, task, ctx.get("tree_facts"))
         if _rev:
             ctx["advisory"] = (ctx.get("advisory") or []) + [_rev]
 
     if args.get("advisory_gates"):
-        ctx["advisory"], ctx["advisory_skipped"] = _run_advisory(
+        _gates, ctx["advisory_skipped"] = _run_advisory(
             args["advisory_gates"], work_cwd, verify_timeout)
+        ctx["advisory"] = _gates
+        # Off `_gates`, never back out of ctx["advisory"]: the review pass above
+        # writes an entry of the SAME shape (name/ok/ms/head) into that list, so
+        # a reader of ctx would log one executor pass twice -- once as itself,
+        # once as a gate that never ran. `_run_advisory` returns only the gates
+        # it executed, and a malformed item it skipped is not a call: it ran no
+        # command, and a 0 ms entry for it would be indistinguishable from a
+        # gate that ran and was measured at nothing.
+        for _g in _gates:
+            ctx["calls"].record("gate_advisory", {"stats": {"ms": _g["ms"]}})
 
     # --- Worktree commit or release (M4 seam 1) ---
     # The whole decision -- green keeps and commits, red releases, a borrower
@@ -1963,6 +2035,11 @@ def _delegate(args, t0_dir):
         brief["task"] = brief_meta.get("addendum", "") if used_doc else base_task
         brief["trust"] = trust
         save_brief(cwd, session_id, brief)
+
+    # Closed last, so the span holds every phase above it -- including the ones
+    # nothing records. That is what makes the remainder in the run log a
+    # measurement of what is missing rather than a restatement of what is not.
+    ctx["wall_ms"] = int((time.monotonic() - _t0_wall) * 1000)
 
     return {
         "status": status,
