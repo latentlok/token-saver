@@ -133,7 +133,9 @@ qd/
     plan.py       args + config  →  RunPlan  (frozen)
     scope.py      RunScope: container, session, call log  (lifecycle)
     facts.py      tree + run observations, computed once, read-only
-    pipeline.py   the fixed phase sequence  (status.py extracted; rest pending)
+    pipeline.py   started: ratchet_minimum. status.py + features/guards/ took
+                  the two phases that were whole ideas; the rest of _delegate is
+                  ORCHESTRATION, which is the loop's own job
     findings.py   Finding record + severity/priority
 
   adapters/       ← ALREADY EXISTS as gittree / invoke / worktrees / profiles

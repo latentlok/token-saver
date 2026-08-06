@@ -35,6 +35,7 @@ from qd.gittree import (
 )
 from qd.core.plan import RunPlan, setting
 from qd.core.attempt import Attempt
+from qd.core.pipeline import ratchet_minimum
 from qd.core.prompt import tail as prompt_tail
 from qd.core.status import classify as run_status
 from qd.core.scope import RunScope
@@ -1200,13 +1201,7 @@ def _delegate(args, t0_dir):
             # gate proves nothing -- and every later feature would read as
             # success_but_preflight_passed. Require MORE tests than preflight
             # found; the gate now binds on the delta, and preflight re-runs red.
-            # Sum across files, for the same reason the gate script does:
-            # a multi-file suite prints one count per file, and the ratchet
-            # must ratchet against the whole suite, not its first member.
-            n = sum(int(a or b) for a, b in
-                    re.findall(r"Ran (\d+) tests?|(\d+) passed",
-                               preflight_out or ""))
-            self_min = n + 1
+            self_min = ratchet_minimum(preflight_out)
             verify = _ensure_self_gate(work_cwd, min_override=self_min)
             preflight, preflight_out, gate_ms, gate_timed_out = \
                 _run_verify_timed(verify, work_cwd, verify_timeout)
