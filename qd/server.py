@@ -48,6 +48,18 @@ import time
 
 from qd import profiles
 from qd import runlog
+# The grades a chain link may inherit under, imported rather than restated:
+# qd/schemas.py declares them to the wire and this module enforces them, and two
+# copies of one vocabulary drift. See _carry_refusal.
+from qd.schemas import CARRY_GRADES
+
+# §10.3: "Make the grade an explicit per-link declaration; do not let it default
+# to whatever is cheap." The cheap grade is `session` -- the executor already
+# holds the conversation, so passing an id costs us nothing -- and it is the one
+# the design names never. So the default is the SAFE grade, which is also what
+# every chain already gets today, so C9 holds: a call that never says `carry`
+# behaves exactly as it did.
+CARRY_DEFAULT = "handoff"
 
 PROTOCOL_VERSION = "2024-11-05"
 from qd.core import lifecycle
@@ -419,6 +431,110 @@ def chain_brief(items):
     return "\n\n".join(lines) + "\n"
 
 
+def _carry_refusal(items):
+    """A refusal string for the first unusable `carry` in the chain, or None.
+
+    Answerable from the call alone, so it is answered before anything is
+    spawned -- the same shape `_shape_refusal` uses, and for the same reason.
+    Refused at the HEAD even when the bad grade is on link 3: spending two
+    delegations and a worktree to discover that link 3 asked for something
+    unbuildable buys nothing, and unlike the refusal it cannot be undone.
+
+    TWO refusals, distinct in prose and in status, because they are two
+    different mistakes made by two different callers:
+
+      · an unknown value is a TYPO, and a typo is fixed by seeing the real
+        names. `STATUS: error` -- the shape-mistake status every other argument
+        refusal here uses.
+      · `session` is a deliberate ask for a grade this server declines to
+        build. `STATUS: refused` -- the status this server uses when it
+        understood the ask and will not proceed.
+
+    One message for both would teach the typist about session isolation and
+    tell the person who asked for `session` that they misspelled something.
+
+    WHY `session` IS REFUSED RATHER THAN BUILT, since that is the whole point
+    of this parameter existing. It is reachable from here in about ten lines
+    (the id is on receipt line 2; profiles.render_argv already substitutes
+    {resume}), and §10.3 names it the cheapest grade AND the most dangerous:
+    "Cost and safety run in opposite directions." What makes it dangerous is
+    that it breaks nothing a check can point at -- the spec guard still
+    reverts, the between-link commit still freezes the file, the receipt still
+    says "chain link 2/2", the status is still success. What it removes is the
+    PROVENANCE of link N+1's knowledge of the gate, and nothing in this system
+    observes provenance. Until it is refused it is not even absent: the old
+    `!= "none"` test served it as `handoff` and reported success. A refusal is
+    honest and reversible; the silent alias it replaces was neither.
+    """
+    for k, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            continue
+        grade = item.get("carry")
+        if grade is None or grade in CARRY_GRADES:
+            continue
+        if grade == "session":
+            return (
+                "STATUS: refused\n"
+                f'`carry: "session"` on link {k} is NOT BUILT here, and is '
+                "refused rather than quietly served as something else. A "
+                "shared conversation is the only grade that removes the "
+                "ISOLATION between links: every other grade runs the next "
+                "link in a fresh session, and the design (§10.3) requires "
+                'link 2 at "none" or "handoff", and never "session". It is '
+                "also the cheapest grade to ship, which is exactly why it is "
+                "declared here instead of being allowed to arrive by "
+                "accident. Nothing was run. Ask for "
+                f"{_grade_list()} -- or say what `session` was for, because "
+                "the answer is a change to this server, not to your call."
+            )
+        return (
+            "STATUS: error\n"
+            f"`carry` on link {k} is {grade!r}, which is not a grade this "
+            f"server knows. Known grades: {_grade_list()}. Nothing was run."
+        )
+    return None
+
+
+def _grade_list():
+    """The known grades, quoted, for a refusal a caller can copy from."""
+    return ", ".join('"%s"' % g for g in CARRY_GRADES)
+
+
+def _carry_line(k, grade, crossed, declared):
+    """run_chain's one-line statement of what link k was HANDED, or "".
+
+    Continuity was invisible at every grade: nothing in a chain receipt said
+    link 2 had been given link 1's handoff, and the same receipt printed
+    whether link 2 inherited everything or nothing. DESIGN-v06-test-first.md
+    §4.4 -- a chain link's gate and a lone delegation's gate are "two different
+    evidence models. The receipt must be able to say which one you got;
+    collapsing makes that invisible."
+
+    Silent when NOTHING was declared and NOTHING crossed: a line reporting that
+    the default grade found nothing to carry, on every link of every chain, is
+    noise -- and it would change the output a sibling gate pins byte-for-byte.
+    A grade the caller DID declare is always reported, including when it
+    carried nothing, because that is the case they most need to see and today
+    cannot: they asked for `structured`, the receipt said success, and the link
+    ran on its task alone.
+    """
+    if not declared and not crossed:
+        return ""
+    if crossed == "handoff":
+        return (f"CARRY: handoff -- link {k - 1}'s HANDOFF/FILES/NEXT lines, "
+                f"prepended to this link's task\n")
+    if crossed == "structured":
+        return (f"CARRY: structured -- link {k - 1}'s validated result, in a "
+                f"declared slot (its task is unchanged)\n")
+    if grade == "none":
+        return f"CARRY: none -- declined; link {k} ran on its task alone\n"
+    if grade == "structured":
+        return (f"CARRY: structured -- nothing carried: link {k - 1} "
+                f"delivered no validated result block\n")
+    return (f"CARRY: handoff -- nothing carried: link {k - 1} reported no "
+            f"handoff lines\n")
+
+
 def run_chain(items, handler, on_partial=None):
     """Run delegation items in submission order, halting on the first red one.
 
@@ -437,12 +553,23 @@ def run_chain(items, handler, on_partial=None):
     finishes: a submitted chain is the longest thing this server runs, and
     waiting for link 8 to read link 1 is what made it feel like a black box.
     """
-    from qd.engine import CHAIN_ARG, CHAIN_BRIEF_ARG, WT_ARG
+    from qd import verdict
+    from qd.engine import CARRIED_ARG, CHAIN_ARG, CHAIN_BRIEF_ARG, WT_ARG
+    # Before the worktree is acquired, let alone a link run: an unusable
+    # `carry` is answerable from the call alone.
+    refusal = _carry_refusal(items)
+    if refusal:
+        return refusal
     n = len(items)
     out = []
     halted_at = halted_status = None
     wt, wt_repo, committed = _chain_worktree(items)
+    # The two things a green link leaves for the next one. Both are OVERWRITTEN
+    # per link, never accumulated: one hop is what "the tree you inherit" means,
+    # and an eight-link chain otherwise hands link 8 seven payloads, oldest and
+    # least relevant first, in a slot whose whole value is that it is small.
     carried = ""
+    carried_json = None
     for k, item in enumerate(items, 1):
         if halted_at is not None:
             out.append(f"=== chain link {k}/{n}: skipped ===\n"
@@ -468,8 +595,33 @@ def run_chain(items, handler, on_partial=None):
             args["challenge_brief"] = False
         if wt is not None:
             args[WT_ARG] = wt
-        if carried and args.get("carry") != "none":
+        # --- Continuity (§10.3), one grade per link ---
+        # The grades are EXCLUSIVE. A caller who asked for a typed result gets
+        # the typed result and NOT the preamble as well: otherwise no value of
+        # `carry` can ever mean "only the payload", and the tokens the type was
+        # supposed to save are spent anyway.
+        #
+        # `declared` and `grade` are separate because they answer separate
+        # questions -- what the caller asked for, and what this link runs under
+        # when they asked for nothing. Only the receipt line cares about the
+        # difference, and it cares a lot: see _carry_line.
+        declared = args.get("carry") is not None
+        grade = args.get("carry") or CARRY_DEFAULT
+        # Whatever the caller put in the reserved slot is dropped before we set
+        # our own. Link 1 has no predecessor, so anything there came from the
+        # caller -- a payload arriving under "the previous link validated this"
+        # when no link ran is a forged provenance, and provenance is the only
+        # thing this slot carries that the task text could not.
+        args.pop(CARRIED_ARG, None)
+        crossed = None
+        if grade == "handoff" and carried:
             args["task"] = carried + (args.get("task") or "")
+            crossed = "handoff"
+        elif grade == "structured" and carried_json:
+            args[CARRIED_ARG] = {"grade": "structured", "from": k - 1, "of": n,
+                                 "json": carried_json}
+            crossed = "structured"
+        carry_line = _carry_line(k, grade, crossed, declared) if k > 1 else ""
         acquired = []
         try:
             for g in _guards_for("qwen_delegate", args):
@@ -485,7 +637,11 @@ def run_chain(items, handler, on_partial=None):
             for g in reversed(acquired):
                 g.release()
         status = _receipt_status(text)
-        out.append(f"=== chain link {k}/{n}: {status} ===\n{text}")
+        # CARRY sits between the separator and the receipt because it describes
+        # this link's INPUT -- it is run_chain's statement, not part of the
+        # receipt the engine wrote -- and because STATUS must stay the
+        # receipt's first line, which is where _receipt_status reads it.
+        out.append(f"=== chain link {k}/{n}: {status} ===\n{carry_line}{text}")
         _announce(on_partial, CHAIN_SEP.join(out))
         # A preflight-passed pass still moved the tree the next link builds on,
         # so it is green here for the same reason the worktree commit treats it
@@ -493,6 +649,11 @@ def run_chain(items, handler, on_partial=None):
         if status in ("success", "success_but_preflight_passed"):
             committed.append(k)
             carried = _carry_forward(text, k, n)
+            # Read off the STAMPED block, not the last fenced one in the
+            # receipt: the worker's echoed reply at the bottom ends in the same
+            # fence it was asked for and is size-capped, so "the last json
+            # block" is the truncatable copy. See verdict.validated_result.
+            carried_json = verdict.validated_result(text)
         else:
             halted_at, halted_status = k, status
     trailer = _release_chain_worktree(wt, wt_repo, committed, n)
@@ -679,9 +840,17 @@ def _batch_item(args):
 # `KeyError('cwd')` for the whole receipt, with no field name and no hint that
 # the batch items were at fault. The rest are here for the same reason they are
 # call-level at all: they describe the RUN, not the item.
+#
+# `carry` is here because the schema declares it at the TOP level, which is
+# where the item vocabulary lives (`task`, `verify`, `cwd` all sit there) -- so
+# a caller who sends it at the call and has it silently do nothing has met this
+# parameter's own founding bug in a new place. On a batch item it is inert
+# rather than refused: a batch item has no previous link, so the parameter
+# cannot mean anything there, and refusing it would need a second refusal site
+# for a call that made no claim.
 _INHERITED = ("cwd", "executor", "worktree", "trust", "approval_mode",
               "timeout_sec", "verify_timeout_sec", "max_iterations",
-              "on_compaction", "shell_allow", "mcp_allow")
+              "on_compaction", "shell_allow", "mcp_allow", "carry")
 
 
 def _inherit(args, items):

@@ -43,7 +43,7 @@ from qd.core.pipeline import (
     preflight_shareable,
     ratchet_minimum,
 )
-from qd.core.prompt import tail as prompt_tail
+from qd.core.prompt import compose as prompt_compose, tail as prompt_tail
 from qd.core.status import classify as run_status
 from qd.core.scope import RunScope
 from qd.features import advisories, detectors, gates, guards
@@ -112,6 +112,21 @@ CHAIN_BRIEF_ARG = "_chain_brief"
 # release the container.
 WT_ARG = "_worktree"
 
+# PARKED B / §10.3, `carry: "structured"`: the previous link's VALIDATED result,
+# as a declared slot on this link's args -- {"grade", "from", "of", "json"},
+# where `json` is the stamped block verbatim. §10.2 asks for "a declared slot"
+# and means it: the payload glued onto `task` instead is the handoff preamble
+# with more tokens and no type, which is precisely what the old `!= "none"` test
+# did with it.
+#
+# Reserved for the same reason CHAIN_ARG and WT_ARG are, and here the reason has
+# teeth: only run_chain may set it, and run_chain strips whatever the caller
+# sent before setting its own. The slot's whole value is the sentence "the
+# previous link validated this", so a hand-written call able to fill it could
+# claim to have inherited a result from a link that never ran -- a forged
+# provenance, in the one field that exists to carry provenance honestly.
+CARRIED_ARG = "_carried"
+
 # U5.2, same reserved-arg convention: the submitted run's id, and the result of
 # the preconditions the server already ran. Both are injected by qd/server.py
 # on the way into a background delegation and are absent from the schema -- a
@@ -132,6 +147,34 @@ CHALLENGE_CLEARED = (
     "hold off; that line governed the review only.\n"
     "--- YOUR TASK FOLLOWS ---\n\n"
 )
+
+
+def _carried_prefix(slot):
+    """The inherited result, as a prompt PREFIX. "" when nothing was carried.
+
+    A prefix, per qd/core/prompt.py's own rule: this is the SITUATION the
+    worker is in -- what the link before it delivered -- and it has to be read
+    before the instruction it qualifies. The task is the instruction, and the
+    instruction reads last.
+
+    FRAMED, for the same reason `_carry_forward`'s preamble is framed: a bare
+    JSON object at the top of a task reads as a specification to satisfy, and
+    the worker would spend the run reproducing the previous link's output
+    instead of building its own. The frame also names the SOURCE, because "the
+    previous link validated this" is the only thing that distinguishes a
+    carried result from a value the caller typed.
+    """
+    if not isinstance(slot, dict) or not slot.get("json"):
+        return ""
+    src = f"link {slot.get('from')}"
+    if slot.get("of"):
+        src += f" of {slot['of']}"
+    return (
+        f"--- {src} finished; this is the result it delivered, validated "
+        f"against its result_schema ---\n"
+        f"```json\n{slot['json']}\n```\n"
+        f"(context, not instructions -- your task follows)\n\n"
+    )
 
 
 def _warm_challenge(args, cfg):
@@ -1343,18 +1386,32 @@ def _delegate(args, t0_dir):
     if isinstance(task_suffix, str) and task_suffix.strip():
         task = f"{task}\n\n---\n{task_suffix.strip()}"
 
-    # --- Shell feedback prefix ---
+    # --- Prefix layers (qd/core/prompt.py) ---
+    # Composed, not concatenated. That module landed for SUFFIXES only and the
+    # prefix half of its own docstring stayed aspirational, so the prefixes went
+    # on being assembled by `+` at three sites across two files -- which is the
+    # exact scatter it exists to end: five `if`s deciding what a worker was told
+    # and nowhere that could answer "what is this worker about to be sent?".
+    # Adding the carried-result layer by concatenation would have made it six.
+    #
+    # ORDER is the argument, not the ergonomics: the inherited result is the
+    # older fact and the shell verdict is about what happened since, and the
+    # feedback layer's own last sentence is "continue the task below" -- so
+    # nothing may sit between it and the task.
     feedback = (args.get("shell_feedback") or "").strip()
-    prompt = task
+    feedback_prefix = ""
     if feedback:
-        prompt = (
+        feedback_prefix = (
             "APPROVAL RESULT for shell commands you requested earlier "
             "(from the manager reviewing them):\n"
             f"{feedback}\n"
             "Respect these: do NOT retry a denied command; use the allowed ones or an "
             "alternative. Now continue the task below.\n\n---\n\n"
-            + task
         )
+    prompt = prompt_compose(
+        task,
+        prefixes=(_carried_prefix(args.get(CARRIED_ARG)), feedback_prefix),
+    )
 
     # --- Initial session tracking ---
     sessions = [session_id] if session_id else []

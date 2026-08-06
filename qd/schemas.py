@@ -17,6 +17,17 @@ passes it.
 
 import json
 
+# PARKED B / DESIGN-v06-test-first.md §10.3: what a chain link inherits from the
+# one before it. THE KNOWN SET, in one place. `carry` shipped as an UNDECLARED
+# wire parameter read by a single `!= "none"` test, so every value that was not
+# that literal -- "structured", "session", "banana" -- meant "send the handoff
+# preamble" and reported success. A vocabulary the wire accepts and the code
+# does not recognise is the shape of that bug, so the schema's enum below is not
+# written out beside this tuple; it IS this tuple (see the assignment under
+# TOOL). `session` is deliberately absent: the enum says what EXISTS, and
+# qd/server.py refuses the caller who asks for it anyway by name.
+CARRY_GRADES = ("none", "handoff", "structured")
+
 TOOL = json.loads(r'''
 {
   "name": "qwen_delegate",
@@ -124,6 +135,10 @@ TOOL = json.loads(r'''
         },
         "description": "DEPENDENT steps in ONE call (same fields per item), run in order on the same tree; the first link that does not come back green halts the rest, which render as one-line SKIPPED receipts. Mutually exclusive with `batch` -- that one is for INDEPENDENT work."
       },
+      "carry": {
+        "type": "string",
+        "description": "What a `chain` link inherits from the link before it (call level or per item; no meaning on a lone call or a batch item). 'handoff' (default): the previous link's HANDOFF/FILES/NEXT lines, prepended to the task as context. 'structured': its validated result_schema JSON instead, in a declared slot -- a typed result, and NOT the preamble as well. 'none': nothing. Every grade runs the next link in a FRESH session. `carry: \"session\"` -- one shared conversation across links -- is not built here and is refused by name: it is the only grade that removes the isolation between links, and it removes it silently."
+      },
       "report_dont_fix": {
         "type": "boolean",
         "description": "Diagnose, do not repair: one attempt, one `verify` run, no retry loop, status 'reported'. The gate output is the deliverable (a red gate is the reproduction) plus a FINDINGS line from the worker."
@@ -196,6 +211,13 @@ TOOL = json.loads(r'''
   }
 }
 ''')
+
+# The `carry` enum is set here, not written into the JSON above, so the wire
+# vocabulary and the vocabulary qd/server.py enforces are ONE object rather than
+# two copies that agree today. The failure mode of that drift is specific and
+# already happened once in this parameter's short life: a grade the wire accepts
+# and the code does not recognise, silently served as a different grade.
+TOOL["inputSchema"]["properties"]["carry"]["enum"] = list(CARRY_GRADES)
 
 QUERY_TOOL = json.loads(r'''
 {

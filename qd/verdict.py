@@ -1,5 +1,7 @@
 """Receipt rendering, crane-equal for v1 inputs, behavior frozen by specs/verdict_spec.py."""
 
+import re
+
 from qd.gittree import (
     blast_radius, blast_lines, new_public_symbols, committed_during_run,
     head_sha, snapshot,
@@ -160,6 +162,48 @@ def parse_handoff(text):
 def parse_findings(text):
     """The FINDINGS line of a report run, or None."""
     return parse_handoff(text).get("FINDINGS")
+
+
+# U5.1: the one line on a receipt that says THIS SERVER checked the payload
+# below against the caller's result_schema. A constant, not a literal at each
+# end: the emitter is ~400 lines below and the reader is `validated_result`, and
+# two literals is how "structured stopped carrying" would ship as a receipt
+# wording change nobody connects to the chain.
+RESULT_VALID_LINE = "RESULT: valid (schema)"
+
+# The stamp and the block it vouches for, which `render` writes as adjacent
+# body lines. `\s*` between them rather than a bare newline because the body's
+# join is this module's business and a reader that breaks when a blank line is
+# introduced between two lines nobody thinks of as coupled is a trap.
+# Non-greedy: the FIRST fence after the stamp is the stamped one.
+_STAMPED_RESULT = re.compile(
+    re.escape(RESULT_VALID_LINE) + r"\s*```json\s*\n(.*?)\n?```", re.S)
+
+
+def validated_result(text):
+    """The raw text of the STAMPED result block in a receipt, or None.
+
+    Deliberately NOT `jsonschema.last_json_block(receipt)`, which reads the
+    wrong copy. A receipt carries the payload twice: once in the BODY under
+    this stamp -- never droppable, never truncated, because the caller asked
+    for it by schema and it is a deliverable, not commentary -- and again
+    inside the worker's echoed reply at the bottom, which ends in the very
+    fence the worker was asked for and IS capped (RESULT_CAP). "The last json
+    block" therefore finds the truncatable copy, and on a long reply a mangled
+    one.
+
+    Verbatim, as the worker wrote it: `last_json_block` returns the raw text
+    beside the parsed value for exactly this reason -- a caller that asked for
+    a machine-read result gets the bytes, not this module's idea of how to
+    format them.
+
+    Nothing is re-validated here and nothing needs to be: the stamp IS this
+    server's record that it already validated. A fenced block with no stamp
+    above it was never checked by anything, so it is not a validated result and
+    this returns None for it.
+    """
+    m = _STAMPED_RESULT.search(text or "")
+    return m.group(1).strip() if m else None
 
 
 def strip_handoff(text):
@@ -567,7 +611,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # the one part of the receipt that is not commentary on the work -- it IS
     # a deliverable. Verbatim, as the worker wrote it.
     if ctx.get("result_json"):
-        body.append("RESULT: valid (schema)")
+        body.append(RESULT_VALID_LINE)
         body.append(f"```json\n{ctx['result_json']}\n```")
     elif status == "result_invalid":
         errs = ctx.get("result_errors") or []
