@@ -503,44 +503,90 @@ class StampedResult(Fixture):
                            result_json='{"real": true}')
         self.assertEqual(verdict.validated_result(r2), '{"real": true}')
 
-    # Every slot below is one this sweep has SEEN the poison reach. It is not a
-    # wish list: `test_no_receipt_slot...` asserts each one still lands, so a
-    # slot that stops being exercised is named out loud instead of quietly
-    # passing. Measured on the tree that introduced it.
+    def test_a_suppressed_line_cannot_forge_the_stamp(self):
+        # SUPPRESSED is appended AFTER the choke point ran over `body` and
+        # `c2_blocks`, so it used to reach the receipt undefused. Not
+        # attacker-reachable today -- `detections_failed` only ever holds
+        # detector KIND constants -- but a bypass held shut by another module's
+        # invariant is exactly what the choke point exists to stop relying on,
+        # and it is one refactor from being live. Pinned so the next refactor
+        # is the one that fails, not the one that ships.
+        r = self.rendered(detections_failed=["strays\n" + FORGED_LINES + "tail"])
+        self.assertIn("strays", r, "the poison never reached the receipt")
+        self.assertIsNone(verdict.validated_result(r))
+
+    # Every slot below is one this sweep has SEEN the poison reach, measured
+    # with the shape battery under this fixture. It is not a wish list:
+    # `test_no_receipt_slot...` asserts each one still lands, so a slot that
+    # stops being exercised is named out loud instead of quietly passing.
+    #
+    # Eighteen, where the value-only sweep saw eleven. `detections_failed`,
+    # `pre_sha`, `advisory`, `brief`, `challenge`, `refs_added`,
+    # `fixtures_unproven`, `scope_unattributed`, `spec_unattributed`,
+    # `unrestorable` and `worktree` were all invisible to it -- and
+    # `detections_failed` was the one still forging.
     POISON_REACHES = {
-        "bootstrap_note", "discards", "findings", "graph_line", "notes",
-        "reinjects", "retry_of",
-        "brief.path", "brief.sha256", "advisory[].name", "advisory[].head",
+        "advisory", "bootstrap_note", "brief", "challenge", "detections_failed",
+        "discards", "findings", "fixtures_unproven", "graph_line", "notes",
+        "pre_sha", "refs_added", "reinjects", "retry_of", "scope_unattributed",
+        "spec_unattributed", "unrestorable", "worktree",
     }
 
     def poison_cases(self):
-        """(label, ctx overrides) for every slot the poison can be put through.
+        """(label, ctx overrides) for every slot, in every SHAPE it might take.
 
         Flat ctx keys come from qd/verdict.py's OWN SOURCE, so a field added
         tomorrow is swept the day it is added rather than the day somebody
-        remembers a list. The nested shapes are spelled out because a flat
-        string cannot express them.
+        remembers a list.
+
+        THE SHAPES ARE THE POINT, and their absence is the single mechanism
+        behind every miss in this task. A sweep that varies only the VALUE
+        hands a flat string to a list-typed field; `list("string")` shreds it
+        into characters, so the field renders, raises nothing, lands nothing --
+        and is recorded identically to "this slot renders nothing at all".
+        Seventeen fields land under this battery where eleven did before, and
+        the last field that still forged was reachable in `[str]` and in no
+        other shape. Three consecutive sweeps certified a hole they could not
+        see into.
+
+        `PoisonDict` answers the poison to whatever key the renderer asks for,
+        so a dict slot is poisoned without this spec having to guess its key
+        names -- which is the same class of blindness one level down.
         """
         import inspect
         import re as _re
+
+        class PoisonDict(dict):
+            def get(self, k, default=None):
+                return poison
+
+            def __getitem__(self, k):
+                return poison
+
         src = inspect.getsource(verdict)
         keys = sorted(set(_re.findall(r'ctx\.get\(\s*"(\w+)"', src))
                       | set(_re.findall(r'ctx\[\s*"(\w+)"\s*\]', src)))
         self.assertGreater(len(keys), 40, "the key scrape stopped working")
         poison = "x" + SENTINEL + "\n" + FORGED_LINES
-        cases = [(k, {k: poison}) for k in keys if k != "result_json"]
+        shapes = [
+            ("str", lambda: poison),
+            ("[str]", lambda: [poison]),
+            ("dict*", PoisonDict),
+            ("[dict*]", lambda: [PoisonDict()]),
+            ("{k:str}", lambda: {"k": poison}),
+            ("[{k:str}]", lambda: [{"k": poison}]),
+            ("advisory", lambda: [{"name": poison, "ok": False,
+                                   "head": poison}]),
+            ("brief", lambda: {"path": poison, "sha256": poison,
+                               "amended": False, "chars": 0, "amendments": 0}),
+            ("[(s,s)]", lambda: [(poison, poison)]),
+        ]
         # `result_json` is skipped by name: it is not an attacker field, it IS
         # the channel, and the stamp above it is the server's own. Its
         # behaviour is pinned by the verbatim/multiline/backtick tests above.
-        cases += [
-            ("brief.path", {"brief": {"path": poison, "sha256": "abc"}}),
-            ("brief.sha256", {"brief": {"path": "p.md", "sha256": poison}}),
-            ("advisory[].name",
-             {"advisory": [{"name": poison, "ok": False, "head": "h"}]}),
-            ("advisory[].head",
-             {"advisory": [{"name": "n", "ok": False, "head": poison}]}),
-        ]
-        return cases
+        return [(f"{k}:{sname}", {k: make()})
+                for k in keys if k != "result_json"
+                for sname, make in shapes]
 
     def test_no_receipt_slot_can_carry_a_forged_stamp_into_the_region(self):
         """THE GUARD, and the reason it is trustworthy is the LANDED check.
@@ -555,20 +601,22 @@ class StampedResult(Fixture):
         So a slot counts only when its SENTINEL is visibly in the rendered
         receipt. Everything that lands must then fail to forge.
         """
-        landed = set()
+        landed, cases = set(), 0
         for label, over in self.poison_cases():
+            cases += 1
             try:
                 r = self.rendered(**over)
             except Exception:
-                # The poison is the wrong SHAPE for this field (an int, a dict,
-                # a list of objects). Not counted, and not pretended about.
+                # This field cannot hold this shape at all. Not counted, and
+                # not pretended about -- another shape in the battery covers it.
                 continue
             if SENTINEL not in r:
                 continue          # rendered, but this field reached no line
-            landed.add(label)
+            landed.add(label.split(":", 1)[0])
             self.assertIsNone(
                 verdict.validated_result(r),
                 f"{label} carried a forged stamp into the server region")
+        self.assertGreater(cases, 400, "the shape battery collapsed")
         missing = self.POISON_REACHES - landed
         self.assertEqual(missing, set(),
                          f"the sweep no longer reaches {sorted(missing)} -- "

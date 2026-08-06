@@ -306,16 +306,41 @@ def _no_stamp(part):
         file the worker can write). `_run_advisory` only `.strip()`s it.
       · `reinjects` and `discards` -- counters nobody thinks of as text.
 
+    WHICH LAYER CLOSES WHAT, because the choke point does not do all of it and
+    saying so would be the same overclaim this file corrected once. This rule
+    makes every block that passes through it count-independent -- it needs no
+    list of fields and no sweep to be complete. The `advisory_gates[].name`
+    route is closed HERE too, but it is ALSO closed by the per-slot `_one_line`
+    added beside `head` in the same change, and that per-slot guard is what
+    keeps the ADVISORY line readable. Two layers, and only one of them is the
+    general one.
+
+    TWO EXEMPTIONS, both currently held shut by accident rather than by design.
+    Written down because an undocumented accident is how the last three rounds
+    each shipped:
+
+      1. A block EXACTLY equal to the stamp is returned undefused -- that is how
+         the genuine one is recognised. An unprefixed `bootstrap_note` can be
+         made exactly equal to it, so the test is reachable; it is not
+         exploitable only because no slot can then emit an adjacent ` ```json `
+         line, which is a fact about the receipt's layout and not a protection
+         anyone designed. If a slot ever renders a bare fenced block as its own
+         block, this needs a provenance flag rather than an equality test.
+      2. A block that STARTS with a transcript head is exempt as quotation, so a
+         `bootstrap_note` of exactly "--- qwen result ---" truncates the region
+         above a genuine stamp and drops a real payload. Fail-closed (nothing
+         crosses, nothing forged), pre-existing, and a denial-of-carry at worst.
+
     The two TRANSCRIPTION blocks are left alone. They are quotation by
     definition and already outside the region, so rewriting them would edit the
     worker's own words in the one place the receipt promises not to.
     """
     if part == RESULT_VALID_LINE:
-        return part                       # the server's own; the only one
+        return part                       # the server's own; see exemption 1
     if not isinstance(part, str) or RESULT_VALID_LINE not in part:
         return part
     if part.startswith(_TRANSCRIPT_HEADS):
-        return part
+        return part                       # quotation; see exemption 2
     # Prefixed, not deleted: the caller still sees what was written, and the
     # line can no longer be the start-of-line match the reader requires. A
     # receipt that silently removes text is the failure mode this file argues
@@ -1182,11 +1207,19 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     failed_detectors = list(ctx.get("detections_failed") or [])
 
     def _assembled():
-        # ONE choke point for the stamp invariant. Every block that is not the
-        # server's own stamp passes through _no_stamp on its way into the
-        # receipt, so no interpolation site anywhere above -- there are 29 --
-        # has to remember to guard itself, and none of them can reopen this by
-        # forgetting. See _no_stamp.
+        # THE CHOKE POINT for the stamp invariant. Every block reaching the
+        # receipt passes through _no_stamp, so no interpolation site above --
+        # there are 29 -- has to remember to guard itself.
+        #
+        # EVERY block, and the word is load-bearing: this used to defuse `body`
+        # and `c2_blocks` and then append two more parts below without them.
+        # `_paid` is arithmetic and could not carry a stamp, but `_sup` renders
+        # `detections_failed`, and a poisoned entry there forged a result on a
+        # run that stamped nothing. Not attacker-reachable -- that list only
+        # ever holds detector KIND constants -- but "held shut by another
+        # module's invariant" is the exact thing this rule exists to stop being
+        # true, and a bypass whose safety lives in qd/engine.py is one refactor
+        # from being a hole. Defused where they are appended, below.
         parts = [_no_stamp(p) for p in body]
         for blk in c2_blocks:
             parts.append(_no_stamp(blk.text))
@@ -1198,13 +1231,13 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
                           int((cum_for_paid.get("tokens") or {}).get("completion") or 0))
         _sup = _suppressed_line(suppressed, failed_detectors)
         if _paid:
-            parts.append(_paid)
+            parts.append(_no_stamp(_paid))
         if _sup:
             # NON-DROPPABLE by construction: it is not in c2_blocks at all, so
             # the loop cannot shed the one line that reports shedding. A
             # self-defeating warning is worse than none -- its absence is
             # precisely what it exists to deny.
-            parts.append(_sup)
+            parts.append(_no_stamp(_sup))
         parts.append(
             f"--- qwen result ---\n"
             f"{truncate(strip_handoff(result_text), caps['result'])}")
