@@ -1,7 +1,7 @@
 # Handover — after the restructure round
 
-**State: clean. Branch `v0.6`, 65 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,146 tests** (was 1,013).
+**State: clean. Branch `v0.6`, 69 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
+`bash ci/run-specs.sh` → exit 0, **1,172 tests** (was 1,013).
 **Steps 1–7 done; 8's user-visible half done. The one real gap is `core/pipeline.py` — see below.**
 Verified live against `snowy` several times, including two mutation-checked live runs.
 
@@ -86,8 +86,13 @@ tangled, the wiring is.* **Pin things where they run, not where they are defined
     qd/core/scope.py        RunScope                   -- what a run owns and disposes of
     qd/core/plan.py         setting(...)               -- four-layer precedence, once
     qd/surface/receipt.py   Block(kind,text,drop,pri)  -- the receipt as a list
+    qd/core/status.py       classify(...)              -- the first VERB
+    qd/core/violation.py    Violation(kind,trail,prompt,rider,notes)
+    qd/core/attempt.py      Attempt(n, of, changed, writes)
+    qd/core/runnable.py     of(args) -> Run | ChainOfRuns
     qd/features/detectors/  6 detectors, enumerable
     qd/features/gates/      2 gates (challenge, red)
+    qd/features/guards/     4 guards (specs, brief, touch_scope, fixtures)
 
 **Steps done:** 2 (findings), 3 (receipt-as-list, core), 4 (gates), 5 (container
 + T0 + attribution), 6 (resolver **and** the frozen `RunPlan`), 7 (Composite).
@@ -107,12 +112,22 @@ Detectors are now `detect(facts, scope, plan)`. There is no bag to grow back.
 
 ## Honest measurements
 
-**`_delegate`: 1,106 → 1,135 → 1,088 lines.** It GREW through steps 2–6 and only
-began shrinking when `core/status.py` landed. The diagnosis is the important
+**`_delegate`: 1,106 → 1,135 → 953 lines.** It GREW through steps 2–6 and only
+began shrinking when the VERBS started leaving. The diagnosis is the important
 part: **every step until then extracted a NOUN** — facts, findings, scope, plan,
-blocks, gates, runnable — **and none extracted the VERB.** The nouns left; the
-sequence that orders them stayed. That is the whole reason for the growth, and
-it is what `core/pipeline.py` is for.
+blocks — **and none extracted the sequence that orders them.** `core/status.py`
+and `features/guards/` are the first two verbs out; the loop's remaining phases
+are what `core/pipeline.py` is still for.
+
+**Three roles, now separate, and the separation is the point:**
+
+    a gate     refuses the RUN       -- nothing is built        features/gates/
+    a guard    fails the ATTEMPT     -- worker told, tries again features/guards/
+    a detector reports on the RESULT -- nobody is stopped        features/detectors/
+
+Guards are NOT pure and detectors are: most guards revert, because a spec edit
+merely *reported* is a spec edit that stands. That asymmetry is why they are
+three directories and not one with flags.
 
 **Concurrency on snowy: measurement RETRACTED.** An earlier reading (throughput
 flat, latency tripling from 1 → 3 concurrent) was taken while another process
@@ -128,9 +143,9 @@ live tests at ≤3. Raw HTTP probes need `VLLM_TOKEN` in env; delegations do not
 
 ## The patterns — 4 of 5 built, and the audit that found the gap
 
-§7 adopts five patterns. Built: **Registry+Pipeline** (detectors, gates),
-**Strategy** (gates), **Builder** (`RunPlan`), **Composite** (`runnable.py`).
-Not built: **Decorator** for the prompt — `task_suffix` + `HANDOFF` + `FINDINGS`
+§7 adopts five patterns. Built: **Registry+Pipeline** (detectors, gates,
+**guards**), **Strategy** (gates), **Builder** (`RunPlan`), **Composite**
+(`runnable.py`). Not built: **Decorator** for the prompt — `task_suffix` + `HANDOFF` + `FINDINGS`
 + `CHALLENGE` + the chain preamble are still string concatenation across three
 files. That is the last unbuilt pattern and a genuine remaining seam.
 
@@ -151,10 +166,10 @@ caller that has never misbehaved.
 ## What is left, best first
 
 1. **`core/pipeline.py` — the rest of the phase sequence. THE structural gap.**
-   `core/status.py` is the first piece and the proof the seam is clean (a pure
-   function, 47 lines out of `_delegate`, golden byte-identical). The same
-   treatment is owed to the preflight, the attempt loop, and the post-run
-   region. This is what makes `_delegate` a coordinator instead of the run.
+   `core/status.py` and `features/guards/` are the first two verbs out (1,135 →
+   953 lines, golden byte-identical throughout). Still owed: the preflight, the
+   invoke/prefilter/gate sequence, and the post-run region. This is what makes
+   `_delegate` a coordinator instead of the run.
    *Also nominally missing from §5: `surface/schema.py` and `surface/runlog.py`
    — but those are MOVES of `qd/schemas.py` and `qd/runlog.py`. Cosmetic; left
    undone on purpose rather than churned for a tick in a table.*
@@ -193,6 +208,12 @@ caller that has never misbehaved.
 ---
 
 ## Traps paid for this round
+
+**`/tmp` fills up, and full disk looks like test failures.** 55,933 leaked temp
+dirs (9.1G) hit ENOSPC mid-session, and four unrelated tests "failed" purely
+from it. `ci/run-specs.sh` traps and cleans its own `TMPDIR`; running a spec
+file **directly** does not. Set `TMPDIR=$(mktemp -d)` for direct runs, and check
+`df -h /tmp` before believing a surprising failure.
 
 **Restore by file copy, never `git checkout`.** Used ~30 times this round with no
 loss. The trap it avoids is on record from the previous round.
