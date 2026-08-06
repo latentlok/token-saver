@@ -1734,69 +1734,21 @@ def _delegate(args, t0_dir):
             if post_snap.get(p) != pre_status.get(p)
         ]
 
-        # --- Touch scope check (M4 seam 2) ---
-        # BEFORE the no-verify break: the scope promise holds whether or not a
-        # gate was supplied (it used to be silently unenforced without one).
-        if touch_scope is not None and changed:
-            attributed = ctx.get("writes") or []
-            violated_paths = []
-            for p in changed:
-                if p in touch_scope:
-                    continue
-                if p not in pre_tracked:
-                    continue  # new files are always allowed
-                if hooked and p not in attributed:
-                    # C10: the worker never wrote this one, so it is the
-                    # caller's (or an agent of theirs) work on the same tree.
-                    # Recorded, never reverted, never fails the attempt.
-                    if p not in ctx["scope_unattributed"]:
-                        ctx["scope_unattributed"].append(p)
-                    continue
-                violated_paths.append(p)
-            if violated_paths:
-                _, unrestored = restore_paths(
-                    work_cwd, violated_paths, base=pre_sha_full, t0=t0_saved)
-                for p in unrestored:
-                    if p not in ctx["unrestorable"]:
-                        ctx["unrestorable"].append(p)
-                names = ", ".join(violated_paths)
-                trail.append(
-                    f"attempt {attempt}: TOUCH SCOPE VIOLATION -- edited {names} outside scope (auto-reverted)"
-                )
-                if attempt < max_iter:
-                    prompt = (
-                        f"You modified files outside the allowed set: {names}. "
-                        f"Those files are off-limits and have been reverted. "
-                        f"Only modify: {', '.join(touch_scope)}. "
-                        f"You may create new files freely."
-                    )
-                    if was_compacted_since_ack(session_id):
-                        ack_compaction(session_id)
-                        send_suffix = True
-                        if on_compaction == "discard":
-                            ctx["discards"] += 1
-                            session_id = None
-                        else:
-                            ctx["reinjects"] += 1
-                        prompt += (
-                            f"\n\nYour conversation history was summarised (compacted), so "
-                            f"you may have lost the original instructions and any summary of "
-                            f"your earlier work may be inaccurate. Re-read the files; do not "
-                            f"reconstruct it.\n\nOriginal task:\n{task}"
-                        )
-                    continue
-                break
-
         # --- Guards: the things that fail an ATTEMPT (features/guards/) ---
         # A guard detects, reverts if it must, and RETURNS a violation. The
         # loop owns the control flow -- a guard cannot `continue` a loop it does
         # not own, and that is what makes the retry-or-give-up rule exist once
         # here instead of once per guard.
+        scope.mark_attribution(pre_tracked, hooked)
+        scope.mark_t0_bytes(t0_saved)
         scope.mark_created(_created(work_cwd, changed, pre_status, pre_tracked,
                                     ctx.get("writes"), hooked))
         _v = guards.first(scope, plan,
                           Attempt(n=attempt, of=max_iter, changed=changed,
                                   writes=ctx.get("writes") or []))
+        # Attribution findings are the scope's; the receipt reads them here.
+        ctx["scope_unattributed"] = list(scope.scope_unattributed)
+        ctx["unrestorable"] = list(scope.unrestorable)
         if _v is not None:
             if _v.kind == "fixture_provenance":
                 ctx["fixtures_unproven"] = scope.unproven_fixtures(
@@ -1804,6 +1756,23 @@ def _delegate(args, t0_dir):
             trail.append(_v.trail)
             if _v.prompt and attempt < max_iter:
                 prompt = _v.prompt
+                # The rider mutates session state, so it stays with the loop: a
+                # guard says "this correction is useless to a worker that has
+                # forgotten the task", and the loop decides what that costs.
+                if _v.rider and was_compacted_since_ack(session_id):
+                    ack_compaction(session_id)
+                    send_suffix = True
+                    if on_compaction == "discard":
+                        ctx["discards"] += 1
+                        session_id = None
+                    else:
+                        ctx["reinjects"] += 1
+                    prompt += (
+                        f"\n\nYour conversation history was summarised (compacted), so "
+                        f"you may have lost the original instructions and any summary of "
+                        f"your earlier work may be inaccurate. Re-read the files; do not "
+                        f"reconstruct it.\n\nOriginal task:\n{task}"
+                    )
                 continue
             break
 

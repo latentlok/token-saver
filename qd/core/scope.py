@@ -64,6 +64,12 @@ class RunScope:
         # USED, never disposed of.
         self.owned = owned and container is not None
 
+    def mark_t0_bytes(self, saved):
+        """The T0 byte snapshot a restore reads from. Separate from `pre_sha`
+        because a path may be untracked at T0 -- git has no copy, and only the
+        saved bytes can put it back."""
+        self.t0_bytes = saved
+
     def mark_start(self, pre_status, pre_sha):
         """Record where this run began. Called AFTER acquisition, necessarily.
 
@@ -75,12 +81,18 @@ class RunScope:
         """
         self.pre_status = pre_status if pre_status is not None else {}
         self.pre_sha = pre_sha
+        self.t0_bytes = None
         # Files this run made, attributed. Run attribution, which is what this
         # run OWNS -- the last field DetectorInputs was carrying on scope's
         # behalf. Set by mark_created() once the tree has been observed.
         self.created = []
         self.pre_tracked = set()
         self.hooked = False
+        # Attribution findings, accumulated across attempts. They live here
+        # because they are answers to "who owns this change in the tree this
+        # run holds" -- the same question `hooked` exists for.
+        self.scope_unattributed = []   # changed, outside scope, not the worker's
+        self.unrestorable = []         # over the snapshot cap, left in place
 
     def mark_attribution(self, pre_tracked, hooked):
         """Who is answerable for a change in this tree.
@@ -92,6 +104,36 @@ class RunScope:
         """
         self.pre_tracked = pre_tracked or set()
         self.hooked = hooked
+
+    def note_scope_unattributed(self, paths):
+        """Changed outside the declared scope, with no logged worker write.
+
+        C10: somebody else is working this tree. Recorded, NEVER reverted --
+        reverting these is how a caller's concurrent work got destroyed once.
+        """
+        for p in paths:
+            if p not in self.scope_unattributed:
+                self.scope_unattributed.append(p)
+
+    def note_unrestorable(self, paths):
+        """Over the snapshot cap, so the T0 bytes were never saved. Reported
+        rather than silently left looking reverted."""
+        for p in paths:
+            if p not in self.unrestorable:
+                self.unrestorable.append(p)
+
+    def restore(self, paths, base):
+        """Put paths back to their pre-run state, recording what could not be.
+
+        On the scope rather than in each guard because the guards that revert
+        all need the same three things -- the tree, T0, and somewhere to put the
+        failures -- and all three are the scope's.
+        """
+        from qd.gittree import restore_paths
+        _, unrestored = restore_paths(self.work_cwd, paths, base=base,
+                                      t0=self.t0_bytes)
+        self.note_unrestorable(unrestored)
+        return unrestored
 
     def unproven_fixtures(self, segments):
         """Delivered fixtures carrying no traceable source (U3.3).

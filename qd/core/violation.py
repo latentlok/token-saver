@@ -11,8 +11,15 @@ it.
             core/status.py later classifies
     prompt  the correction sent to the worker on its next attempt, or None if
             the violation is terminal and re-asking is pointless
+    rider   whether the correction needs the compaction re-injection appended.
+            A FLAG rather than the text, because applying it mutates session
+            state (`discards`/`reinjects`, and possibly dropping the session)
+            which belongs to the loop. A guard says "this correction is useless
+            to a worker that has forgotten the task"; the loop decides what to
+            do about it.
 """
 
 from collections import namedtuple
 
-Violation = namedtuple("Violation", "kind trail prompt")
+Violation = namedtuple("Violation", "kind trail prompt rider")
+Violation.__new__.__defaults__ = (False,)

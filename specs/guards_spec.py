@@ -41,11 +41,24 @@ from qd.features import guards  # noqa: E402
 
 
 class FakeScope:
-    def __init__(self, unproven=()):
+    def __init__(self, unproven=(), pre_tracked=(), hooked=False):
         self._unproven = list(unproven)
+        self.pre_tracked = set(pre_tracked)
+        self.hooked = hooked
+        self.pre_sha = "T0SHA"
+        self.scope_unattributed = []
+        self.unrestorable = []
+        self.restored = []
 
     def unproven_fixtures(self, segments):
         return list(self._unproven)
+
+    def note_scope_unattributed(self, paths):
+        self.scope_unattributed.extend(paths)
+
+    def restore(self, paths, base):
+        self.restored.extend(paths)
+        return []
 
 
 def plan(**over):
@@ -63,7 +76,14 @@ def attempt(n=1, of=3):
 class TheRegistry(unittest.TestCase):
     def test_every_guard_is_listed(self):
         self.assertEqual(sorted(g.KIND for g in guards.GUARDS),
-                         ["fixture_provenance"])
+                         ["fixture_provenance", "touch_scope"])
+
+    def test_order_is_precedence(self):
+        # As in core/status.py. The worker gets ONE correction, so the order is
+        # the rule: a scope violation is work that had to be UNDONE, which
+        # outranks a missing provenance comment.
+        self.assertEqual([g.KIND for g in guards.GUARDS],
+                         ["touch_scope", "fixture_provenance"])
 
     def test_a_clean_attempt_produces_no_violation(self):
         self.assertIsNone(guards.first(FakeScope(), plan(), attempt()))
@@ -154,6 +174,77 @@ class FixtureProvenance(unittest.TestCase):
         scope = FakeScope(["a.json"])
         guards.first(scope, plan(), attempt())
         self.assertEqual(scope.unproven_fixtures(()), ["a.json"])
+
+
+class TouchScope(unittest.TestCase):
+    """M4 seam 2 -- a promise about blast radius."""
+
+    def scope(self, **kw):
+        kw.setdefault("pre_tracked", ["src/a.py", "other.py"])
+        return FakeScope(**kw)
+
+    def att(self, changed, writes=()):
+        return Attempt(n=1, of=3, changed=list(changed), writes=list(writes))
+
+    def test_editing_outside_the_scope_fails_the_attempt_and_reverts(self):
+        sc = self.scope()
+        v = guards.first(sc, plan(touch_scope=["src/a.py"]),
+                         self.att(["src/a.py", "other.py"]))
+        self.assertEqual(v.kind, "touch_scope")
+        self.assertIn("other.py", v.trail)
+        self.assertIn("auto-reverted", v.trail)
+        self.assertEqual(sc.restored, ["other.py"])
+
+    def test_a_file_inside_the_scope_is_fine(self):
+        sc = self.scope()
+        self.assertIsNone(guards.first(sc, plan(touch_scope=["src/a.py"]),
+                                       self.att(["src/a.py"])))
+        self.assertEqual(sc.restored, [])
+
+    def test_new_files_are_always_allowed(self):
+        # A scope names what may be MODIFIED. A worker that cannot create a
+        # file cannot do most jobs.
+        sc = self.scope()
+        self.assertIsNone(guards.first(sc, plan(touch_scope=["src/a.py"]),
+                                       self.att(["brand/new.py"])))
+        self.assertEqual(sc.restored, [])
+
+    def test_an_unattributed_change_is_recorded_and_never_reverted(self):
+        # C10, and the expensive one. Under a proxy that logs the worker's
+        # writes, a changed file with NO logged write belongs to the caller or
+        # an agent of theirs working the same tree. Reverting those is how a
+        # caller's concurrent work got destroyed.
+        sc = self.scope(hooked=True)
+        v = guards.first(sc, plan(touch_scope=["src/a.py"]),
+                         self.att(["other.py"], writes=[]))
+        self.assertIsNone(v, "the caller's own edit failed the worker's attempt")
+        self.assertEqual(sc.scope_unattributed, ["other.py"])
+        self.assertEqual(sc.restored, [])
+
+    def test_the_workers_own_out_of_scope_edit_still_counts(self):
+        # The other half: attribution must not become a blanket excuse.
+        sc = self.scope(hooked=True)
+        v = guards.first(sc, plan(touch_scope=["src/a.py"]),
+                         self.att(["other.py"], writes=["other.py"]))
+        self.assertEqual(v.kind, "touch_scope")
+        self.assertEqual(sc.restored, ["other.py"])
+
+    def test_no_declared_scope_means_no_check(self):
+        self.assertIsNone(guards.first(self.scope(), plan(touch_scope=None),
+                                       self.att(["anything.py"])))
+
+    def test_its_correction_asks_for_the_compaction_rider(self):
+        # "Only modify X" is useless to a worker that has forgotten what the
+        # task was. The guard asks; the loop decides what it costs.
+        v = guards.first(self.scope(), plan(touch_scope=["src/a.py"]),
+                         self.att(["other.py"]))
+        self.assertTrue(v.rider)
+
+    def test_the_fixture_correction_does_not(self):
+        # It names every file and the exact line to add, so it stands alone.
+        v = guards.first(FakeScope(["a.json"]), plan(touch_scope=None),
+                         self.att([]))
+        self.assertFalse(v.rider)
 
 
 if __name__ == "__main__":
