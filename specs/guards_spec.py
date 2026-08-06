@@ -274,11 +274,18 @@ class SpecGuard(unittest.TestCase):
 
     def setUp(self):
         self.reverted = []
+        # What the revert REPORTS back, which the guard must believe rather
+        # than assume. Default: everything asked for came back.
+        self.unrestored = []
         self._vs, self._rs = spec_guard.violated_specs, spec_guard.revert_specs
-        spec_guard.revert_specs = lambda cwd, paths, base, t0: \
-            self.reverted.append((tuple(paths), base))
         self.addCleanup(setattr, spec_guard, "violated_specs", self._vs)
         self.addCleanup(setattr, spec_guard, "revert_specs", self._rs)
+        spec_guard.revert_specs = self._fake_revert
+
+    def _fake_revert(self, cwd, paths, base, t0):
+        self.reverted.append((tuple(paths), base))
+        return ([p for p in paths if p not in self.unrestored],
+                [p for p in paths if p in self.unrestored])
 
     def violated(self, *paths):
         spec_guard.violated_specs = lambda cwd, base: list(paths)
@@ -336,6 +343,109 @@ class SpecGuard(unittest.TestCase):
         v = guards.first(FakeScope(), plan(), self.att(["guard_spec.py"]))
         self.assertIn("Never modify a protected spec", v.prompt)
         self.assertIn("stop and say so", v.prompt)
+
+
+class AFailedRevertMustNotReadAsASuccessfulOne(unittest.TestCase):
+    """The guard reported a repair it had not performed.
+
+    `restore_paths` has always returned `(restored, unrestored)` -- it is the
+    honest half of the machinery and it works. `revert_specs` called it and
+    THREW THE SECOND LIST AWAY, and this message said `(auto-reverted)`
+    unconditionally. So the one line a caller reads to decide whether the gate
+    is still theirs asserted a repair nobody had checked.
+
+    This is the same class as the bug the previous commit fixed, one layer up:
+    there the guard could not NAME the file it protects; here it names it and
+    lies about what happened to it. Both are a confident report with no
+    observation behind it, and both leave a worker-written gate on disk under a
+    receipt that says otherwise.
+
+    Three reachable ways into `unrestored`, all measured on this build. Only
+    the first needs anything unusual at all, and it is not a filename:
+
+      A. The worker creates its own `mygate_spec.py` and `git add`s it. It is
+         now a TRACKED protected spec (`spec_files` is `git ls-files`) that
+         does not exist at the pre-run sha, so `git show <base>:<path>` fails.
+         Measured: violated=['mygate_spec.py'], restored=[],
+         unrestored=['mygate_spec.py'], file still on disk holding the
+         worker's own gate, receipt says auto-reverted.
+      B. The protected spec is replaced by a DIRECTORY of the same name --
+         `open(full, "wb")` raises.
+      C. The spec is sabotaged and then chmod'ed read-only -- same raise, and
+         the nastiest of the three: `WEAKENED` still on disk, reported clean.
+
+    The T0-bytes route (`toobig`) is NOT reachable for a spec, because a
+    protected spec that is dirty at T0 refuses the run before the worker starts
+    (qd/engine.py, `--- Precondition: no dirty protected spec ---`). Written
+    down because "it can't happen" is exactly the reasoning that let the
+    discarded list survive review.
+    """
+
+    def setUp(self):
+        self._vs, self._rs = spec_guard.violated_specs, spec_guard.revert_specs
+        self.addCleanup(setattr, spec_guard, "violated_specs", self._vs)
+        self.addCleanup(setattr, spec_guard, "revert_specs", self._rs)
+
+    def arrange(self, violated, unrestored):
+        spec_guard.violated_specs = lambda cwd, base: list(violated)
+        spec_guard.revert_specs = lambda cwd, paths, base, t0: (
+            [p for p in paths if p not in unrestored],
+            [p for p in paths if p in unrestored])
+        return guards.first(FakeScope(), plan(),
+                            Attempt(n=1, of=3, changed=[],
+                                    writes=list(violated)))
+
+    def test_a_revert_that_failed_is_not_reported_as_auto_reverted(self):
+        # Case A, and the decisive assertion: the words "auto-reverted" must
+        # not appear about a file that is still sitting there sabotaged.
+        v = self.arrange(["mygate_spec.py"], ["mygate_spec.py"])
+        self.assertIn("SPEC VIOLATION", v.trail)
+        self.assertNotIn("auto-reverted", v.trail,
+                         f"the trail claims a revert that did not happen: "
+                         f"{v.trail!r}")
+        self.assertIn("mygate_spec.py", v.trail)
+
+    def test_the_trail_says_the_file_is_still_on_disk(self):
+        # Naming the file is not enough -- the pre-fix line named it too. The
+        # receipt has to say what STATE it is in, because "reverted" and "still
+        # holding the worker's gate" are opposite instructions to the reader.
+        v = self.arrange(["mygate_spec.py"], ["mygate_spec.py"])
+        self.assertIn("NOT REVERTED", v.trail.upper())
+        self.assertIn("still on disk", v.trail)
+
+    def test_a_partial_revert_names_both_halves_separately(self):
+        # The mixed case is where a single verdict word is worst: one file was
+        # put back and one was not, and lumping them under either word is false
+        # about half the set.
+        v = self.arrange(["guard_spec.py", "mygate_spec.py"],
+                         ["mygate_spec.py"])
+        self.assertIn("guard_spec.py", v.trail)
+        self.assertIn("mygate_spec.py", v.trail)
+        head, _, tail = v.trail.partition("NOT REVERTED")
+        self.assertIn("guard_spec.py", head)
+        self.assertNotIn("guard_spec.py", tail,
+                         "a file that WAS reverted is listed as not reverted")
+        self.assertIn("mygate_spec.py", tail)
+
+    def test_the_correction_does_not_tell_the_worker_it_was_reverted(self):
+        # The prompt goes to the MODEL. Telling a worker its edit was undone
+        # when it was not invites the next attempt to re-apply a change that
+        # is already there -- and, worse, to believe the protected file it can
+        # still see is the original.
+        v = self.arrange(["mygate_spec.py"], ["mygate_spec.py"])
+        self.assertNotIn("has been reverted", v.prompt)
+        self.assertIn("mygate_spec.py", v.prompt)
+        # The correction itself must not soften: the rule is unchanged.
+        self.assertIn("Never modify a protected spec", v.prompt)
+
+    def test_a_successful_revert_still_says_auto_reverted(self):
+        # The control, and the one that keeps this from being "hedge every
+        # message". The ordinary path is overwhelmingly the common one and a
+        # receipt that always sounds unsure is one nobody can read a fact off.
+        v = self.arrange(["guard_spec.py"], [])
+        self.assertIn("(auto-reverted)", v.trail)
+        self.assertNotIn("NOT REVERTED", v.trail.upper())
+        self.assertIn("has been reverted", v.prompt)
 
 
 if __name__ == "__main__":

@@ -637,6 +637,40 @@ class SpecGuard(Fixture):
         self.assertEqual(r["status"], "refused")
         self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_1.txt")))
 
+    def test_a_revert_that_could_not_happen_is_not_reported_as_done(self):
+        # The end-to-end half of guards_spec.AFailedRevertMustNotReadAsA-
+        # SuccessfulOne, driven through the real gittree rather than a stub, so
+        # the discarded `unrestored` list is a fact about this build and not an
+        # arrangement. Needs no hostile filename and no unusual git config.
+        #
+        # `git add` is not hard-denied outside `scoped`, so a worker can stage
+        # its own new file. That makes `mygate_spec.py` a TRACKED protected
+        # spec (`spec_files` is `git ls-files`) which does not exist at the
+        # pre-run sha -- so `git show <base>:mygate_spec.py` fails, nothing is
+        # restored, and the file stays on disk holding a gate the worker wrote
+        # for itself. Before the fix the trail said `(auto-reverted)` anyway.
+        self.steps([{"write": {"mygate_spec.py": "def test_always():\n"
+                                                 "    assert True  # SABOTAGE\n",
+                               "out.py": "MARKER\n"},
+                     "git_add": ["mygate_spec.py"]}])
+        r = self.delegate(max_iterations=1)
+        self.assertEqual(r["status"], "spec_violation")
+        gate = os.path.join(self.cwd, "mygate_spec.py")
+        # The premise, asserted rather than assumed: if some later change makes
+        # this restorable, the receipt assertion below stops meaning anything
+        # and this line is what says so.
+        self.assertTrue(os.path.exists(gate),
+                        "premise broken: the file WAS restorable after all")
+        with open(gate) as f:
+            self.assertIn("SABOTAGE", f.read())
+        line = r["trail"][0]
+        self.assertNotIn(
+            "auto-reverted", line,
+            f"the receipt claims a revert that never happened; the worker's "
+            f"own gate is still on disk. trail: {line!r}")
+        self.assertIn("mygate_spec.py", line)
+        self.assertIn("NOT REVERTED", line.upper())
+
 
 class Prefilter(Fixture):
     def test_gate_green_prefilter_red_is_success_with_notes(self):

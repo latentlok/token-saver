@@ -400,15 +400,27 @@ def violated_specs(cwd, base=None):
 
 
 def revert_specs(cwd, paths, base=None, t0=None):
-    """Restore spec files from `base` (default: HEAD).
+    """Restore spec files from `base` (default: HEAD). Returns (restored, unrestored).
 
     Base matters for the same reason: if the worker committed its edit, HEAD now holds
     the WEAKENED spec, so restoring from HEAD would faithfully restore the sabotage.
     Routed through restore_paths so the revert never touches the index -- the old
     `git checkout <sha> --` form also STAGED what it restored.
+
+    It RETURNS what restore_paths reported, and the second half of that pair is
+    the load-bearing one. This function used to call restore_paths for its
+    effect and drop the result, so the one caller -- the spec guard, the most
+    important guard in the system -- had no way to know a revert had failed and
+    said "(auto-reverted)" unconditionally. Three reachable failures, none of
+    them exotic: a spec the worker created and `git add`ed (tracked now, absent
+    at `base`, so `git show <base>:<path>` fails), a spec replaced by a
+    directory, and a spec sabotaged then chmod'ed read-only. In all three the
+    worker's version stayed on disk under a receipt that said it had been put
+    back.
     """
-    if paths:
-        restore_paths(cwd, paths, base=base, t0=t0)
+    if not paths:
+        return [], []
+    return restore_paths(cwd, paths, base=base, t0=t0)
 
 
 def committed_during_run(cwd, pre_sha):
