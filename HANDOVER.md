@@ -11,6 +11,56 @@ local change.** What is left is smaller than what is done.
 
 ---
 
+
+## Read this before you commit anything
+
+Four process failures this round, all mine, all the same shape: **I asserted a
+result I had not read.** They are listed because the fix is a working habit, not
+a rule anyone would disagree with.
+
+1. **`git add -A` in a tree a subagent was working in.** Commit `f7c3f40` is
+   labelled "A5: the PAID: line" and contains 138 lines of someone else's
+   `qd/invoke.py` / `specs/invoke_spec.py`. Nothing was lost, but the commit is
+   mislabelled forever. **Commit explicit paths (`git commit -- <paths>`) when
+   anything else might be working in the tree.**
+2. **Committing after a non-zero suite.** `bash ci/run-specs.sh >/dev/null;
+   git commit` in one chain does not stop on failure. One commit claimed "exit 0"
+   while the run had returned 1. **Read the exit code before writing it down.**
+3. **Twice, a `python3` heredoc raised mid-edit and the chained `git commit`
+   succeeded anyway** — so the message described a doc edit the tree did not
+   contain. Caught by grepping the file, not by trusting the commit.
+4. **A mutation reported "0 red" because its anchor never matched.** No error,
+   just a silent no-op that read as evidence. **Assert the anchor count.**
+
+Every one is the failure this product exists to prevent: a confident report
+nobody checked against the artifact. Four in one session is a property of how I
+worked, not luck.
+
+## And the finding that was wrong
+
+I measured "resuming a session costs 40% more input tokens" and wrote it up
+twice — first blaming re-sent history, then, after the operator correctly
+objected that a two-turn chat cannot be 50k tokens, blaming a verbatim copy of
+the previous prompt. **Both were wrong, and so was the operator's hypothesis.**
+
+A subagent put a logging proxy on the wire: warm 76,444 vs cold 76,448. Four
+tokens apart. Resuming is free. The +50k was `result.usage` being a SESSION
+counter that a resumed process starts at the previous run's total — **our
+misreading, in `parse_stats`, of a number produced by the thing under test.**
+
+It is fixed (`qd/invoke.py turn_tokens()`), and the doctrine it had contaminated
+(`challenge_warm`'s "+50% input, +16% wall") is corrected: re-measured on the
+wire, cold 97,049 vs warm 98,954, wall-clock a wash.
+
+**The transferable rule, and the most valuable thing in this round:**
+
+> A number produced by the thing under test is not a measurement.
+
+Every conclusion that survived came from outside the CLI — the wire, or its
+source. Two of my three live measurements this session were confidently wrong in
+opposite directions before something external settled them.
+
+
 ## Read these, in this order
 
 | Doc | What it gives you |
