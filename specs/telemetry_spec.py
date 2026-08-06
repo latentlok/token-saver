@@ -66,6 +66,20 @@ COUNTS or LOWER BOUNDS rather than wall-clock equalities, because
 specs/dispatch_spec.py is excluded from CI precisely for making claims a loaded
 box can fail honestly:
 
+EXCEPT for one line, and it is named here rather than left to be discovered:
+`assertGreater(accounted_ms, unaccounted_ms)` at the end of
+`test_a_second_spent_in_the_gate_is_a_second_the_log_can_name` compares two
+MEASURED quantities, so a box loaded enough to spend more unrecorded
+orchestration time than the two seconds the gate provably burns can fail it
+honestly. It is kept anyway, because it is the ONLY assertion in this file that
+notices a timed phase added later that is neither a gate run nor an executor
+call -- the count spies below cannot see one, and the identity is satisfied by
+any remainder at all (measured: an injected 0.5s untimed phase passes, 3s
+fails). Its margin is 2000 ms of sleep against orchestration overhead measured
+in tens of ms. That is the trade: one load-sensitive line, in exchange for the
+only tripwire on the phases nobody thought to spy on.
+
+
   * `test_every_gate_run_is_exactly_one_recorded_call` and its executor twin
     spy the real call sites and compare COUNTS. A phase added later and left
     unrecorded fails these -- which is the whole difference between closing
@@ -392,6 +406,15 @@ class Reconciliation(Fixture):
         # Every phase of one delegation is sequential, so the parts cannot
         # outrun the whole. Not clamped: a negative remainder would be real
         # evidence of double-counting, and max(0, ...) would hide it.
+        #
+        # "Sequential" is the whole of the argument, and it holds only because
+        # every recorded call is time THIS run spent. The one phase a run can
+        # hold without executing -- a batch pre-flight verdict served from
+        # `_preflight_once`'s cache -- is recorded at 0 ms under its own kind
+        # for exactly this reason; billed at the FIRST item's duration it would
+        # put more time on a late borrower's record than the borrower's own
+        # wall clock contains, and this line would go red saying so. See
+        # `test_a_borrowed_preflight_verdict_is_not_billed_to_the_borrower`.
         self.assertGreaterEqual(rec["unaccounted_ms"], 0)
 
     def test_the_run_measures_itself_end_to_end_not_by_summing_its_calls(self):
@@ -488,6 +511,61 @@ class Reconciliation(Fixture):
                                    review_brief=True,
                                    advisory_gates=[{"name": "a", "cmd": "true"}])
         self.assertEqual(len(self.calls(rec)), gates[0] + execs[0])
+
+    def test_a_borrowed_preflight_verdict_is_not_billed_to_the_borrower(self):
+        # `_preflight_once` runs ONE gate for a whole batch and hands the same
+        # verdict to every item. That tuple carries the FIRST item's `ms`, and
+        # an item that started later never spent it -- recorded as that item's
+        # own pre-flight, a late cache hit puts more time on the record than the
+        # run took and drives `unaccounted_ms` NEGATIVE. Which is this record's
+        # double-counting signal firing correctly, at a defect in the recording
+        # rather than in the run.
+        #
+        # Two real delegations rather than a hand-primed dict: the key is
+        # (base sha, worktrees dir, gate), and a test that built the key itself
+        # would keep passing after the key changed.
+        real = engine._run_verify_timed
+        expensive = [True]
+
+        def stub(cmd, cwd, timeout):
+            passed, out, ms, timed_out = real(cmd, cwd, timeout)
+            if expensive[0]:
+                # Only the one gate run the batch actually pays for. Ten
+                # minutes: far past any wall-clock this test can produce, so a
+                # borrower billed for it cannot come out non-negative by luck.
+                expensive[0] = False
+                return passed, out, 600000, timed_out
+            return passed, out, ms, timed_out
+
+        engine._run_verify_timed = stub
+        self.addCleanup(setattr, engine, "_run_verify_timed", real)
+        # The cache outlives a delegation by design -- the server forgets it
+        # when a batch ends -- so this test clears up after itself.
+        self.addCleanup(engine._preflight_forget)
+
+        # The first item pays for the gate. It must FAIL: a green worktree run
+        # commits, and the base sha is half the cache key.
+        self.steps([{"write": {"out.py": "wrong\n"}}])
+        self.delegate(max_iterations=1, worktree="auto")
+
+        # The second item borrows the verdict.
+        _, rec = self.run_and_read(max_iterations=1, worktree="auto")
+        by = self.by_kind(rec)
+        self.assertIn("gate_preflight_cached", by,
+                      f"the verdict was not shared: {sorted(by)}")
+        # Its own kind, not `gate_preflight` at 0 ms: a zero under that name
+        # cannot be told from a gate that ran and was measured at nothing.
+        self.assertNotIn("gate_preflight", by)
+        self.assertEqual(by["gate_preflight_cached"]["ms"], 0)
+        # The ten minutes belong to the item that ran the gate, and to no
+        # other record.
+        self.assertLess(rec["accounted_ms"], 600000)
+        self.assertGreaterEqual(rec["unaccounted_ms"], 0)
+        # NOTE for a later batch spec: this is the one recorded call that is not
+        # a phase the run executed, so the kind-blind count in
+        # `test_the_log_names_every_phase_the_run_ran_and_invents_none` is a
+        # claim about a single delegation. Neither test covers a batch, and the
+        # docstring above says why that question is left open.
 
     def test_the_three_figures_are_on_every_record_not_the_interesting_ones(self):
         # Unlike `verify_timeout_sec` and `preflight_expect`, which are written

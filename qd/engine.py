@@ -517,21 +517,34 @@ _PREFLIGHT_LOCK = threading.Lock()
 _PREFLIGHT = {}            # (sha, cwd_root, cmd) -> (passed, out, ms, timed_out)
 
 
-def _preflight_once(cmd, work_cwd, timeout, base_sha, isolated):
+def _preflight_once(cmd, work_cwd, timeout, base_sha, isolated, served=None):
     """`_run_verify_timed`, executed once per (base sha, gate) across a batch.
 
     Items that share a base and a gate share the verdict. The FIRST caller
     runs it while the others wait on the lock rather than racing it -- waiting
     is what stops them starving each other, so the lock is held across the run
     deliberately, not just around the dict.
+
+    `served`, when a list is passed, gets "ran" or "cached" appended: which of
+    the two this caller got. Out-of-band rather than in the returned tuple
+    because the tuple IS the verdict, and specs/fleet_spec.py:219 pins that two
+    sharers receive the same one -- correctly, since the verdict is identical
+    by construction. Whether THIS caller paid for it is a fact about the caller,
+    not about the verdict, and the telemetry that needs it is the only reader.
     """
     if not isolated or not base_sha:
+        if served is not None:
+            served.append("ran")
         return _run_verify_timed(cmd, work_cwd, timeout)
 
     key = (base_sha, os.path.realpath(os.path.dirname(work_cwd)), cmd)
     with _PREFLIGHT_LOCK:
         if key in _PREFLIGHT:
+            if served is not None:
+                served.append("cached")
             return _PREFLIGHT[key]
+        if served is not None:
+            served.append("ran")
         result = _run_verify_timed(cmd, work_cwd, timeout)
         # A timeout is NOT cached: it says the box was busy, not that the gate
         # is red, and caching it would spread one item's bad luck to the whole
@@ -1231,12 +1244,12 @@ def _delegate(args, t0_dir):
     gate_ms = 0
     gate_timed_out = False
     self_min = None
-    # Held until the CallLog exists: both gate runs below happen before the ctx
-    # that owns it is built. A list rather than `gate_ms` alone because the
-    # self-gate ratchet runs the gate a SECOND time and overwrites the first
-    # figure -- recorded off `gate_ms` a self-gate run would report one gate run
-    # where the caller waited for two.
-    preflight_ms = []
+    # (kind, ms) per pre-flight, held until the CallLog exists: both gate runs
+    # below happen before the ctx that owns it is built. A list rather than
+    # `gate_ms` alone because the self-gate ratchet runs the gate a SECOND time
+    # and overwrites the first figure -- recorded off `gate_ms` a self-gate run
+    # would report one gate run where the caller waited for two.
+    preflight_calls = []
     if verify:
         # `_preflight_once` shares one verdict across items keyed on
         # (base sha, worktrees dir, gate), and its stated invariant is that
@@ -1250,9 +1263,32 @@ def _delegate(args, t0_dir):
         # base would share a key while holding genuinely different trees.
         _pos = (args.get(CHAIN_ARG) or {}).get("pos") or 1
         shareable = wt is not None and _pos == 1
+        _served = []
         preflight, preflight_out, gate_ms, gate_timed_out = _preflight_once(
-            verify, work_cwd, verify_timeout, pre_sha_full, shareable)
-        preflight_ms.append(gate_ms)
+            verify, work_cwd, verify_timeout, pre_sha_full, shareable,
+            served=_served)
+        # A BORROWED verdict is a different fact from a gate run, and billing it
+        # like one is a live arithmetic error: `gate_ms` on a cache hit is the
+        # FIRST item's duration, and a late hit -- an item that started long
+        # after the gate it inherits -- puts more time on the record than the
+        # item's own wall clock contains, driving `unaccounted_ms` negative.
+        # That signal means double-counting, and here it would be right.
+        #
+        # 0 ms under its OWN kind, not 0 ms under `gate_preflight`: this file
+        # already refuses to write a zero-ms call for a skipped advisory gate
+        # because it would be indistinguishable from a gate that ran and was
+        # measured at nothing, and the same objection applies here. Nor is it
+        # dropped -- a run whose record showed no pre-flight at all, while
+        # `gate.preflight_passed` says otherwise, is the silence this whole
+        # change removes. A kind is the mechanism ExecutorCall names for
+        # precisely this ("a log that rejects a call it does not recognise
+        # records less than one that accepts it and labels it honestly");
+        # `ExecutorCall.cached` was not reused because it is a TOKEN count that
+        # `fresh_prompt` subtracts, not a flag.
+        if _served and _served[0] == "cached":
+            preflight_calls.append(("gate_preflight_cached", 0))
+        else:
+            preflight_calls.append(("gate_preflight", gate_ms))
         if self_gate and preflight:
             # Incremental ratchet: an existing suite is already green, so this
             # gate proves nothing -- and every later feature would read as
@@ -1262,7 +1298,9 @@ def _delegate(args, t0_dir):
             verify = _ensure_self_gate(work_cwd, min_override=self_min)
             preflight, preflight_out, gate_ms, gate_timed_out = \
                 _run_verify_timed(verify, work_cwd, verify_timeout)
-            preflight_ms.append(gate_ms)
+            # Never cached: the ratchet re-run goes straight to
+            # `_run_verify_timed`, so this run paid for it.
+            preflight_calls.append(("gate_preflight", gate_ms))
 
     # U3.1: fail fast. The same command runs after every attempt, so a gate that
     # cannot finish inside its budget has already decided the run -- left alone
@@ -1406,12 +1444,12 @@ def _delegate(args, t0_dir):
     # now reaches the record, so the receipt and the log are one account of one
     # gate run rather than two.
     #
-    # A verdict `_preflight_once` served from its batch cache is recorded here
-    # too. That is the honest reading for an item whose pre-flight answer was
-    # paid for once and used N times; how one gate run divides across N records
-    # is a question no caller has asked yet.
-    for _ms in preflight_ms:
-        ctx["calls"].record("gate_preflight", {"stats": {"ms": _ms}})
+    # A verdict served from the batch cache is recorded here too, under
+    # `gate_preflight_cached` at 0 ms -- named, so the borrower's record does
+    # not read as a run with no pre-flight, and priced at nothing, because the
+    # borrower spent nothing on it. See the pre-flight block above.
+    for _kind, _ms in preflight_calls:
+        ctx["calls"].record(_kind, {"stats": {"ms": _ms}})
 
     chain = args.get(CHAIN_ARG)
     if isinstance(chain, dict):
@@ -1958,12 +1996,18 @@ def _delegate(args, t0_dir):
     if setting("review_brief", args, cfg, _global_config(), default=False):
         def _review_ask(text):
             # Was `...run_executor(...)[0]`, and that `[0]` threw away the meta
-            # of a WHOLE executor pass. A caller who switched this on paid its
-            # tokens and could not find the charge in BURN, in COST, or in the
-            # log -- the only executor call in the system that billed nobody.
-            # Recorded from the executor's own meta, the same source and the
-            # same convention "challenge" and "attempt" already use, so its
-            # tokens land beside theirs rather than only its time.
+            # of a WHOLE executor pass -- the one executor call in the system
+            # whose tokens were recorded nowhere at all.
+            #
+            # This puts them in the LOG, under their own kind, from the
+            # executor's own meta -- the same source and convention "challenge"
+            # and "attempt" already use. It does NOT put them in the receipt:
+            # BURN and COST are rendered from ctx["cum"], fed by accum_stats,
+            # and nothing here touches it. So the asymmetry with "challenge",
+            # which IS folded into cum at :1422, survives this change on
+            # purpose. Whether a pass that runs after the verdict is settled
+            # belongs in the run's headline cost is a decision about the
+            # receipt, and making it here would be an unasked-for second change.
             r_text, _denials, r_sid, r_err, r_meta = run_executor(
                 profile, text, work_cwd, "plan", verify_timeout, None)
             ctx["calls"].record("review_brief", r_meta, session=r_sid,
@@ -1978,13 +2022,21 @@ def _delegate(args, t0_dir):
         _gates, ctx["advisory_skipped"] = _run_advisory(
             args["advisory_gates"], work_cwd, verify_timeout)
         ctx["advisory"] = _gates
-        # Off `_gates`, never back out of ctx["advisory"]: the review pass above
-        # writes an entry of the SAME shape (name/ok/ms/head) into that list, so
-        # a reader of ctx would log one executor pass twice -- once as itself,
-        # once as a gate that never ran. `_run_advisory` returns only the gates
-        # it executed, and a malformed item it skipped is not a call: it ran no
-        # command, and a 0 ms entry for it would be indistinguishable from a
-        # gate that ran and was measured at nothing.
+        # Off `_gates`, never back out of ctx["advisory"]. TODAY that reads the
+        # same: the assignment on the line above discards whatever the review
+        # pass appended, so ctx["advisory"] holds exactly `_gates`. It is a
+        # hazard guarded in advance, not one being closed -- the discarding is
+        # itself a known defect with its own task, and when it is fixed the
+        # review pass's entry (same name/ok/ms/head shape) will be sitting in
+        # that list. A loop over ctx["advisory"] would then log one executor
+        # pass twice: once as itself, once as a gate that never ran. Binding the
+        # source keeps this code correct across that fix instead of quietly
+        # depending on the bug.
+        #
+        # `_run_advisory` returns only the gates it executed, and a malformed
+        # item it skipped is not a call: it ran no command, and a 0 ms entry for
+        # it would be indistinguishable from a gate that ran and was measured at
+        # nothing.
         for _g in _gates:
             ctx["calls"].record("gate_advisory", {"stats": {"ms": _g["ms"]}})
 
