@@ -4,6 +4,12 @@ on:
   pull_request:
   push:
     branches: [master]
+  # Manual trigger. A release once sat blocked because no `pull_request` run was
+  # ever created for an open, mergeable PR -- Actions enabled, workflow active,
+  # file unchanged from master and valid, zero check runs. With no way to ask for
+  # a run, the only remedies left were pushing a commit that did nothing or
+  # merging on a local green, and the second is the one this project forbids.
+  workflow_dispatch:
 
 jobs:
   specs:
