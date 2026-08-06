@@ -121,6 +121,75 @@ def validate(value, schema, path="$"):
     return errors
 
 
+# The five keywords validate() enforces (:92-119), plus metadata that
+# constrains no payload -- boilerplate a hand-written schema carries for free
+# (title/description/default/examples/$comment/$schema/$id). ALLOWLIST, not a
+# denylist: a denylist of "known-bad" keywords is the same silent-abstention
+# bug this closes, because `if`, `prefixItems`, `minContains` and a typo like
+# `minumum` are all real constraints nobody had listed as bad yet. $ref is
+# deliberately absent from the metadata set -- it relocates the rules to a
+# subschema this module never reads, which is the opposite of inert.
+_ENFORCED = frozenset({"type", "enum", "required", "properties", "items"})
+_METADATA = frozenset({"title", "description", "default", "examples",
+                       "$comment", "$schema", "$id"})
+_SAFE = _ENFORCED | _METADATA
+
+
+def _offenders(schema, found):
+    """Add every keyword outside `_SAFE` found in `schema`, recursively.
+
+    Walks only `properties` and `items` -- the two keywords validate() (:107-
+    119) itself descends through. Everything else a schema can hold (the
+    field names in `required`, the literal payload values in `enum`/
+    `default`/`examples`) is DATA, not a place a keyword can hide: recursing
+    into it would refuse an ordinary result field named `pattern` or `const`
+    (pinned by jsonschema_spec.py::test_a_property_NAMED_like_a_keyword_is_not_one).
+    """
+    if not isinstance(schema, dict):
+        return
+    found.update(key for key in schema if key not in _SAFE)
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        for sub in props.values():
+            _offenders(sub, found)
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _offenders(items, found)
+
+
+def schema_refusal(schema):
+    """Refusal text for a `result_schema` this module cannot enforce, else None.
+
+    The other half of Claim 4 (module docstring): `validate()` staying silent
+    on `minimum` is deliberate, but the CALL going ahead on a promise that
+    keyword will never be checked is not survivable, because `schema_suffix`
+    pastes the schema into the worker's prompt -- the worker usually obeys
+    `minimum: 5` anyway, so the constraint looks enforced right up until the
+    model stops complying, and a violating payload comes back reported as
+    conforming.
+
+    None means "nothing here this server cannot check", not "this schema is
+    good" -- a schema this module cannot even READ (not a dict) constrains
+    nothing and stays non-fatal, same as validate() itself: only a DICT
+    carrying a keyword outside the enforced five can stop a call, because
+    that is the one case where a check was promised and would never run.
+    """
+    if not isinstance(schema, dict):
+        return None
+    found = set()
+    _offenders(schema, found)
+    if not found:
+        return None
+    offending = ", ".join(sorted(found))
+    supported = ", ".join(sorted(_ENFORCED))
+    return (
+        f"result_schema uses keyword(s) this server does not enforce: "
+        f"{offending}. Only {supported} are checked -- a schema built "
+        f"entirely from that subset is honoured, so rewrite the schema "
+        f"within it, or drop result_schema."
+    )
+
+
 def last_json_block(text):
     """(value, raw_block_text, error) for the last fenced json block in a reply.
 

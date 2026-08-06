@@ -849,6 +849,18 @@ def _preconditions(args):
     if refusal:
         return {"refusal": refusal, "bootstrap_note": None}
 
+    # U5.1 accept-time check, AFTER resolve_call above: result_schema is not
+    # read for real until line ~1097, well past every precondition here, but
+    # BRIEF_KEYS (:644) includes "result_schema" so a retry_of restores a
+    # STORED schema through resolve_call -- checking the raw incoming args
+    # would miss a retry that reintroduces the exact schema this refuses.
+    # jsonschema.schema_refusal() is the one function both accept points
+    # call (see run_query in qd/queries.py), so the keyword list cannot
+    # drift between a surface that enters this module and one that never does.
+    schema_text = jsonschema.schema_refusal(args.get("result_schema"))
+    if schema_text:
+        return {"refusal": schema_text, "bootstrap_note": None}
+
     # U6 size guard: a huge brief costs the caller a filename, but the worker
     # pays it as peak context -- and under the refuse policy that converts to
     # compaction_refused deaths. Refused at submit, where the fix is cheap.

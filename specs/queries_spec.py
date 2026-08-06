@@ -242,6 +242,72 @@ class ResultSchema(Fixture):
         self.assertNotIn("RESULT:", out)
 
 
+class ResultSchemaOutOfSubset(Fixture):
+    """A contract this side cannot check is refused before the question is put.
+
+    `validate()` honours five keywords and skips the rest, so a `minimum: 5`
+    nested under `properties` is reported as satisfied by a payload of
+    {"n": 1} -- and because `schema_suffix` pastes the schema into the prompt,
+    the worker usually obeys it and the constraint LOOKS enforced until the day
+    it does not. On this surface the damage is worse than on the delegate one:
+    there is no retry loop and no gate, so the RESULT line is the caller's only
+    evidence about the answer it is about to parse. "RESULT: valid (schema)"
+    over an unchecked constraint is the fuel gauge reading full because it is
+    disconnected (PRINCIPLES §IV).
+
+    The check is the SAME function qd/engine.py's `_preconditions` calls.
+    qwen_query never enters engine.py, and a keyword list maintained twice
+    drifts on the first edit -- which is exactly the shape of bug this repo
+    keeps finding: covered on one surface, silently open on the other.
+
+    Narrowness is pinned by the class above rather than restated here: a
+    schema that is not a dict at all stays non-fatal
+    (test_a_malformed_schema_is_ignored_not_fatal).
+    """
+
+    BAD = {"type": "object",
+           "properties": {"n": {"type": "integer", "minimum": 5}}}
+
+    def test_a_schema_the_check_cannot_enforce_is_refused_by_keyword(self):
+        # Refused, not "STATUS: error": the call is answerable, it just cannot
+        # be answered honestly as written, and the caller fixes it by deleting
+        # a line it can only delete if the refusal names it.
+        out = self.q(result_schema=self.BAD)
+        self.assertTrue(out.startswith("STATUS: refused"), out[:120])
+        self.assertIn("minimum", out)
+
+    def test_the_executor_never_ran(self):
+        # A refusal that still asks the question spends the tokens it was
+        # meant to save, and hands back an answer nobody can trust the shape of.
+        self.q(result_schema=self.BAD)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "argv.json")))
+
+    def test_nothing_is_written_to_the_leverage_log(self):
+        # The inverse of test_executor_failure_is_error_receipt_and_logged: a
+        # failed query IS logged because it burned real tokens. This one burned
+        # none, and a ledger padded with zero-cost entries stops answering the
+        # question it exists for.
+        self.q(result_schema=self.BAD)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")))
+
+    def test_a_keyword_buried_deeper_is_refused_here_too(self):
+        out = self.q(result_schema={"type": "array", "items": {
+            "type": "string", "format": "email"}})
+        self.assertTrue(out.startswith("STATUS: refused"), out[:120])
+        self.assertIn("format", out)
+
+    def test_a_schema_inside_the_subset_is_still_answered(self):
+        # The refusal must cost nothing to the callers already using this.
+        os.environ["STUB_BODY"] = '```json\n{"files": ["a.py"]}\n```'
+        out = self.q(result_schema={
+            "type": "object", "required": ["files"],
+            "properties": {"files": {"type": "array",
+                                     "items": {"type": "string"}}}})
+        self.assertIn("STATUS: ok", out)
+        self.assertIn("RESULT: valid (schema)", out)
+
+
 class LogSeam(Fixture):
     def test_c5_fields_and_query_shape(self):
         self.q()

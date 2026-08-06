@@ -2414,6 +2414,127 @@ class ResultSchema(Fixture):
         self.assertNotIn("RESULT:", out)
 
 
+class ResultSchemaOutOfSubset(Fixture):
+    """A contract the gate cannot check is refused at the CALL, not smiled at.
+
+    `validate()` honours five keywords -- type, enum, required, properties,
+    items -- and walks silently past everything else, so
+
+        validate({"n": 1},
+                 {"type": "object",
+                  "properties": {"n": {"type": "integer", "minimum": 5}}})
+
+    returns [], which this engine reads as CONFORMING and reports as such. That
+    is worse than a plain gap, because `schema_suffix` pastes the whole schema
+    into the worker's prompt: the worker usually obeys `minimum: 5`, the
+    constraint appears to work, and the day the model stops complying a
+    violating payload comes back green. The gate abstained and left the
+    builder's word as the only thing standing -- PRINCIPLES §I, inverted.
+
+    The subset is not the bug and `validate()` does not change: its ignore
+    behaviour is deliberate and stays pinned by
+    specs/jsonschema_spec.py::test_unsupported_keywords_are_ignored_not_enforced.
+    What changes is the ACCEPT point. A caller that asked for something this
+    server cannot check is told so before anything is built, while the fix is
+    still one edit to the call.
+
+    Narrowness is part of the claim, and pinned elsewhere in this file rather
+    than restated here: an UNREADABLE schema stays non-fatal
+    (test_a_malformed_schema_is_not_a_refusal, above) and a schema inside the
+    subset still runs (test_a_conforming_block_passes_and_is_kept_verbatim).
+    """
+
+    BAD = {"type": "object",
+           "properties": {"n": {"type": "integer", "minimum": 5}}}
+
+    GOOD = {"type": "object", "required": ["name"],
+            "properties": {"name": {"type": "string"}}}
+
+    def reply(self, payload):
+        return ("did it\n\nHANDOFF: ok\nFILES: none\nNEXT: nothing\n\n"
+                f"```json\n{json.dumps(payload)}\n```")
+
+    def test_a_schema_the_gate_cannot_check_is_refused_by_keyword(self):
+        # By KEYWORD: "unsupported schema" would tell the caller a run failed
+        # and nothing about which line of its own schema to delete.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(result_schema=self.BAD)
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("minimum", r["result_text"])
+
+    def test_nothing_is_built(self):
+        # A refusal that still spawns the worker is an opinion, not a gate.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        self.delegate(result_schema=self.BAD)
+        self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_1.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.cwd, "out.py")))
+
+    def test_the_caller_is_answered_before_the_run_is_spawned(self):
+        # U5.2: the server prechecks at submit, where the caller is still
+        # looking -- so this refusal has to be reachable without a run, like
+        # every other precondition.
+        pre = engine.precheck({"task": "t", "cwd": self.cwd,
+                               "verify": "grep -q MARKER out.py",
+                               "executor": "stub", "trust": "self",
+                               "result_schema": self.BAD})
+        self.assertIsNotNone(pre["refusal"])
+        self.assertIn("minimum", pre["refusal"])
+
+    def test_the_receipt_reads_as_a_refusal(self):
+        # The string shape, not an exception: `_preconditions` hands back
+        # {"refusal": text} and run() renders it, exactly like trust="auto".
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "result_schema": self.BAD})
+        self.assertIn("STATUS: refused", out)
+        self.assertIn("minimum", out)
+
+    def test_no_worktree_is_acquired(self):
+        # Preconditions run before the container exists; a refusal that
+        # allocated one first would strand the branch behind the caller.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(result_schema=self.BAD, worktree="auto")
+        self.assertEqual(r["status"], "refused")
+        wl = subprocess.run(["git", "-C", self.cwd, "worktree", "list"],
+                            capture_output=True, text=True).stdout
+        self.assertNotIn("qwen/", wl.replace(self.cwd, ""))
+
+    def test_a_keyword_buried_deeper_is_refused_too(self):
+        # properties and items recurse in validate(), so a check that reads
+        # only the top level agrees with nothing and passes this straight
+        # through -- a fix that looks like success.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        r = self.delegate(result_schema={"type": "object", "properties": {
+            "rows": {"type": "array",
+                     "items": {"type": "string", "format": "email"}}}})
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("format", r["result_text"])
+
+    def test_a_stored_schema_is_checked_on_the_retry_that_restores_it(self):
+        # BRIEF_KEYS carries result_schema (qd/engine.py), so a retry_of
+        # resolves one out of the stored brief -- which happens INSIDE
+        # _preconditions, at resolve_call. A check placed above that line never
+        # sees a restored schema: covered on the path someone thought about,
+        # silently open on the one the caller actually used the second time.
+        self.steps([{"write": {"out.py": "MARKER\n"},
+                     "result": self.reply({"name": "x"})}])
+        first = self.delegate(result_schema=self.GOOD)
+        self.assertEqual(first["status"], "success")
+        brief = os.path.join(self.cwd, ".qwen-delegate", "briefs",
+                             f"{first['session_id']}.json")
+        with open(brief) as f:
+            stored = json.load(f)
+        stored["args"]["result_schema"] = self.BAD
+        with open(brief, "w") as f:
+            json.dump(stored, f)
+        r = self.delegate(task="", retry_of=first["session_id"],
+                          retry_message="try again")
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("minimum", r["result_text"])
+
+
 class RetryOf(Fixture):
     """U5.5: a corrected re-run costs a sentence, and starts COLD.
 

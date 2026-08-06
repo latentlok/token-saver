@@ -99,6 +99,18 @@ def run_query(args):
     if not isinstance(result_schema, dict):
         result_schema = None
 
+    # U5.1 accept-time check, same function _preconditions calls in
+    # qd/engine.py (that module never gets entered from here, so a keyword
+    # list kept twice would drift on the first edit). This surface has no
+    # retry loop to spend on a violation and no gate to bounce it off, so a
+    # constraint the checker cannot enforce has to stop the call before the
+    # executor runs -- otherwise "RESULT: valid (schema)" over an unchecked
+    # `minimum` is a fuel gauge reading full because it is disconnected.
+    if result_schema is not None:
+        schema_text = qd.jsonschema.schema_refusal(result_schema)
+        if schema_text:
+            return f"STATUS: refused\n\n{schema_text}"
+
     suffix = INVESTIGATE_SUFFIX if fmt == "map" else ANSWER_SUFFIX
     if result_schema is not None:
         suffix += qd.jsonschema.schema_suffix(result_schema)
