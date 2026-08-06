@@ -38,6 +38,7 @@ from qd.core.attempt import Attempt  # noqa: E402
 from qd.core.plan import RunPlan  # noqa: E402
 from qd.core.violation import Violation  # noqa: E402
 from qd.features import guards  # noqa: E402
+from qd.features.guards import brief as brief_guard  # noqa: E402
 from qd.features.guards import specs as spec_guard  # noqa: E402
 
 
@@ -53,6 +54,10 @@ class FakeScope:
         self.t0_bytes = None
         self.unrestorable = []
         self.restored = []
+        # RunScope has carried this since the brief guard landed (mark_brief).
+        # Inert for every test that does not set `brief_path`: the guard
+        # returns before reading it, and `plan()`'s default is None.
+        self.brief_sha0 = None
 
     def unproven_fixtures(self, segments):
         return list(self._unproven)
@@ -562,6 +567,133 @@ class AFilenameIsNotAllowedToWriteLINES(unittest.TestCase):
             v.trail,
             "attempt 1: TOUCH SCOPE VIOLATION -- edited other.py outside "
             "scope (auto-reverted)")
+
+
+class ABriefRevertThatFailedMustNotReadAsASuccessfulOne(unittest.TestCase):
+    """The same discarded-return bug as the spec guard, in the brief guard.
+
+    e35ecbb fixed `revert_specs` throwing away `restore_paths`' `unrestored`
+    list. This guard calls `restore_paths` DIRECTLY and throws the whole pair
+    away, then says `(auto-reverted)` unconditionally -- so the one line a
+    caller reads to decide whether the document that briefed the run is still
+    theirs asserts a repair nobody observed.
+
+    Worse here than there in one respect, measured: the spec guard's sibling at
+    least routes through `scope.restore`, which records the failure on
+    `ctx["unrestorable"]`, so a second layer still says something. This guard
+    bypasses the scope entirely -- measured end to end, `ctx["unrestorable"]`
+    came back `[]` while the brief on disk read `HIJACKED`. There is no second
+    layer behind this sentence at all.
+
+    Routes into `unrestored` checked against THIS guard on this build, since
+    the sibling's three do not all transfer:
+
+      A (the sibling's first route, worker `git add`s its own file) DOES NOT
+        APPLY. `plan.brief_path` is the CALLER's `brief_file`, resolved by
+        qd/playbook.py before the run; it is not derived from `git ls-files`,
+        so a worker cannot add a path INTO the protected set the way it can
+        for `spec_files`.
+
+      A' APPLIES, and is the end-to-end case in engine_spec: a brief that is
+        absent at `base` AND absent from the T0 map -- a gitignored scratch
+        document, say `notes/pb.md`. `git status --porcelain` does not list
+        ignored paths, so `snapshot_contents` never saved its bytes, and
+        `git show <base>:notes/pb.md` fails because it was never committed.
+        Measured: restore_paths -> ([], ['notes/pb.md']), HIJACKED on disk.
+
+      B APPLIES: the brief replaced by a DIRECTORY of the same name --
+        `open(full, "wb")` raises. Measured: ([], ['pb.md']), still a dir.
+
+      C APPLIES: the brief sabotaged then chmod'ed 444 -- same raise.
+        Measured: ([], ['pb.md']), HIJACKED on disk.
+
+      D APPLIES HERE THOUGH IT DID NOT THERE, and it is the sharp one. The
+        `toobig` T0 route was ruled out for a spec because a protected spec
+        dirty at T0 refuses the run before the worker starts. The brief has no
+        such precondition -- an amendment DELIBERATELY dirties it before T0
+        (engine_spec.Playbooks asserts `pre_clean` is False for exactly that
+        reason), so a brief over SNAPSHOT_FILE_CAP, or any brief in a tree
+        whose dirty bytes exceed SNAPSHOT_TOTAL_CAP, is saved as
+        ("toobig", None) and comes back unrestored. Measured:
+        t0 entry ('toobig', None) -> ([], ['pb.md']), HIJACKED on disk.
+
+    The consequence is specific to the brief and does not exist for a spec: the
+    document is read from disk by name at CALL time, so the next run against
+    the same `brief_file` is briefed by the worker's text -- under a receipt
+    that said the edit was undone.
+    """
+
+    SHA0 = "0123456789abcdef"
+
+    def setUp(self):
+        self._fs, self._rp = brief_guard.file_sha, brief_guard.restore_paths
+        self.addCleanup(setattr, brief_guard, "file_sha", self._fs)
+        self.addCleanup(setattr, brief_guard, "restore_paths", self._rp)
+        # The document moved: any sha but the one captured at T0.
+        brief_guard.file_sha = lambda cwd, path: "deadbeefdeadbeef"
+        self.asked = []
+
+    def arrange(self, unrestored):
+        def fake(cwd, paths, base, t0):
+            self.asked.extend(paths)
+            return ([p for p in paths if p not in unrestored],
+                    [p for p in paths if p in unrestored])
+        brief_guard.restore_paths = fake
+        sc = FakeScope()
+        sc.brief_sha0 = self.SHA0
+        return guards.first(sc, plan(brief_path="pb.md"),
+                            Attempt(n=1, of=3, changed=[], writes=["pb.md"]))
+
+    def test_a_revert_that_failed_is_not_reported_as_auto_reverted(self):
+        # The decisive assertion: the words must not appear about a document
+        # that is still sitting there holding the worker's text.
+        v = self.arrange(["pb.md"])
+        self.assertEqual(v.kind, "playbook_edited")
+        self.assertIn("PLAYBOOK EDITED", v.trail)
+        self.assertNotIn("auto-reverted", v.trail,
+                         f"the trail claims a revert that did not happen: "
+                         f"{v.trail!r}")
+
+    def test_the_trail_says_the_document_is_still_on_disk(self):
+        # Naming the file is not enough -- the pre-fix line named it too. The
+        # receipt has to say what STATE it is in, because "reverted" and "still
+        # holding the worker's text" are opposite instructions to the reader:
+        # one says carry on, the other says do not trust the brief this run was
+        # graded against, and check it before the next call reads it again.
+        v = self.arrange(["pb.md"])
+        self.assertIn("NOT REVERTED", v.trail.upper())
+        self.assertIn("still on disk", v.trail)
+        self.assertIn("pb.md", v.trail)
+
+    def test_the_correction_does_not_tell_the_worker_it_was_reverted(self):
+        # The prompt goes to the MODEL, with no second layer behind it
+        # (qd/engine.py, `prompt = _v.prompt`). Telling a worker its edit was
+        # undone when it was not invites the next attempt to believe the brief
+        # it can still read is the caller's.
+        v = self.arrange(["pb.md"])
+        self.assertNotIn("has been reverted", v.prompt)
+        self.assertIn("pb.md", v.prompt)
+        # The rule itself must not soften -- only the claim about state.
+        self.assertIn("Never modify the brief", v.prompt)
+
+    def test_the_revert_is_still_asked_for_the_real_path(self):
+        # MESSAGE ONLY, the same constraint 6eae53a put on the truncation: a
+        # guard that stopped ACTING on the whole path to fix its wording would
+        # turn a false sentence into an unrevertable document.
+        self.arrange(["pb.md"])
+        self.assertEqual(self.asked, ["pb.md"])
+
+    def test_a_successful_revert_still_says_auto_reverted(self):
+        # The control, and the one that keeps this from being "hedge every
+        # message". The ordinary path is overwhelmingly the common one, and a
+        # receipt that always sounds unsure is one nobody can read a fact off.
+        # Pinned as the whole line, so a fix that appended a caveat everywhere
+        # is red here.
+        v = self.arrange([])
+        self.assertEqual(
+            v.trail, "attempt 1: PLAYBOOK EDITED -- pb.md (auto-reverted)")
+        self.assertNotIn("NOT REVERTED", v.trail.upper())
+        self.assertIn("has been reverted", v.prompt)
 
 
 if __name__ == "__main__":

@@ -3329,6 +3329,57 @@ class Playbooks(Fixture):
         with open(os.path.join(self.cwd, "new.md")) as f:
             self.assertEqual(f.read(), self.DOC)
 
+    def test_a_revert_that_could_not_happen_is_not_reported_as_done(self):
+        # The end-to-end half of guards_spec.ABriefRevertThatFailedMustNotRead-
+        # AsASuccessfulOne, driven through the real gittree rather than a stub,
+        # so the discarded return of `restore_paths` is a fact about this build
+        # and not an arrangement. Needs no hostile filename and nothing the
+        # worker could not do with an ordinary write.
+        #
+        # The caller keeps the brief in a gitignored scratch directory.
+        # `git status --porcelain` does not list ignored paths, so
+        # `snapshot_contents` never saved its T0 bytes; and it was never
+        # committed, so `git show <pre_sha>:notes/pb.md` fails too. There is
+        # nothing to restore it FROM, from either side. Before the fix the
+        # trail said `(auto-reverted)` anyway -- and `ctx["unrestorable"]` was
+        # empty, because this guard bypasses `scope.restore`, so nothing else
+        # on the receipt contradicted it either.
+        with open(os.path.join(self.cwd, ".gitignore"), "w") as f:
+            f.write("notes/\n")
+        subprocess.run(["git", "-C", self.cwd, "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "ignore"],
+                       check=True)
+        os.makedirs(os.path.join(self.cwd, "notes"))
+        with open(os.path.join(self.cwd, "notes", "pb.md"), "w") as f:
+            f.write(self.DOC)
+        self.steps([{"write": {"notes/pb.md": "HIJACKED\n"}},
+                    {"write": {"out.py": "MARKER\n"}}])
+        r = engine.delegate(self.brief_args(brief_file="notes/pb.md",
+                                            max_iterations=2))
+        self.assertEqual(r["status"], "spec_violation")
+        # The premise, asserted rather than assumed: if some later change makes
+        # this restorable, the receipt assertion below stops meaning anything
+        # and this line is what says so.
+        with open(os.path.join(self.cwd, "notes", "pb.md")) as f:
+            self.assertEqual(f.read(), "HIJACKED\n",
+                             "premise broken: the brief WAS restorable")
+        line = r["trail"][0]
+        self.assertNotIn(
+            "auto-reverted", line,
+            f"the receipt claims a revert that never happened; the worker's "
+            f"rewrite of its own brief is still on disk. trail: {line!r}")
+        self.assertIn("notes/pb.md", line)
+        self.assertIn("NOT REVERTED", line.upper())
+        # And the correction as the EXECUTOR received it, which is the slot
+        # with no second layer behind it (`prompt = _v.prompt`). Asserted end
+        # to end because the trail assertion above cannot see it: a fix that
+        # corrected only the receipt would leave the worker told its edit was
+        # undone while the document it can still read holds its own text.
+        fed = self.task_seen(2)
+        self.assertNotIn("has been reverted", fed)
+        self.assertIn("notes/pb.md", fed)
+        self.assertIn("Never modify the brief", fed)
+
     def test_an_unattributed_document_change_is_warned_not_reverted(self):
         self.steps([{"write": {"pb.md": "CALLER REWROTE\n",
                                "out.py": "MARKER\n"},
