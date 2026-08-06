@@ -66,6 +66,9 @@ another agent in the same tree, and reverting those destroyed a caller's concurr
 **a gate is meaningful only when it was red before, green after, and red for the reason you care
 about**: one that runs no tests, whose tests are all skipped, or that fails on an unrelated import
 error is not a gate — the red-gate checks under `preflight_expect: "red"` refuse on all three.
+**An unrecognised value for an enum-shaped argument** — `preflight_expect`, `on_compaction`,
+`worktree` — **degrades silently to the default rather than refusing.** A typo does not bounce;
+it runs with a setting you did not ask for and the receipt reads normal.
 
 ## 4. Combinations that refuse
 
