@@ -4,7 +4,7 @@ Spec for qd/queries.py -- read-only Q&A (LLD "qd/queries.py").
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-Port of run_query/run_investigate with the v2 seam: the executor comes from the
+Port of run_query with the v2 seam: the executor comes from the
 profile chain (qd.profiles.resolve honoring the per-call "executor" arg), runs
 through qd.invoke.run_executor, and the log record carries C5 executor/cost.
 The stub profile is injected through the REAL resolution chain via
@@ -20,8 +20,7 @@ Load-bearing:
      STILL logged -- a timed-out query burned real tokens.
 
 Public surface pinned here:
-    qd.queries.run_query(args) -> str
-    qd.queries.run_investigate(args) -> str      (alias: format='map')
+    qd.queries.run_query(args) -> str            (format='answer' | 'map')
     qd.queries.ANSWER_SUFFIX, qd.queries.INVESTIGATE_SUFFIX
 
 Run:  python3 specs/queries_spec.py
@@ -122,11 +121,11 @@ class Basics(Fixture):
         self.assertNotEqual(queries.ANSWER_SUFFIX, queries.INVESTIGATE_SUFFIX)
         self.assertTrue(queries.ANSWER_SUFFIX.strip())
 
-    def test_investigate_alias(self):
-        out = queries.run_investigate({"question": "map it",
-                                       "cwd": self.cwd,
-                                       "executor": "stub"})
-        self.assertIn("--- map ---", out)
+    # `test_investigate_alias` was here. `queries.run_investigate` is gone: it
+    # set format="map" and called run_query, and its only caller was a dispatch
+    # entry (`qwen_investigate`) that no schema declared, so no conformant MCP
+    # client could reach it. `test_map_format_distinct` above already pins the
+    # capability through the surviving, advertised route.
 
     def test_unconfigured_warns_but_proceeds(self):
         out = self.q()  # fixture cwd has no rules file

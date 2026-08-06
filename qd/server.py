@@ -235,7 +235,7 @@ def _guards_for(name, args):
     in-tree."""
     from qd import engine
     guards = []
-    if name in ("qwen_delegate", "qwen_query", "qwen_investigate"):
+    if name in ("qwen_delegate", "qwen_query"):
         guards.append(_endpoint_sem(args.get("cwd"), args.get("executor")))
     if name == "qwen_delegate" and engine.worktree_mode(args) == "off":
         guards.append(_repo_lock(args.get("cwd")))
@@ -1071,11 +1071,19 @@ def _default_tools():
             # Queries stay SYNCHRONOUS: the answer is the deliverable and it
             # arrives in a minute or two, so a file to poll would be pure
             # ceremony between a question and its answer.
-            "qwen_query": queries.run_query,
-            "qwen_investigate": queries.run_investigate}
+            "qwen_query": queries.run_query}
 
 
 def _default_schemas():
+    """What `tools/list` advertises. Must name exactly what `_default_tools`
+    dispatches -- pinned in specs/dispatch_spec.py, both directions.
+
+    `qwen_investigate` sat in the table above with no entry here, so it was
+    dispatchable and undiscoverable at once: unreachable by any conformant
+    client, and a lie to anyone reading the dispatch table. Deleted rather than
+    declared -- it was an alias for `qwen_query(format="map")`, a value
+    QUERY_TOOL already declares in its own enum.
+    """
     from qd import schemas
     return [schemas.TOOL, schemas.QUERY_TOOL]
 

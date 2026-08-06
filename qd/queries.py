@@ -218,8 +218,12 @@ def run_query(args):
     return verdict
 
 
-def run_investigate(args):
-    """Back-compat alias: the codebase map is now qwen_query(format='map')."""
-    a = dict(args)
-    a["format"] = "map"
-    return run_query(a)
+# `run_investigate` was here: a four-line back-compat alias that set
+# format="map" and called run_query. Deleted at v0.6 because it was never
+# reachable -- `qwen_investigate` was in the dispatch table and in
+# `_guards_for` but in NO schema, and `_default_schemas()` is what answers
+# `tools/list`, so no conformant MCP client could discover it or would call it.
+# The capability it aliased is declared on the tool that IS advertised
+# (`qwen_query`, `format` enum ["answer", "map"]), so nothing was taken away.
+# specs/dispatch_spec.py now pins the two lists against each other, which is
+# the drift that let an unreachable tool sit in the dispatch table.

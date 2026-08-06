@@ -46,6 +46,11 @@ import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Every fixture below drives the dispatch as a SUBPROCESS, which does its own
+# path insert in LAUNCHER -- so this file never needed `qd` importable in-process
+# until the schema/dispatch drift gate at the bottom, which must read the REAL
+# defaults rather than a stub table.
+sys.path.insert(0, ROOT)
 
 LAUNCHER = """#!/usr/bin/env python3
 import os, sys, time
@@ -73,12 +78,10 @@ SCHEMAS = [
     {"name": "slow", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "qwen_delegate", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "qwen_query", "description": "stub", "inputSchema": {"type": "object"}},
-    {"name": "qwen_investigate", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "boom", "description": "stub", "inputSchema": {"type": "object"}},
 ]
 server.main(tools={"slow": slow, "qwen_delegate": slow, "qwen_query": slow,
-                   "qwen_investigate": slow, "boom": boom,
-                   "batchrun": batchrun}, schemas=SCHEMAS)
+                   "boom": boom, "batchrun": batchrun}, schemas=SCHEMAS)
 """
 
 
@@ -227,7 +230,7 @@ class Protocol(Fixture):
         self.srv.send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = self.srv.wait(1)["result"]["tools"]
         self.assertEqual([t["name"] for t in tools],
-                         ["slow", "qwen_delegate", "qwen_query", "qwen_investigate", "boom"])
+                         ["slow", "qwen_delegate", "qwen_query", "boom"])
 
     def test_call_result_wrapping(self):
         self.srv.call(2, "slow", {"tag": "w", "sleep": 0.05})
@@ -309,16 +312,11 @@ class Concurrency(Fixture):
         self.assert_serialized("q1", "q2")
 
 
-    def test_investigate_gates_on_endpoint_too(self):     # survivor 1 closed
-        self.srv.call(45, "qwen_investigate",
-                      {"tag": "i1", "sleep": 0.8, "cwd": self.repo_a,
-                       "executor": "p1a"})
-        self.srv.call(46, "qwen_investigate",
-                      {"tag": "i2", "sleep": 0.8, "cwd": self.repo_b,
-                       "executor": "p1b"})
-        self.srv.wait(45)
-        self.srv.wait(46)
-        self.assert_serialized("i1", "i2")
+    # `test_investigate_gates_on_endpoint_too` (survivor 1) was here. It drove
+    # a second query tool through `_guards_for` to prove queries take the
+    # endpoint semaphore; `qwen_investigate` is gone and `qwen_query` is now the
+    # only query tool, so `test_queries_gate_on_endpoint_too` above is that
+    # claim in full rather than half of it.
 
 
 class Failure(Fixture):
@@ -435,6 +433,76 @@ class Drain(Fixture):
         self.assertEqual(rc, 0)
         r = self.srv.wait(70)                # response arrived before exit
         self.assertEqual(r["result"]["content"][0]["text"], "done drain")
+
+
+class TheDispatchTableAndTheSchemaMustNameTheSameTOOLS(unittest.TestCase):
+    """A dispatch entry with no schema is a tool nobody can call.
+
+    THE DRIFT THIS EXISTS FOR, found at v0.6 release. `qwen_investigate` was
+    dispatched (`_default_tools`), gated (`_guards_for`) and handled
+    (`queries.run_investigate`) -- and absent from `qd/schemas.py` entirely. It
+    is `_default_schemas()` that answers `tools/list`, so no conformant MCP
+    client could discover it and none would call a tool that was never
+    advertised. Three of the four places that had to agree did; the one that
+    faces the client did not, and nothing compared them.
+
+    The tool is gone (it was a back-compat alias for `qwen_query(format="map")`,
+    a value the surviving tool declares in its own enum). This gate is the part
+    that outlives it: the two lists are checked against each other rather than
+    each against a hand-written expectation, so the NEXT tool added to one and
+    not the other is red on the day it lands rather than at the next release.
+
+    BOTH DIRECTIONS, and the second is the sharper one. A dispatch entry with no
+    schema is unreachable -- dead surface, and a dispatch table that advertises
+    it is lying to whoever reads it. A SCHEMA WITH NO HANDLER is worse: it is
+    advertised on `tools/list`, so a client will call it, and the call fails at
+    dispatch with the tool sitting in the catalogue as though it worked.
+
+    Driven against the REAL wiring, deliberately: the fixtures above run a stub
+    server with their own `tools=`/`schemas=` pair, which is the right way to
+    test the MACHINERY and is exactly why they could not see this. The defaults
+    are what ships.
+    """
+
+    def setUp(self):
+        from qd import server
+        self.dispatch = set(server._default_tools())
+        self.declared = [s["name"] for s in server._default_schemas()]
+
+    def test_every_dispatched_tool_is_declared_in_the_schema(self):
+        undeclared = self.dispatch - set(self.declared)
+        self.assertEqual(
+            undeclared, set(),
+            f"dispatched but absent from tools/list, so no conformant client "
+            f"can reach {sorted(undeclared)}")
+
+    def test_every_declared_tool_has_a_handler(self):
+        unhandled = set(self.declared) - self.dispatch
+        self.assertEqual(
+            unhandled, set(),
+            f"advertised on tools/list with nothing behind it: "
+            f"{sorted(unhandled)}")
+
+    def test_the_schema_list_has_no_duplicate_names(self):
+        # Two entries under one name means `tools/list` ships a name twice and
+        # which one a client honours is its business, not ours. Cheap to check
+        # and it is the shape a copy-paste of a tool definition takes.
+        self.assertEqual(sorted(self.declared), sorted(set(self.declared)))
+
+    def test_the_endpoint_gate_names_only_tools_that_exist(self):
+        # The fourth place that had to agree. `_guards_for` keys on tool NAMES,
+        # so a name retired from the dispatch table but left here is a branch
+        # that can never be taken -- which is how `qwen_investigate` kept
+        # looking wired up. Read out of the function's own source rather than
+        # re-listed, so this cannot drift the way the thing it checks did.
+        import inspect
+        from qd import server
+        src = inspect.getsource(server._guards_for)
+        for name in ("qwen_delegate", "qwen_query", "qwen_investigate"):
+            if f'"{name}"' in src:
+                self.assertIn(name, self.dispatch,
+                              f"_guards_for gates {name}, which nothing "
+                              f"dispatches")
 
 
 if __name__ == "__main__":
