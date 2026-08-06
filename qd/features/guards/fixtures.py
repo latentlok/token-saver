@@ -15,6 +15,7 @@ file and the exact line to add.
 """
 
 from qd.core.violation import Violation
+from qd.verdict import _one_line
 
 KIND = "fixture_provenance"
 
@@ -27,7 +28,13 @@ def check(scope, plan, attempt):
     bad = scope.unproven_fixtures(plan.fixture_segments)
     if not bad:
         return None
-    names = ", ".join(bad)
+    # `_one_line` per NAME, for the reason spelt out in specs._named. This
+    # guard never reverts, so the message IS its entire output -- and its paths
+    # come from `_created`, which reads the same decoded `changed` and
+    # `untracked_files` the other two guards do. A fixture the worker delivered
+    # under a newline-bearing name could otherwise write a `RESULT: valid
+    # (schema)` or `NEXT:` line into the receipt AND into its own correction.
+    names = ", ".join(_one_line(p) for p in bad)
     return Violation(
         KIND,
         f"attempt {attempt.n}: FIXTURE PROVENANCE -- {names} lack "
