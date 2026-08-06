@@ -16,11 +16,11 @@ to need ordering, that is a bug -- it means they are competing over something
 that should have been computed once, upstream, as a fact (§4).
 """
 
-from . import (dodge, mocked_seams, never_executed, strays, uncalled,
-               unmarked_tests)
+from . import (dodge, mocked_seams, never_executed, seam_crossed, strays,
+               uncalled, unmarked_tests)
 
-DETECTORS = (uncalled, mocked_seams, never_executed, dodge, strays,
-             unmarked_tests)
+DETECTORS = (uncalled, mocked_seams, never_executed, seam_crossed, dodge,
+             strays, unmarked_tests)
 
 
 def run_all(facts, scope, plan):

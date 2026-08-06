@@ -170,13 +170,47 @@ class FindingsAreNotFacts(Fixture):
     managed. That is what makes adding and removing one a local change.
     """
 
-    def test_the_facts_record_carries_no_findings(self):
+    def test_the_facts_record_carries_no_JUDGEMENTS(self):
+        """The rule, stated more precisely than this test first stated it.
+
+        It originally asserted that `mocked_seams` was absent from the facts,
+        alongside `uncalled` and `never_executed`. That was right while ONE
+        detector both gathered and judged it. It stopped being right when a
+        second detector (`seam_crossed`) needed the same greps -- and §4 is
+        explicit about what to do then: *if two features in the same phase ever
+        appear to need ordering, that is a bug -- they are competing over a fact
+        that should have been computed once, upstream.*
+
+        So the line is not "which greps run" but WHO NEEDS THE ANSWER:
+
+            a fact     an observation MORE THAN ONE feature reads
+            a finding  one feature's judgement about it, with its wording,
+                       its priority and its place on the receipt
+
+        `mocked_seams` (the raw pairs) is now a fact. `MOCKED SEAM: t mocks m
+        -- the gate replaced a boundary this run also changed` is still a
+        finding, and still lives with its detector. `uncalled` and
+        `never_executed` serve one reader each and stay where they are.
+        """
         self.steps([{"write": {"out.py": "MARKER\n"
                                          "def run_threads():\n    return 1\n"}}])
         facts = self.delegate()["ctx"]["tree_facts"]
-        for kind in ("uncalled", "mocked_seams", "never_executed"):
+        for kind in ("uncalled", "never_executed", "seam_crossed",
+                     "strays", "dodge"):
             self.assertNotIn(kind, facts,
                              f"{kind} is a finding living inside the facts")
+
+    def test_a_shared_observation_IS_a_fact(self):
+        # The other half, so the rule above cannot be read as "anything may
+        # move into facts when convenient": it moved because a SECOND reader
+        # appeared, and the test says which readers.
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        facts = self.delegate()["ctx"]["tree_facts"]
+        self.assertIn("mocked_seams", facts)
+        readers = [d.KIND for d in detectors.DETECTORS
+                   if d.KIND in ("mocked_seams", "seam_crossed")]
+        self.assertEqual(len(readers), 2, "the second reader is gone -- "
+                                          "if so, put it back on its detector")
 
     def test_the_facts_record_still_carries_every_fact(self):
         # The other half: proving findings left must not prove observations did.
@@ -209,8 +243,8 @@ class FindingsAreNotFacts(Fixture):
         from qd.features import detectors
         self.assertEqual(
             sorted(d.KIND for d in detectors.DETECTORS),
-            ["dodge", "mocked_seams", "never_executed", "strays", "uncalled",
-             "unmarked_tests"])
+            ["dodge", "mocked_seams", "never_executed", "seam_crossed",
+             "strays", "uncalled", "unmarked_tests"])
 
 
 class ReachesTheReceipt(Fixture):
@@ -418,6 +452,85 @@ class AddingOneIsLocal(Fixture):
             self.assertIn(getattr(d, "REGION", None), ("FIXED", "EARLY", "LATE"),
                           f"{d.KIND} declares no region")
             self.assertIsInstance(getattr(d, "SLOT", None), int, d.KIND)
+
+
+class SeamCrossed(Fixture):
+    """A5: a new symbol that reaches outside the process, whose module the
+    delivered tests mock. The gate exercised the mock, not the seam.
+
+    **The predicate is the new SYMBOL, not the file, and that is the whole
+    design decision.** "Lives in a file that imports a driver" would fire on a
+    pure helper added beside one -- and this project has spent a phase deleting
+    false accusations of exactly that shape (the `skipif` false positives, TEST
+    DODGE wrong four times out of four on an ordinary refactor). A detector that
+    fires on the line you are told to read is worse than no detector, because it
+    teaches the reader to skip the whole region.
+    """
+
+    SEAMY = ("import requests\n\n"
+             "def fetch_rows():\n"
+             "    return requests.get('http://x').json()\n")
+    PURE = ("import requests\n\n"
+            "def add(a, b):\n"
+            "    return a + b\n")
+    MOCKER = ("from unittest import mock\n"
+              "def test_it():\n"
+              "    with mock.patch('store.fetch_rows'):\n        pass\n")
+
+    def run_with(self, store_body):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "store.py": store_body,
+                               "test_store_qwen.py": self.MOCKER}}])
+        return detectors.find(self.delegate()["ctx"]["detections"],
+                              "seam_crossed")
+
+    def test_a_new_symbol_that_crosses_a_mocked_seam_is_named(self):
+        got = self.run_with(self.SEAMY)
+        self.assertTrue(got, "the seam crossing was not reported")
+        self.assertIn("fetch_rows", got[0])
+
+    def test_a_PURE_helper_beside_a_driver_import_is_NOT_accused(self):
+        # The false positive the design exists to avoid. `add` lives in a file
+        # that imports requests and whose module is mocked -- and it touches
+        # nothing. A file-level predicate would convict it.
+        self.assertIsNone(self.run_with(self.PURE))
+
+    def test_an_unmocked_seam_is_silent(self):
+        # Reaching outside the process is not itself a finding. The finding is
+        # that the GATE never exercised it.
+        self.steps([{"write": {"out.py": "MARKER\n", "store.py": self.SEAMY}}])
+        self.assertIsNone(detectors.find(
+            self.delegate()["ctx"]["detections"], "seam_crossed"))
+
+    def test_only_the_MOCKED_module_is_accused(self):
+        # Found by mutation: the "unmocked seam is silent" test above has
+        # NOTHING mocked, so an early return saves it and the per-path check
+        # could be deleted unnoticed. This is the case that binds it -- one
+        # module mocked, another not, both crossing a seam.
+        self.steps([{"write": {
+            "out.py": "MARKER\n",
+            "store.py": self.SEAMY,
+            "other.py": ("import requests\n\n"
+                         "def untested_fetch():\n"
+                         "    return requests.get('http://y').json()\n"),
+            "test_store_qwen.py": self.MOCKER}}])
+        got = detectors.find(self.delegate()["ctx"]["detections"],
+                             "seam_crossed") or []
+        flat = " ".join(got)
+        self.assertIn("fetch_rows", flat)
+        self.assertNotIn("untested_fetch", flat,
+                         "a symbol whose module nobody mocks was accused")
+
+    def test_it_reaches_the_receipt(self):
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "store.py": self.SEAMY,
+                               "test_store_qwen.py": self.MOCKER}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "challenge_brief": False})
+        self.assertIn("SEAM CROSSED, UNIT-GATED ONLY", out)
+        self.assertIn("fetch_rows", out)
 
 
 if __name__ == "__main__":

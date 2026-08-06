@@ -9,7 +9,6 @@ green and died on first live contact.
 
 from qd.core.findings import Finding
 from qd.surface.receipt import Block
-from qd.gittree import mocked_seams
 
 KIND = "mocked_seams"
 
@@ -20,7 +19,9 @@ REGION, SLOT = "LATE", 20
 
 
 def detect(facts, scope, plan):
-    found = mocked_seams(scope.work_cwd, facts["changed"])
+    # Read, never gathered: §4's rule, and the reason seam_crossed can use
+    # the same answer without either detector depending on the other.
+    found = facts.get("mocked_seams") or []
     return Finding(KIND, found) if found else None
 
 

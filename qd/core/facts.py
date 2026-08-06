@@ -38,6 +38,7 @@ from types import MappingProxyType
 
 from qd.gittree import (
     snapshot, numstat_map, committed_during_run, head_sha, new_public_symbols,
+    mocked_seams,
 )
 
 
@@ -70,4 +71,11 @@ def collect(work_cwd, pre_status, pre_sha_full):
         "head_moved": committed_during_run(work_cwd, pre_sha_full),
         "head_now": head_sha(work_cwd),
         "pubs": new_public_symbols(work_cwd),
+        # A shared input, computed ONCE. Two detectors need it -- the one that
+        # reports mocked seams and the one that reports a new symbol crossing
+        # one -- and §4 is explicit that when two features appear to need
+        # ordering, they are competing over something that should have been a
+        # fact upstream. This module's own docstring named this exact pair
+        # before either detector existed.
+        "mocked_seams": mocked_seams(work_cwd, changed),
     })

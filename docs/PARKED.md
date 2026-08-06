@@ -27,7 +27,6 @@ thing and this list stays another.
 | Parked item | Blocked until | Then it lives in |
 |---|---|---|
 | **A3** tier map | step 6 | `core/plan.py` (it is config resolution) |
-| **A5** `SEAM CROSSED` | steps 1–3 | a detector reading existing facts |
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
@@ -41,7 +40,7 @@ elsewhere:
 |---|---|
 | ~~**A7** the two playbooks~~ | **DONE** — `playbooks/write-gate.md`, `playbooks/implement.md`, pinned by `specs/playbooks_spec.py` |
 | **A8** contract lifecycle check | a doctor check; doctor is not being restructured |
-| **C** the skill pass | prose. *Best done after* the restructure so it is rewritten once, not twice — a scheduling choice, not a dependency |
+| ~~**C** the skill pass~~ | **DONE** (the three content bugs). `specs/skill_spec.py` now pins the claims that cost tokens or capability when they drift |
 | ~~**D** server lifecycle (A0d)~~ | **DONE** — `qd/core/lifecycle.py`. Scope corrected during the build: it records and REPORTS, it does not kill. See below |
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |
 | **F** decisions owed | version bump, `reset_worktree()`, the `challenge_brief` false-positive rate |
@@ -64,7 +63,7 @@ plumbing, batch-of-chains, handoff forwarding) all shipped.
 | A2 | ~~**Contract pinning**~~ **DONE** — `qd/core/contract.py`, the `CONTRACT:` receipt line (non-droppable), and `features/gates/contract.py` for the cross-link compare | §3.3 | done |
 | A3 | **Tier map** — `"tests": {unit, integration, e2e}`, declared never guessed; refuse-and-ask when a seam is crossed and nothing is declared | §2.2 | config + `tiers/` |
 | A4 | ~~**Clause coverage**~~ **DONE** — `features/guards/clauses.py`. A GUARD, so it fails the attempt and tells the worker which clause is missing, rather than demoting at the end | §6.2 | done |
-| A5 | **`SEAM CROSSED, UNIT-GATED ONLY`** — predicate on the new *symbol*, not the file it lives in | §7 | `seams/` feature |
+| A5 | ~~**`SEAM CROSSED, UNIT-GATED ONLY`**~~ **DONE** — `features/detectors/seam_crossed.py`. Predicate on the new SYMBOL, and `mocked_seams` became a FACT because a second reader appeared (§4's own prescription) | §7 | done |
 | A6 | **`*_qwen` naming rule** in generated `QWEN.md` + `_created()` compliance check | §2.5 | `provenance/` feature |
 | A7 | **`playbooks/write-gate.md`, `playbooks/implement.md`** | §4.2 | documents |
 | A8 | **Contract lifecycle** — doctor check for contracts naming symbols that no longer exist | §11 item 8 | doctor |
@@ -93,7 +92,9 @@ the wrong reason.
 326 lines → ~100 hot. Deliberately last: the restructure and the items above
 both delete prose this pass would otherwise rewrite twice.
 
-Three content bugs to fix while in there:
+~~Three content bugs~~ **all three FIXED**, and pinned by `specs/skill_spec.py`
+so the worst of them — a document contradicting its own measurement — is now a
+catchable class rather than something only a careful reader notices:
 
 - **A2** — the skill tells Claude to query graphify's MCP; `USAGE.md` says the
   opposite and is right. The same skill carries the measurement (+64%) that

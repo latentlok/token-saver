@@ -109,8 +109,27 @@ class Values(Fixture):
         # The renderer and the detectors read these by name; dropping one is a
         # silent KeyError-shaped hole in a receipt, not a test failure.
         for key in ("post_status", "changed", "numstat", "head_moved",
-                    "head_now", "pubs"):
+                    "head_now", "pubs", "mocked_seams"):
             self.assertIn(key, self.collect(), key)
+
+    def test_a_shared_input_is_computed_once_here_not_per_detector(self):
+        """`mocked_seams` is a FACT, and the reason is §4's rule.
+
+        Two detectors need it -- the one that reports mocked seams, and the one
+        that reports a new symbol crossing one. Had each gathered its own, they
+        would have paid for the same greps twice AND acquired an ordering
+        dependency on each other, hidden in whichever order somebody happened to
+        register them. This module's docstring named this exact pair before
+        either detector existed.
+        """
+        self.write("store.py", "def get():\n    return []\n")
+        self.write("test_store_qwen.py",
+                   "from unittest import mock\n"
+                   "def test_it():\n"
+                   "    with mock.patch('store.get'):\n        pass\n")
+        got = self.collect()
+        self.assertEqual(got["mocked_seams"],
+                         [("test_store_qwen.py", "store.py")])
 
     def test_a_commit_made_during_the_run_is_seen(self):
         self.write("x.py", "X = 1\n")

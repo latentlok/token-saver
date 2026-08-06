@@ -119,10 +119,32 @@ run. `NOTES`/`MISREPORT`/`DENIALS`/`FINDINGS` are leads to check, never trusted.
 
 ## Existing codebases: read the map, not the code
 
-Don't read a repo into your context. Query graphify's MCP for the scoped subgraph
-("what calls X?"), verify only load-bearing claims against source (INFERRED edges and
-semantic summaries are leads; tree-sitter coordinates are trustworthy), then pin the
-change as a spec. The receipt's `GRAPH` line tells you if the map is fresh.
+Don't read a repo into your context — and don't query the graph yourself either.
+**The graph is the WORKER's tool**, which is the whole point: architect-side `graphify`
+calls measured **+64% total cost** (see above), because every call is a turn whose output
+stays in your context forever.
+
+So: ask with one `qwen_query` ("what calls X?"), and let the worker read the graph on
+free tokens. Treat what comes back as leads — INFERRED edges and semantic summaries are
+claims to verify, tree-sitter coordinates are trustworthy — then pin the change as a
+spec. The receipt's `GRAPH` line tells you whether the map the worker used was fresh.
+
+### Letting the worker use the graph — two things that bite
+
+**It needs `approval_mode="scoped"`.** `auto-edit` has no shell at all, so a worker told
+to use the graph under the default silently falls back to grep and you pay for the
+reading you were trying to avoid. Nothing in the receipt says this happened.
+
+**`shell_allow` patterns match the COMMAND, not the subcommand.** `^graphify\b` permits
+`graphify update` as well as `graphify explain` — and `update` can bill a cloud account
+on a repo with a semantic index configured. Allow the read-only subcommands explicitly:
+
+```json
+"shell_allow": ["^graphify (explain|query|affected|god-nodes|update-check)\\b"]
+```
+
+The general rule: `^cmd\b` is not "let it run cmd", it is "let it run every subcommand
+cmd has". Ask what the most powerful one is before you write the pattern.
 
 ## Greenfield = iteration zero
 
