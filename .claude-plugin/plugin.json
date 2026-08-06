@@ -8,6 +8,7 @@
   },
   "homepage": "https://github.com/latentlok/token-saver",
   "repository": "https://github.com/latentlok/token-saver.git",
+  "license": "MIT",
   "keywords": [
     "delegation",
     "local-model",
