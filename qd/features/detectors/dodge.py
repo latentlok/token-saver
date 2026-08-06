@@ -16,9 +16,9 @@ from qd.gittree import dodge_markers
 KIND = "dodge"
 
 
-def detect(facts, inputs):
-    found = dodge_markers(inputs.scope.work_cwd, inputs.scope.pre_sha,
-                          inputs.scope.pre_status)
+def detect(facts, scope, plan):
+    found = dodge_markers(scope.work_cwd, scope.pre_sha,
+                          scope.pre_status)
     return Finding(KIND, found) if found else None
 
 

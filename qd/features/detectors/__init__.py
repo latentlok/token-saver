@@ -23,8 +23,14 @@ DETECTORS = (uncalled, mocked_seams, never_executed, dodge, strays,
              unmarked_tests)
 
 
-def run_all(facts, inputs):
+def run_all(facts, scope, plan):
     """Run every detector against one set of facts.
+
+    Takes `scope` and `plan` directly. The `DetectorInputs` bag that used to sit
+    here was step 2 scaffolding, introduced with its risk named out loud -- a
+    general-purpose record handed to every feature is `ctx` with a nicer name.
+    It went 7 fields -> 4 -> deleted, as each field found a real owner. That was
+    the design's claim, and this is it discharged.
 
     Returns `(findings, failed)` -- the findings that fired, and the KINDs of
     detectors that raised.
@@ -50,7 +56,7 @@ def run_all(facts, inputs):
     findings, failed = [], []
     for detector in DETECTORS:
         try:
-            got = detector.detect(facts, inputs)
+            got = detector.detect(facts, scope, plan)
         except Exception:
             failed.append(detector.KIND)
             continue

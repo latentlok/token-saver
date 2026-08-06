@@ -48,9 +48,9 @@ def _is_test(path):
     return stem.startswith(_TEST_NAME[0]) or stem.endswith(_TEST_NAME[1])
 
 
-def detect(facts, inputs):
+def detect(facts, scope, plan):
     found = sorted(
-        p for p in (inputs.created or [])
+        p for p in (scope.created or [])
         if _is_test(p) and "_qwen." not in os.path.basename(p))
     return Finding(KIND, found) if found else None
 

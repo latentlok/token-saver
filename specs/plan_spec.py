@@ -33,7 +33,7 @@ import unittest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-from qd.core.plan import setting  # noqa: E402
+from qd.core.plan import RunPlan, setting  # noqa: E402
 
 
 class Precedence(unittest.TestCase):
@@ -128,6 +128,50 @@ class MergedLayersLoseInformation(unittest.TestCase):
         merged.update({"expect": None})
         self.assertIsNone(merged.get("expect"))
         self.assertEqual(setting("expect", {}, merged, default="any"), "any")
+
+
+class ThePlanRecord(unittest.TestCase):
+    """WHAT WAS ASKED FOR, resolved once and frozen.
+
+    The Builder half of step 6. `setting()` removed the duplicated precedence;
+    this removes the reason features had to carry loose arguments about the
+    caller's intent at all -- which is what finally deleted `DetectorInputs`,
+    the step-2 scaffolding introduced with its own risk named out loud.
+    """
+
+    def test_it_resolves_every_layer_in_precedence_order(self):
+        p = RunPlan.build({"task": "t", "verify": "call"},
+                          {"verify": "proj", "trust": "verified"},
+                          {"preflight_expect": "red"})
+        self.assertEqual(p.verify, "call")
+        self.assertEqual(p.trust, "verified")
+        self.assertEqual(p.preflight_expect, "red")
+
+    def test_it_falls_back_to_the_builtins(self):
+        p = RunPlan.build({"task": "t"}, {}, {})
+        self.assertEqual(p.trust, "self")
+        self.assertEqual(p.preflight_expect, "any")
+
+    def test_a_narrowed_answer_survives_into_the_plan(self):
+        # The falsy rule, carried through the record rather than re-derived.
+        p = RunPlan.build({"task": "t", "touch_scope": []},
+                          {"touch_scope": ["src/"]}, {})
+        self.assertEqual(p.touch_scope, [])
+
+    def test_the_plan_cannot_be_rewritten_downstream(self):
+        # A brief that a later feature can edit is not a brief. Same argument as
+        # the frozen facts record, applied to intent instead of to evidence: a
+        # feature reading plan.verify is reading what the CALLER asked for, not
+        # what some earlier feature decided it should now be.
+        p = RunPlan.build({"task": "t", "verify": "pytest"}, {}, {})
+        with self.assertRaises(AttributeError):
+            p.verify = "something else"
+
+    def test_it_stays_small(self):
+        # A record that mirrors the whole config is a config parser with extra
+        # steps, and the next person to add a setting would add it here out of
+        # symmetry rather than need. This test is the tripwire for that.
+        self.assertEqual(len(RunPlan._fields), 5, RunPlan._fields)
 
 
 if __name__ == "__main__":

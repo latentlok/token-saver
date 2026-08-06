@@ -33,10 +33,9 @@ from qd.gittree import (
     # tree facts nor observes the tree any more. It asks, and renders the answer.
     _project_config, _global_config,
 )
-from qd.core.plan import setting
+from qd.core.plan import RunPlan, setting
 from qd.core.scope import RunScope
 from qd.features import detectors, gates
-from qd.features.detectors.inputs import DetectorInputs
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
     bootstrap_notice, bootstrap_failed_refusal,
@@ -1401,6 +1400,11 @@ def _delegate(args, t0_dir):
             ctx["challenge"]["warm"] = True
             ctx["session_hint"] = session_id
 
+    # Step 6: WHAT WAS ASKED FOR, resolved once and frozen. Built here because
+    # this is where every layer is in hand; read by the features below, which no
+    # longer take loose arguments about the caller's intent.
+    plan = RunPlan.build(args, _project_config(cwd), _global_config())
+
     # --- The gates (step 4) ---
     # ONE call, and deliberately outside the challenge branch above: it used to
     # sit inside it, so `challenge_brief: false` would have silently switched
@@ -1998,15 +2002,10 @@ def _delegate(args, t0_dir):
     # scan. Adding or removing one is a file in qd/features/detectors/; this call
     # site does not change.
     if ctx["tree_facts"] is not None:
+        scope.mark_created(_created(work_cwd, final_changed, pre_status,
+                                    pre_tracked, ctx.get("writes"), hooked))
         ctx["detections"], ctx["detections_failed"] = detectors.run_all(
-            ctx["tree_facts"],
-            DetectorInputs(
-                scope=scope,
-                created=_created(work_cwd, final_changed, pre_status,
-                                 pre_tracked, ctx.get("writes"), hooked),
-                verify=verify,
-                task=task,
-                touch_scope=touch_scope))
+            ctx["tree_facts"], scope, plan)
     ctx["work_cwd"] = work_cwd
     # Extracted here rather than at render time so the one line a report run
     # exists to produce survives the receipt's result-text truncation.

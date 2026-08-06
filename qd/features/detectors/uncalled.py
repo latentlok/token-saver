@@ -14,8 +14,8 @@ from qd.gittree import uncalled_symbols
 KIND = "uncalled"
 
 
-def detect(facts, inputs):
-    found = uncalled_symbols(inputs.scope.work_cwd, facts["pubs"])
+def detect(facts, scope, plan):
+    found = uncalled_symbols(scope.work_cwd, facts["pubs"])
     return Finding(KIND, found) if found else None
 
 

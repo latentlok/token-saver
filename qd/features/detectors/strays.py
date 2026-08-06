@@ -37,8 +37,8 @@ def _strays(created, task, touch_scope):
     return out
 
 
-def detect(facts, inputs):
-    found = _strays(inputs.created, inputs.task, inputs.touch_scope)
+def detect(facts, scope, plan):
+    found = _strays(scope.created, plan.task, plan.touch_scope)
     return Finding(KIND, found) if found else None
 
 

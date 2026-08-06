@@ -14,8 +14,8 @@ from qd.gittree import mocked_seams
 KIND = "mocked_seams"
 
 
-def detect(facts, inputs):
-    found = mocked_seams(inputs.scope.work_cwd, facts["changed"])
+def detect(facts, scope, plan):
+    found = mocked_seams(scope.work_cwd, facts["changed"])
     return Finding(KIND, found) if found else None
 
 

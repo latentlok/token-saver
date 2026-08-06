@@ -75,6 +75,15 @@ class RunScope:
         """
         self.pre_status = pre_status if pre_status is not None else {}
         self.pre_sha = pre_sha
+        # Files this run made, attributed. Run attribution, which is what this
+        # run OWNS -- the last field DetectorInputs was carrying on scope's
+        # behalf. Set by mark_created() once the tree has been observed.
+        self.created = []
+
+    def mark_created(self, created):
+        """Record which files this run is answerable for. After the facts, by
+        necessity: attribution needs the changed set and the write log."""
+        self.created = list(created or [])
 
     @property
     def work_cwd(self):

@@ -34,6 +34,8 @@ Resolving through `setting()` makes that class of bug unwritable rather than
 merely known about.
 """
 
+from typing import NamedTuple
+
 _UNSET = object()
 
 
@@ -51,3 +53,46 @@ def setting(name, *layers, default=None):
         if value is not _UNSET and value is not None:
             return value
     return default
+
+
+class RunPlan(NamedTuple):
+    """WHAT WAS ASKED FOR, resolved once and frozen.
+
+    The Builder half of step 6. `setting()` above removed the duplicated
+    precedence; this removes the reason features had to carry loose arguments
+    around at all.
+
+    Why frozen, and why a record rather than the dict it is built from: this is
+    the run's brief, and a brief that can be edited downstream is not a brief.
+    The same argument as `core/facts.py` -- an observation nobody can rewrite --
+    applied to intent instead of evidence. A feature reading `plan.verify` is
+    reading what the CALLER asked for, not what some earlier feature decided it
+    should now be.
+
+    Deliberately small. It holds what features actually consume, not all ~20
+    settings the engine resolves: a record that mirrors the whole config is a
+    config parser with extra steps, and the next person to add a setting would
+    add it here out of symmetry rather than need.
+    """
+    task: str            # the brief, as the caller wrote it
+    verify: str          # the gate command
+    touch_scope: list    # paths the caller declared in scope
+    trust: str           # "self" | "verified"
+    preflight_expect: str  # "red" | "green" | "any"
+
+    @classmethod
+    def build(cls, args, project, machine):
+        """Resolve every layer once, in precedence order.
+
+        A classmethod rather than a separate Builder class: the pattern's value
+        here is one place that knows the layers, and a class whose only method
+        is `build()` is a function wearing a costume.
+        """
+        return cls(
+            task=args.get("task"),
+            verify=setting("verify", args, project, machine),
+            touch_scope=setting("touch_scope", args, project, machine),
+            trust=setting("trust", args, project, machine, default="self"),
+            preflight_expect=setting("preflight_expect", args, project, machine,
+                                     default="any"),
+        )
