@@ -39,7 +39,7 @@ from qd.core.pipeline import ratchet_minimum
 from qd.core.prompt import tail as prompt_tail
 from qd.core.status import classify as run_status
 from qd.core.scope import RunScope
-from qd.features import detectors, gates, guards
+from qd.features import advisories, detectors, gates, guards
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
     bootstrap_notice, bootstrap_failed_refusal,
@@ -634,6 +634,7 @@ BRIEF_KEYS = (
     "shell_feedback", "trust", "max_iterations", "timeout_sec",
     "verify_timeout_sec", "preflight_expect", "worktree", "executor",
     "report_dont_fix", "fixture_provenance", "advisory_gates", "challenge_brief",
+    "review_brief",
     "challenge_warm",
     "result_schema", "on_compaction",
     # U6: a retry replays the same DOCUMENT, not a frozen copy of its text.
@@ -1852,6 +1853,20 @@ def _delegate(args, t0_dir):
     # the run used) and BEFORE the worktree block, which either commits that
     # tree or deletes it. Indicators only -- nothing below reads the results,
     # the retry loop is already over, and the worker never sees a line of them.
+    # G4: did the run build what the brief asked for? The one question the gate
+    # structurally cannot answer -- a confidently-built misunderstanding passes
+    # its own tests perfectly. ADVISORY and staying that way: this is a WITNESS,
+    # and PRINCIPLES §I says the verdict is a command's exit code, never
+    # anybody's account of the work. OFF by default; it costs a whole executor
+    # pass on a run that has already finished.
+    if setting("review_brief", args, cfg, _global_config(), default=False):
+        _rev = advisories.review(
+            lambda text: run_executor(profile, text, work_cwd, "plan",
+                                      verify_timeout, None)[0],
+            task, ctx.get("tree_facts"))
+        if _rev:
+            ctx["advisory"] = (ctx.get("advisory") or []) + [_rev]
+
     if args.get("advisory_gates"):
         ctx["advisory"], ctx["advisory_skipped"] = _run_advisory(
             args["advisory_gates"], work_cwd, verify_timeout)

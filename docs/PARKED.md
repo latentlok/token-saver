@@ -33,7 +33,6 @@ thing and this list stays another.
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
-| **G4** brief-vs-diff advisory | ~~step 4~~ **unblocked**, but NOT as a gate | `advisory_gates` — see §G4; a witness that can refuse breaks PRINCIPLES §I, and step 4 made "can refuse" a property of the type |
 
 ### Not blocked by anything — can ship whenever
 
@@ -194,15 +193,19 @@ Numbered and ORDERED because the contradictions that matter are ordinal: a later
 step undoing an earlier one is a contradiction, while the same two briefs in the
 other order might be a good refactor.
 
-**G4 — nothing asks "is this what was asked for?" after the build.** The gate
-proves the tests pass. The detectors prove nothing was left behind, nothing is
-unwired, no seam was faked. None of them compare the delivered diff against the
-brief — the one thing an LLM reviewer buys that an exit code structurally
-cannot. Our reason for not having it is sound (§I: a witness is not a verdict),
-and the socket already exists: `advisory_gates` are indicators that never touch
-STATUS and never reach the worker, so this can be added without weakening the
-rule. **Why step 4:** it is a gate, and step 4 is when gates get one shape.
-**It stays advisory** — the moment it can refuse a run, §I is broken.
+~~**G4 — nothing asks "is this what was asked for?" after the build.**~~ **DONE**
+as `review_brief` (OFF by default). Compares the brief against a diff SUMMARY —
+paths and line counts, never content, because the question is about shape and
+the full diff would cost a second delegation's context to answer it worse.
+
+**It is an advisory and must stay one.** It rides the `advisory_gates` shape, so
+it never touches STATUS and never reaches the worker. A witness that can refuse
+has been promoted to judge, and §I says the verdict is a command's exit code.
+Step 4 made "can refuse" a property of the type so this cannot acquire the power
+by being filed in `features/gates/`.
+
+Defaults toward MATCHES: an unparseable answer is not evidence of a defect, and
+a red line that is usually wrong is one nobody reads.
 
 **G5 — cold restart vs resumed session on retry.** `challenge_warm` measured a
 resumed session at **+50% input tokens**, because it re-sends its history every
