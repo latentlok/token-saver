@@ -1955,12 +1955,23 @@ def _delegate(args, t0_dir):
                 #     -> ./venv/bin/pytest -q -o "..." x$(touch${IFS}PWNED)_qwen.py
                 #     -> PWNED created; pytest was handed the argument `x_qwen.py`
                 #
-                # `git status --porcelain` is not a defence and was measured,
-                # not assumed (git 2.53): it C-quotes a path only when it holds
-                # a space (or quote/backslash/control/non-ASCII), so `;`, `$`,
-                # backtick, `|` and `&` arrive BARE -- and even a path it does
-                # quote lands inside real double quotes, where `$(...)` and
-                # backticks still expand. Both halves are exploitable.
+                # git's own path quoting was never a defence, and this is the
+                # only defence there is. Measured, git 2.53: porcelain C-quoted
+                # a path only when it held a space, a DOUBLE quote, a backslash
+                # or a control byte (plus non-ASCII under the default
+                # core.quotePath=true -- that flag changes the non-ASCII case
+                # and nothing else). `;` `$` backtick `|` `&` `*` `>` and the
+                # SINGLE quote all arrived bare; and a path git did quote landed
+                # inside real double quotes, where `$(...)` and backticks still
+                # expand. Both halves executed.
+                #
+                # As of the gittree fix those quotes are decoded at the parse
+                # seam, so every path now arrives here as a REAL filename --
+                # which removes the accident that made a space-bearing name
+                # survive an unquoted join, and leaves shlex.quote as the whole
+                # of the protection. That is the right shape (git's escaping was
+                # never a security boundary), but it means this line must never
+                # go back to interpolating a path raw.
                 #
                 # shlex.quote and not a blanket f'"{p}"': it adds quotes only
                 # where the value needs them, so ordinary `calc_qwen.py` reaches

@@ -133,6 +133,26 @@ cat .pytest_out 2>/dev/null
 exit $(cat .pytest_rc 2>/dev/null || echo 0)
 """
 
+# Same, but it RESOLVES the files it was handed, the way a real pytest does
+# ("ERROR: file or directory not found: x"). A stub that only echoes its
+# arguments cannot tell "graded that file green" from "was handed a path that
+# names nothing" -- and the second is how a worker hides a test file from its
+# own prefilter, which is the property Prefilter's specs exist to deny.
+PYTEST_STUB_STRICT = """#!/bin/sh
+echo "$@" >> "$STUB_PYTEST_LOG"
+rc=0
+for a in "$@"; do
+  # `*_qwen.*` and not `*_qwen.py`: it mirrors the engine's own selector
+  # (`"_qwen." in p`), and a trailing `"` from git's C-quoting would slip
+  # straight past a pattern anchored at the end -- the stub would then skip
+  # the very argument this stub exists to resolve, and pass.
+  case "$a" in
+    *_qwen.*) [ -f "$a" ] || { echo "ERROR: file or directory not found: $a"; rc=4; } ;;
+  esac
+done
+exit $rc
+"""
+
 
 
 def detected(r, kind, default):
@@ -252,11 +272,11 @@ class Fixture(unittest.TestCase):
         args.update(over)
         return engine.delegate(args)
 
-    def enable_prefilter(self):
+    def enable_prefilter(self, strict=False):
         p = os.path.join(self.cwd, "venv", "bin", "pytest")
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w") as f:
-            f.write(PYTEST_STUB)
+            f.write(PYTEST_STUB_STRICT if strict else PYTEST_STUB)
         os.chmod(p, 0o755)
         self.plog = os.path.join(self.sdir, "pytest.log")
         os.environ["STUB_PYTEST_LOG"] = self.plog
@@ -670,22 +690,26 @@ class Prefilter(Fixture):
     #     -> ./venv/bin/pytest -q -o "..." x$(touch${IFS}PWNED)_qwen.py
     #     -> PWNED created in the repo; pytest saw the argument `x_qwen.py`
     #
-    # Two mechanics decide which payload shapes bite, and both were measured
-    # rather than assumed (git 2.53):
+    # git's path quoting was never a defence, and both halves of that were
+    # measured rather than assumed (git 2.53):
     #
-    #   * `git status --porcelain` C-QUOTES a path only when it holds a space
-    #     (or a quote/backslash/control/non-ASCII byte). `;`, `$`, backtick,
-    #     `|`, `&` come back BARE, so they land in the command unprotected.
-    #   * a path that DOES get C-quoted arrives wrapped in real double quotes,
-    #     which neuters `;` -- but `$(...)` and backticks still expand inside
-    #     double quotes, so quoting-by-git is not a defence, only a filter on
-    #     which metacharacter works.
+    #   * porcelain C-QUOTES a path only when it holds a space, a DOUBLE quote,
+    #     a backslash or a control byte -- plus, under the default
+    #     core.quotePath=true only, a non-ASCII byte. `;`, `$`, backtick, `|`,
+    #     `&`, `*`, `>` and the SINGLE quote all come back BARE, so they used to
+    #     land in the command unprotected.
+    #   * a path that DID get C-quoted arrived wrapped in real double quotes,
+    #     which neuters `;` -- but `$(...)` and backticks expand inside double
+    #     quotes, so that was a filter on which metacharacter worked, not a
+    #     defence.
     #
-    # Hence the payloads below are space-free: it keeps them bare through
-    # porcelain and makes each sub-case bite for its own reason rather than
-    # riding on git's incidental behaviour. `${IFS}` is the space substitute
-    # (a literal space would change what porcelain returns; a `/` cannot appear
-    # in a filename at all, which is why the marker is repo-relative).
+    # gittree now DECODES that quoting at the parse seam (paths are filenames,
+    # not a wire format), so the second bullet is history and shlex.quote is the
+    # entire protection. The payloads below stay space-free anyway: it is the
+    # shape a worker can produce under either arrangement, and it keeps each
+    # sub-case biting for its own reason. `${IFS}` is the space substitute; a
+    # `/` cannot appear in a filename at all, which is why the marker is
+    # repo-relative.
     def test_a_hostile_filename_cannot_execute_anything(self):
         self.enable_prefilter()
         out = os.path.join(self.cwd, "out.py")
@@ -726,6 +750,59 @@ class Prefilter(Fixture):
                 self.assertIn(name, logged,
                               f"{name!r} never reached the prefilter as an "
                               f"argument:\n{logged}")
+
+    # The other half of the same property, and the one quoting ALONE gets
+    # wrong. `git status --porcelain` C-QUOTES a path that holds a space (also
+    # `"`, `\`, a control byte, or -- only under the default
+    # core.quotePath=true -- a non-ASCII byte), and qd/gittree.py used to keep
+    # git's quotes verbatim, so the path STRING was `"my calc_qwen.py"`, quotes
+    # included. While the prefilter interpolated unquoted, the shell stripped
+    # those quotes and it worked by accident. Quote the path correctly and the
+    # accident stops: the tool is handed a name with literal `"` in it, which
+    # resolves to nothing.
+    #
+    # That is not cosmetic. It hands a worker a one-character way to keep a
+    # test file out of its own grading -- put a space in the name -- which is
+    # exactly what the sibling test above refuses to allow. So the fix belongs
+    # at the source (gittree un-C-quotes git's output; see gittree_spec), and
+    # these two pin the behaviour end to end rather than at the parser.
+    def test_a_space_in_the_name_still_reaches_the_prefilter_as_a_real_path(self):
+        self.enable_prefilter()
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "my calc_qwen.py": "def test_ok(): pass\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        with open(self.plog) as f:
+            logged = f.read().strip()
+        self.assertIn("my calc_qwen.py", logged)
+        # The discriminator: `assertIn` above matches the broken form too,
+        # since `"my calc_qwen.py"` CONTAINS `my calc_qwen.py`. A literal quote
+        # in the argv is git's C-quoting reaching the tool.
+        self.assertNotIn('"', logged,
+                         f"the prefilter was handed git's C-quoted path "
+                         f"instead of the real filename: {logged!r}")
+
+    def test_a_space_in_the_name_cannot_hide_a_file_from_its_own_prefilter(self):
+        # Strict stub: it RESOLVES what it is handed, so "the prefilter ran"
+        # is not mistaken for "the file was graded". Without that, the argv
+        # assertion above is the only thing standing between this project and
+        # a worker whose failing tests all happen to have spaces in their
+        # names, and an argv assertion is easier to satisfy than the truth.
+        self.enable_prefilter(strict=True)
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "my calc_qwen.py": "def test_ok(): pass\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        with open(self.plog) as f:
+            logged = f.read().strip()
+        # Empty notes, not just "the run passed": a prefilter that could not
+        # open the file reports self-tests failing, which is BOTH a false red
+        # on a healthy run and proof the file went ungraded.
+        self.assertEqual(
+            r["ctx"]["notes"], "",
+            f"the prefilter could not resolve the file it was given, so the "
+            f"receipt claims failing self-tests on a green run; argv was:\n"
+            f"{logged}")
 
     def test_quoting_left_an_ordinary_filename_byte_identical(self):
         # The fix quotes MINIMALLY (shlex.quote), so an ordinary name reaches

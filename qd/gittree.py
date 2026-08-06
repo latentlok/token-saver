@@ -37,6 +37,84 @@ def git_bytes(cwd, *a):
         return 1, b""
 
 
+_C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n",
+              "r": "\r", "t": "\t", "v": "\v", '"': '"', "\\": "\\"}
+
+
+def unquote_path(field):
+    """Decode git's C-style path quoting; return `field` unchanged if it has none.
+
+    git does not emit paths verbatim. When a path holds a character it treats
+    as unusual it wraps the whole thing in double quotes and C-escapes the
+    offending bytes, and every plumbing surface here (`status --porcelain`,
+    `diff --name-only`) does it. Measured on git 2.53, both `core.quotePath`
+    settings, because the flag is not the whole story:
+
+        my calc.py   -> "my calc.py"          space
+        dq"uote.py   -> "dq\\"uote.py"          the escape that also delimits
+        back\\slash.py -> "back\\\\slash.py"       backslash
+        tab\\tchar.py  -> "tab\\tchar.py"        any control byte
+        café.py      -> "caf\\303\\251.py"       non-ASCII, OCTAL PER BYTE --
+                                               and this is the ONE case
+                                               core.quotePath=false changes
+                                               (it then emits café.py raw)
+        a'b.py a;b.py a$b.py a&b.py a|b.py a*b.py a>b.py   all BARE
+
+    Callers treat these strings as filenames, so keeping the quotes made the
+    module quietly wrong for exactly those names: the string opens nothing, so
+    file_sha reports None ("unreadable, never accuse it"), a restore cannot
+    find the file, and the C8 prefilter was handed `"my calc_qwen.py"` and
+    graded nothing -- a worker could keep a test file out of its own grading by
+    putting a space in the name. Decoded here, at the seam where git's output
+    stops being a wire format and becomes a path, rather than at each caller.
+
+    `-z` would sidestep the encoding entirely, and is the better answer for a
+    parser written today. It is not used here because porcelain's -z form also
+    splits a RENAME record into two NUL-separated fields, which would change
+    how status_map keys renames -- a separate behaviour with its own callers,
+    and not something to slip into a decoding fix.
+
+    Conservative by construction: a field is decoded only when it opens with a
+    quote AND its matching close is the LAST character. `R  "a b.py" -> "c d.py"`
+    opens and closes with a quote but is two paths in one field, so it is
+    returned untouched instead of being turned into an invented filename.
+    """
+    if len(field) < 2 or not field.startswith('"'):
+        return field
+    out = bytearray()
+    i = 1
+    while i < len(field):
+        ch = field[i]
+        if ch == '"':                      # closing quote
+            # Trailing content (a rename's ` -> ...`) means this field is not a
+            # single quoted path; leave the caller's existing shape alone.
+            return field if i != len(field) - 1 else bytes(out).decode(
+                "utf-8", "surrogateescape")
+        if ch != "\\":
+            out.extend(ch.encode("utf-8", "surrogateescape"))
+            i += 1
+            continue
+        if i + 1 >= len(field):
+            return field                   # trailing backslash: not git's shape
+        nxt = field[i + 1]
+        if nxt in _C_ESCAPES:
+            out.extend(_C_ESCAPES[nxt].encode("utf-8"))
+            i += 2
+            continue
+        if nxt.isdigit() and len(field) >= i + 4:
+            try:                           # \303 -- one BYTE, not one character
+                byte = int(field[i + 1:i + 4], 8)
+            except ValueError:
+                return field
+            if byte > 0xFF:                # git emits \000-\377 and nothing else
+                return field
+            out.append(byte)
+            i += 4
+            continue
+        return field                       # unknown escape: not ours to guess
+    return field                           # never closed: not ours to guess
+
+
 def is_git_repo(cwd):
     rc, out = git(cwd, "rev-parse", "--is-inside-work-tree")
     return rc == 0 and out == "true"
@@ -48,14 +126,18 @@ def head_sha(cwd):
 
 
 def status_map(cwd):
-    """{path: porcelain status code} for the working tree."""
+    """{path: porcelain status code} for the working tree.
+
+    Paths arrive DECODED (see unquote_path): every caller of this map treats
+    its keys as filenames, so git's C-quoting has to stop here.
+    """
     rc, out = git(cwd, "status", "--porcelain")
     if rc != 0 or not out:
         return {}
     m = {}
     for line in out.splitlines():
         if len(line) > 3:
-            m[line[3:].strip()] = line[:2].strip()
+            m[unquote_path(line[3:].strip())] = line[:2].strip()
     return m
 
 
@@ -70,7 +152,10 @@ def untracked_files(cwd):
     rc, out = git(cwd, "status", "--porcelain", "-uall")
     if rc != 0 or not out:
         return []
-    return [line[3:].strip() for line in out.splitlines()
+    # Decoded for the same reason status_map's keys are: these feed the
+    # per-file rules (strays, fixture provenance), and a name they cannot
+    # express is a name those rules cannot police.
+    return [unquote_path(line[3:].strip()) for line in out.splitlines()
             if line[:2].strip() == "??" and len(line) > 3]
 
 

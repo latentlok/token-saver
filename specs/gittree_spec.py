@@ -23,8 +23,9 @@ The load-bearing cases:
      no-change sentence the receipt relies on.
   5. reset_worktree uses clean -fd, never -fdx (a gitignored venv must survive).
 
-Public surface pinned here (all ported verbatim from server.py):
-    git, is_git_repo, head_sha, status_map, file_sha, snapshot,
+Public surface pinned here (all ported verbatim from server.py, except
+`unquote_path`, which is new -- see class CQuotedPaths):
+    git, is_git_repo, head_sha, status_map, unquote_path, file_sha, snapshot,
     spec_globs, DEFAULT_SPEC_GLOBS, spec_files, violated_specs, revert_specs,
     committed_during_run, new_public_symbols, blast_radius, reset_worktree
 
@@ -337,6 +338,81 @@ class UntrackedExpansion(Fixture):
     def test_tracked_edits_are_not_untracked(self):
         put(self.cwd, "roman.py", "CHANGED = 1\n")
         self.assertEqual(gittree.untracked_files(self.cwd), [])
+
+
+class CQuotedPaths(Fixture):
+    """`git status --porcelain` C-QUOTES paths it considers unusual, and this
+    module used to hand those quotes on as if they were part of the filename.
+
+    Measured, git 2.53 (both `core.quotePath` settings, because the flag is not
+    the whole story): a path is C-quoted when it contains a SPACE, a double
+    quote, a backslash, or a control byte -- and, under the default
+    quotePath=true only, any non-ASCII byte, octal-escaped per byte. A single
+    quote, `$`, `;`, backtick, `|`, `&`, `*`, `>` and `#` all come back BARE.
+    Setting quotePath=false changes exactly one of those cases (non-ASCII is
+    emitted raw); it does not disable the quoting.
+
+    Keeping the quotes made every path-consuming caller wrong for those names:
+    the string names no file on disk, so file_sha returns None, restore cannot
+    find it, and -- the one that turned a cosmetic bug into a hole -- the C8
+    prefilter is handed `"my calc_qwen.py"` and grades nothing, which is a
+    worker hiding a test file from its own grading by putting a space in the
+    name (specs/engine_spec.py, class Prefilter).
+
+    Decoding here rather than at each caller: this is the seam where git's
+    output stops being a wire format and starts being a path.
+    """
+
+    NAMES = ("my calc_qwen.py",          # space -- the one a worker hits by accident
+             'dq"uote.py',               # the escape that also delimits
+             "back\\slash.py",           # \\ -- decoding must not eat it
+             "tab\tchar.py",             # a control byte, \t
+             "café.py",                  # non-ASCII: \303\251 under quotePath=true
+             "中文.py")                   # multi-byte, several octal escapes
+
+    def test_status_map_returns_real_filenames(self):
+        for n in self.NAMES:
+            with self.subTest(name=n):
+                cwd = make_repo()
+                put(cwd, n, "x = 1\n")
+                self.assertEqual(gittree.status_map(cwd), {n: "??"})
+                # The proof that it is a real path and not a lookalike string:
+                # the file opens. file_sha returned None for every one of these
+                # before, which is silently "unreadable, never accuse it".
+                self.assertIsNotNone(gittree.file_sha(cwd, n))
+
+    def test_untracked_files_returns_real_filenames(self):
+        # Same parse, second site: this one feeds the per-file rules (strays,
+        # fixture provenance), so a name it cannot express is a name those
+        # rules cannot police.
+        cwd = make_repo()
+        for n in self.NAMES:
+            put(cwd, os.path.join("pkg", n), "x = 1\n")
+        self.assertEqual(sorted(gittree.untracked_files(cwd)),
+                         sorted(os.path.join("pkg", n) for n in self.NAMES))
+
+    def test_an_ordinary_path_is_untouched(self):
+        # The decode must be a no-op on everything git did not quote -- that is
+        # what keeps every existing assertion in this file describing the same
+        # bytes it always did.
+        for raw in ("roman.py", "sub/inner_spec.py", "a'b.py", "a;b.py",
+                    "a$b.py", "a&b.py", "a|b.py", "a*b.py"):
+            with self.subTest(raw=raw):
+                self.assertEqual(gittree.unquote_path(raw), raw)
+
+    def test_a_rename_record_is_left_exactly_as_it_was(self):
+        # `R  "a b.py" -> "c d.py"` starts and ends with a quote but is TWO
+        # paths in one field, so a decoder that trusted its own first and last
+        # character would silently invent a filename. status_map has always
+        # stored that record verbatim; this change deliberately does not touch
+        # it (it is a separate defect with separate callers), and this pins
+        # that the conservatism is intentional rather than accidental.
+        cwd = make_repo()
+        put(cwd, "a b.py", "x\n")
+        commit_all(cwd)
+        sh(cwd, "git", "mv", "a b.py", "c d.py")
+        self.assertEqual(list(gittree.status_map(cwd)),
+                         ['"a b.py" -> "c d.py"'])
 
 
 class DodgeMarkers(Fixture):

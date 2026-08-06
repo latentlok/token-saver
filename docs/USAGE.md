@@ -133,7 +133,7 @@ both — the config is what a call *falls back to*, never what overrides it.
 
 | key | default | what it does |
 |---|---|---|
-| `test_command` | detected | The exact command that runs your tests. Beats every detector — use it when your layout isn't one the detectors guess (they key off `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`, a venv `pytest`, `pyproject.toml`/`setup.py`). |
+| `test_command` | detected | The exact command that runs your tests. Beats every detector — use it when your layout isn't one the detectors guess (they key off `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`, a venv `pytest`, `pyproject.toml`/`setup.py`). Like `verify` in a playbook, this is a command **this machine runs**: a repo you did not write can declare it. |
 | `test_dir` | `tests`/`test`/`spec`/`specs` if present | The folder holding your tests, for the discovery fallback. |
 | `trust` | `self` | `self` = the worker writes and grades its own suite; `verified` = your `verify` command is the gate; `auto` = refuse a bare call so the orchestrator picks per task. |
 | `min_tests` | 5 | Floor for the non-vacuous guard under `trust="self"`. Ratchets automatically against an existing green suite. |
@@ -451,6 +451,20 @@ The rules, each of which is enforced rather than hoped for:
 - **`trust`, `executor`, and `worktree` are deliberately NOT front-matter keys.** Who
   is trusted and where the run happens are the caller's decisions; a document that
   could grant itself full trust would be privilege escalation in markdown.
+- **`verify` IS a front-matter key, and it is a command this machine runs.** Said
+  plainly, because the bullet above sets an expectation this one does not meet: a
+  playbook — a *file in the repository* — can name the gate command, and the gate
+  runs on your machine, in your environment, with your credentials. The pre-flight
+  runs it **before the worker starts at all**, so `report_dont_fix`, `plan` mode and
+  a tight `touch_scope` do not stand between the document and the command; nor does
+  `trust`, which governs how work is graded and not what the gate may be. The same
+  is true of every `advisory_gates[].cmd`. Delegating against a repository you did
+  not write, or one whose playbooks you have not read, therefore means running its
+  authors' commands. Read `playbooks/*.md` the way you would read a `Makefile` you
+  were about to invoke: this is the same act. (The engine now quotes every path it
+  interpolates into a shell, so a *filename* cannot become a command — but a
+  declared gate command is a command by design, and no amount of quoting changes
+  that.)
 - **`{{slots}}` fill from `vars`** — across the whole file, front matter included
   (`verify: pytest {{mod}}_test.py` works). An unfilled slot and a `vars` key
   matching no slot are both refused by name; `{{` is reserved, no escape.
