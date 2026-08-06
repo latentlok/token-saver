@@ -13,6 +13,11 @@ from qd.gittree import uncalled_symbols
 
 KIND = "uncalled"
 
+# WHERE this finding renders. Declared by the detector so adding one is a
+# file plus a line in DETECTORS -- placement is the size cap's tie-break
+# among equal priorities, so it cannot be left to registration order.
+REGION, SLOT = "LATE", 10
+
 
 def detect(facts, scope, plan):
     found = uncalled_symbols(scope.work_cwd, facts["pubs"])

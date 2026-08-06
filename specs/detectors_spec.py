@@ -365,5 +365,60 @@ class UnmarkedWorkerTests(Fixture):
         self.assertIn("test_thing.py", out)
 
 
+class AddingOneIsLocal(Fixture):
+    """The restructure's headline claim, checked rather than asserted.
+
+    "Adding a detector is one file plus one line in DETECTORS" was FALSE until
+    the SLOT mechanism landed, and building A6 is what exposed it: the renderer
+    named each detector's placement, so a detector with the registry entry but
+    no render line computed a finding nobody ever saw -- silently, whole suite
+    green. That is the exact failure shape this round kept finding.
+
+    Placement could not simply follow registration order, because it is the size
+    cap's TIE-BREAK among equal priorities. So each detector DECLARES where it
+    goes and the renderer asks.
+
+    This test registers a detector that exists nowhere in qd/verdict.py and
+    requires its line on the receipt. If someone reintroduces a named emit, this
+    still passes -- so it is paired with the inventory test below, which fails
+    the moment a registered detector has no region.
+    """
+
+    def test_a_detector_the_renderer_has_never_heard_of_still_renders(self):
+        from qd.core.findings import Finding
+        from qd.surface.receipt import Block
+
+        class Invented:
+            KIND = "invented"
+            REGION, SLOT = "LATE", 99
+            @staticmethod
+            def detect(facts, scope, plan):
+                return Finding("invented", ["proof.py"])
+            @staticmethod
+            def block(data):
+                return [Block("invented", "INVENTED: " + ", ".join(data),
+                              True, 1)]
+
+        real = detectors.DETECTORS
+        detectors.DETECTORS = real + (Invented,)
+        self.addCleanup(setattr, detectors, "DETECTORS", real)
+
+        self.steps([{"write": {"out.py": "MARKER\n"}}])
+        out = engine.run({"task": "t", "cwd": self.cwd,
+                          "verify": "grep -q MARKER out.py",
+                          "approval_mode": "auto-edit", "executor": "stub",
+                          "challenge_brief": False})
+        self.assertIn("INVENTED: proof.py", out,
+                      "a registered detector produced a finding nobody rendered")
+
+    def test_every_registered_detector_declares_where_it_goes(self):
+        # The other half. A detector without a region renders nowhere, and the
+        # test above would not catch that for the OTHER detectors.
+        for d in detectors.DETECTORS:
+            self.assertIn(getattr(d, "REGION", None), ("FIXED", "EARLY", "LATE"),
+                          f"{d.KIND} declares no region")
+            self.assertIsInstance(getattr(d, "SLOT", None), int, d.KIND)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

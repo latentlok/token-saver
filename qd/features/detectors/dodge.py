@@ -15,6 +15,11 @@ from qd.gittree import dodge_markers
 
 KIND = "dodge"
 
+# WHERE this finding renders. Declared by the detector so adding one is a
+# file plus a line in DETECTORS -- placement is the size cap's tie-break
+# among equal priorities, so it cannot be left to registration order.
+REGION, SLOT = "FIXED", 10
+
 
 def detect(facts, scope, plan):
     found = dodge_markers(scope.work_cwd, scope.pre_sha,

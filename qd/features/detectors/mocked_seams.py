@@ -13,6 +13,11 @@ from qd.gittree import mocked_seams
 
 KIND = "mocked_seams"
 
+# WHERE this finding renders. Declared by the detector so adding one is a
+# file plus a line in DETECTORS -- placement is the size cap's tie-break
+# among equal priorities, so it cannot be left to registration order.
+REGION, SLOT = "LATE", 20
+
 
 def detect(facts, scope, plan):
     found = mocked_seams(scope.work_cwd, facts["changed"])

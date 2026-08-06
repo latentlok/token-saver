@@ -33,6 +33,11 @@ from qd.surface.receipt import Block
 
 KIND = "unmarked_tests"
 
+# WHERE this finding renders. Declared by the detector so adding one is a
+# file plus a line in DETECTORS -- placement is the size cap's tie-break
+# among equal priorities, so it cannot be left to registration order.
+REGION, SLOT = "LATE", 40
+
 # Deliberately narrow. A file is a test only if its NAME says so -- inferring
 # from content would fire on fixtures, helpers and anything that imports
 # unittest, and a detector that cries wolf gets switched off wholesale (the

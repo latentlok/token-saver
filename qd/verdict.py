@@ -379,7 +379,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # where the receipt is otherwise indistinguishable from honest work, and
     # suppressing it on the compact green path would hide it precisely when it
     # matters most.
-    _emit(body, detectors.dodge, ctx, text_only=True)
+    for _d in detectors.in_region("FIXED"):
+        _emit(body, _d, ctx, text_only=True)
 
     # Context used, so Claude can size the next delegation.
     peak = ctx.get("peak", 0)
@@ -818,7 +819,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # U4.3 strays. The LINE lives with the detector (qd/features/detectors/);
     # what the renderer owns is WHERE it goes -- and its position here is
     # load-bearing, see qd/surface/receipt.py rule 1.
-    _emit(c2_blocks, detectors.strays, ctx)
+    for _d in detectors.in_region("EARLY"):
+        _emit(c2_blocks, _d, ctx)
 
     # CHALLENGE: the pre-build objection pass (A23), on by default. Two things
     # are worth a line and neither is visible otherwise: that the pass RAN (a
@@ -874,17 +876,12 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # unsupported. Drop priority 1: they are diagnostics, so they yield to
     # STATUS/CHANGED/ROLLBACK under the size cap, but they sit ABOVE the
     # accounting lines because a dead symbol matters more than a token count.
-    _emit(c2_blocks, detectors.uncalled, ctx)
-    _emit(c2_blocks, detectors.mocked_seams, ctx)
-    _emit(c2_blocks, detectors.never_executed, ctx)
-    # A6. NOTE: this line is why "adding a detector is one file plus one line
-    # in DETECTORS" is not yet true -- the renderer still names each detector's
-    # PLACEMENT, because placement is the size cap's tie-break among equal
-    # priorities and cannot be derived from registration order alone. Making it
-    # derivable needs an explicit SLOT per detector; until then a new detector
-    # needs a line here too, and a detector that has one but is missing this
-    # one computes a finding nobody ever sees.
-    _emit(c2_blocks, detectors.unmarked_tests, ctx)
+    # Every LATE detector, in the order each one declares. The renderer no
+    # longer names them: a detector that registers in DETECTORS renders, full
+    # stop. Before this it also needed a line here, and one that had the first
+    # without the second computed a finding nobody ever saw.
+    for _d in detectors.in_region("LATE"):
+        _emit(c2_blocks, _d, ctx)
 
     # DISPATCH: what the fan-out ACTUALLY did. The capacity a call gets is
     # resolved from three files (call arg > project > machine) and was visible

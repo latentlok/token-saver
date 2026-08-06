@@ -65,6 +65,23 @@ def run_all(facts, scope, plan):
     return findings, failed
 
 
+def in_region(region):
+    """Every detector rendering in one region, in SLOT order.
+
+    This is what makes "adding a detector is a file plus a line in DETECTORS"
+    TRUE. It was not: the renderer named each detector's placement, so a
+    detector registered without a matching render line computed a finding
+    nobody ever saw -- silently, with the whole suite green.
+
+    Placement cannot simply follow registration order, because it is the size
+    cap's TIE-BREAK among equal priorities: among blocks of the same drop
+    priority the earliest-appended is shed first. So each detector declares
+    where it goes, and the renderer asks rather than lists.
+    """
+    return tuple(sorted((d for d in DETECTORS if d.REGION == region),
+                        key=lambda d: d.SLOT))
+
+
 def find(findings, kind, default=None):
     """The payload of one kind of finding, or `default` if it did not fire.
 

@@ -17,6 +17,11 @@ from qd.surface.receipt import Block
 
 KIND = "strays"
 
+# WHERE this finding renders. Declared by the detector so adding one is a
+# file plus a line in DETECTORS -- placement is the size cap's tie-break
+# among equal priorities, so it cannot be left to registration order.
+REGION, SLOT = "EARLY", 10
+
 
 def _strays(created, task, touch_scope):
     """Named in the task (by path OR basename) or listed in touch_scope means
