@@ -8,6 +8,48 @@ Model under test: `qwen3.6:27b-agent` via Qwen Code 0.19.11 against a local Olla
 
 ---
 
+## G5: resuming re-sends the whole previous prompt, verbatim
+
+The retry loop resumes the worker's session. `challenge_warm` had measured a
+resumed session at +50% input tokens and attributed it to "history re-sent every
+turn". **That attribution was wrong**, and the correction matters more than the
+number.
+
+Measured, one call each, trivial task:
+
+    first delegation      49,605 in
+    WARM second call     125,140 in
+    COLD second call      75,533 in
+
+    125,140 - 75,533  =  49,607   ~= the first call's 49,605
+
+**The resumed call carries a full copy of the previous prompt.** Not a delta,
+not a summary, not an accumulating transcript -- the entire prior prompt again,
+ahead of the new one. Two consequences "history is re-sent" does not predict:
+
+1. **The cost is the PREFIX, not the conversation.** A trivial first call is
+   already ~50k input: rules file, tool definitions, task. Almost none of it is
+   anything the worker said. Resuming pays for that prefix twice, and a terse
+   worker does not help.
+2. **It compounds.** Each resumed turn carries the last full prompt, so an
+   N-turn resumed session is O(N²) in input, not O(N). A three-attempt retry is
+   not 1.5× a cold one.
+
+**Cold is 40% cheaper and far more predictable.** Across three interleaved
+rounds, warm ran 125,246 / 125,150 / 151,126 while cold ran 74,801 / 74,876 /
+74,892 -- a 26k spread against 91 tokens. Same success rate, same wall-clock
+(~10.5s either way), so the saving is not bought with quality or latency.
+
+**Both cost and doctrine now point one way for retries.** The skill already says
+*go cold for repairs* -- a failed session carries its confusion forward and
+argues with the correction. The retry loop still resumes. Not changed on this
+evidence: n=3, one task shape, one executor. The duplication is a property of
+how that CLI builds a resumed request, so another executor may differ -- which
+is exactly why the per-call telemetry that made it visible is worth keeping.
+
+*(Found by the operator questioning the write-up: a two-turn conversation cannot
+BE 50k tokens of history. It was not history.)*
+
 ## Qwen fabricates. Its self-report is never evidence.
 
 First real delegation: write `fib()` plus pytest tests. The code was **correct**. The
