@@ -171,13 +171,38 @@ def parse_findings(text):
 # wording change nobody connects to the chain.
 RESULT_VALID_LINE = "RESULT: valid (schema)"
 
-# The stamp and the block it vouches for, which `render` writes as adjacent
-# body lines. `\s*` between them rather than a bare newline because the body's
-# join is this module's business and a reader that breaks when a blank line is
-# introduced between two lines nobody thinks of as coupled is a trap.
-# Non-greedy: the FIRST fence after the stamp is the stamped one.
+# Every place `render` transcribes text THIS SERVER DID NOT WRITE. Both are
+# written by `_assembled` below, and the stamp is appended to `body` above both
+# of them -- so everything after the FIRST of these markers is quotation, and
+# everything before it is the server speaking. A worker that writes either
+# marker into its own reply, or a gate that prints one, only ever adds a SECOND
+# occurrence below the server's: `find` returns the first, so a forger cannot
+# move the boundary down over its own text.
+_TRANSCRIPT_MARKERS = ("\n--- final verify output ---",
+                       "\n--- qwen result ---")
+
+# The stamp and the block it vouches for, as `render` writes them: two adjacent
+# body lines.
+#
+#   ^ ... $ (MULTILINE)  the stamp must BE a line. Mid-line text is quotation --
+#                        `FINDINGS: <worker prose>` and `ADVISORY red: <head>`
+#                        both embed third-party text after a prefix, and neither
+#                        can start a line with this.
+#   \s* before the fence  the body's join is this module's business; a reader
+#                        that breaks when a blank line appears between two lines
+#                        nobody thinks of as coupled is a trap. \s cannot cross
+#                        a non-blank line, so the fence still has to be next.
+#   \n```$ to close      NOT "the first ``` anywhere", which truncated a
+#                        legitimate payload the moment a JSON string VALUE
+#                        contained backticks ({"cmd": "``` "}). A closing fence
+#                        is a line that is only a fence, and that line cannot
+#                        occur inside the block: the payload is one valid JSON
+#                        value, JSON forbids a raw newline inside a string, and
+#                        ``` is not JSON structure -- so a ```-only line is
+#                        always outside the value, i.e. the real close.
 _STAMPED_RESULT = re.compile(
-    re.escape(RESULT_VALID_LINE) + r"\s*```json\s*\n(.*?)\n?```", re.S)
+    r"^" + re.escape(RESULT_VALID_LINE) + r"[ \t]*\n\s*```json[ \t]*\n"
+    r"(.*?)\n```[ \t]*$", re.S | re.M)
 
 
 def validated_result(text):
@@ -192,6 +217,19 @@ def validated_result(text):
     block" therefore finds the truncatable copy, and on a long reply a mangled
     one.
 
+    ONLY THE SERVER'S OWN REGION IS SEARCHED, and that is the whole safety
+    argument here rather than a tidiness one. The stamp is not a secret: it is
+    fifteen ASCII characters the worker reads on every receipt it is shown. An
+    unbounded search over the receipt let a worker MINT IT -- a reply that
+    merely echoed the line above a fenced block was carried to the next link as
+    "validated", on a run that declared no result_schema and where this server
+    had checked nothing. The same forgery came out of a gate's stdout, which
+    under `trust: self` the worker also wrote. That inverts the property the
+    whole system rests on: the builder's word is never evidence, the gate
+    decides. Cutting at the first transcription marker restores it -- the stamp
+    can then only be matched where the server, and nothing else, does the
+    writing.
+
     Verbatim, as the worker wrote it: `last_json_block` returns the raw text
     beside the parsed value for exactly this reason -- a caller that asked for
     a machine-read result gets the bytes, not this module's idea of how to
@@ -201,9 +239,28 @@ def validated_result(text):
     server's record that it already validated. A fenced block with no stamp
     above it was never checked by anything, so it is not a validated result and
     this returns None for it.
+
+    Fails CLOSED in every unclear case -- no match means nothing crosses, and a
+    link that inherits nothing is a link that runs on its own task.
     """
-    m = _STAMPED_RESULT.search(text or "")
+    m = _STAMPED_RESULT.search(_server_region(text or ""))
     return m.group(1).strip() if m else None
+
+
+def _server_region(text):
+    """The part of a receipt this server wrote, up to the first transcription.
+
+    Kept separate from the pattern because it is a different claim: the regex
+    says what the stamp LOOKS like, this says where it is allowed to BE. A
+    receipt that has no marker at all is server-written throughout -- nothing
+    was quoted into it -- so the whole text is the region.
+    """
+    cut = len(text)
+    for marker in _TRANSCRIPT_MARKERS:
+        i = text.find(marker)
+        if i != -1:
+            cut = min(cut, i)
+    return text[:cut]
 
 
 def strip_handoff(text):

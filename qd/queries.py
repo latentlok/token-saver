@@ -10,6 +10,7 @@ import qd.invoke
 import qd.jsonschema
 import qd.profiles
 import qd.runlog
+import qd.verdict
 
 DEFAULT_TIMEOUT = 900
 MAX_TIMEOUT = 7200
@@ -201,8 +202,14 @@ def run_query(args):
     if result_schema is not None:
         value, _, err = qd.jsonschema.last_json_block(text)
         errors = [err] if err else qd.jsonschema.validate(value, result_schema)
+        # The same constant the delegate receipt stamps and qd/server.py's
+        # chain reads back. A third hand-written copy of the string is how the
+        # constant stops being one: a query receipt is not carried between
+        # links today, but the wording is now load-bearing somewhere, and
+        # "somewhere else still says it a third way" is the drift the constant
+        # exists to make impossible.
         lines.append(f"RESULT: schema INVALID — {errors[0]}" if errors
-                     else "RESULT: valid (schema)")
+                     else qd.verdict.RESULT_VALID_LINE)
 
     label = "map" if fmt == "map" else "answer"
     lines.append(f"--- {label} ---\n{qd.invoke.truncate(text, RESULT_CAP)}")

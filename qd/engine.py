@@ -84,9 +84,28 @@ _DEFAULT_VERIFY_TIMEOUT = 300
 # where its own normal sits; 0 or null disables it.
 _DEFAULT_BURN_BUDGET = 10_000_000
 
-# U4.1: the chain position run_chain injects into each link's args. Reserved,
-# not a caller-facing param -- it is deliberately absent from the schema, so a
-# hand-written call cannot claim to be link 3 of a chain that never ran.
+# --- The reserved args, and what "reserved" actually buys ---
+#
+# WHAT IS TRUE: every name below is absent from qd/schemas.py, so nothing
+# advertises it, no conforming client sends it, and the server itself sets it at
+# exactly one place each. Where a setter also STRIPS an inherited copy first --
+# run_chain does this for CARRIED_ARG -- the value on that path is the server's
+# by construction.
+#
+# WHAT IS NOT TRUE, and used to be claimed here: that a caller CANNOT set them.
+# There is no `additionalProperties: false` and no filtering at the wire seam --
+# qd/server.py's tools/call handler passes `params["arguments"]` through as it
+# arrives -- so an off-schema key does reach engine.run on a LONE delegation.
+# The exposure is bounded (a lone run has no next link, so a forged value only
+# colours that run's own prompt, which is the caller lying to their own worker),
+# but it is real, and a comment that overstates a protection is worse than no
+# comment: it stops the next reader from looking. Closing it means filtering
+# reserved keys at that one seam for ALL SIX names at once, which is a change to
+# five args this file's other owners hold and is gated by a spec CI skips
+# (dispatch_spec) -- queued deliberately rather than half-applied here.
+#
+# U4.1: the chain position run_chain injects into each link's args. Absent from
+# the schema so no ordinary call claims to be link 3 of a chain that never ran.
 CHAIN_ARG = "_chain"
 # G2: the WHOLE chain's briefs, composed by run_chain and handed to link 1 only.
 # The challenge pass reads this instead of link 1's task alone, so a link 3 that
@@ -95,8 +114,8 @@ CHAIN_ARG = "_chain"
 CHAIN_BRIEF_ARG = "_chain_brief"
 
 # The worktree a chain LENDS to each of its links. Reserved for the same reason
-# CHAIN_ARG is: only run_chain may set it, so a hand-written call cannot point a
-# delegation at a container it does not own.
+# CHAIN_ARG is, and with the same real strength: absent from the schema, set by
+# run_chain alone, and not filtered at the wire (see the family note above).
 #
 # A chain is the dependent shape -- "link 2 builds on link 1's tree" -- and that
 # sentence was false under `worktree: "auto"`. Every link acquired its OWN tree
@@ -119,12 +138,14 @@ WT_ARG = "_worktree"
 # with more tokens and no type, which is precisely what the old `!= "none"` test
 # did with it.
 #
-# Reserved for the same reason CHAIN_ARG and WT_ARG are, and here the reason has
-# teeth: only run_chain may set it, and run_chain strips whatever the caller
-# sent before setting its own. The slot's whole value is the sentence "the
-# previous link validated this", so a hand-written call able to fill it could
-# claim to have inherited a result from a link that never ran -- a forged
-# provenance, in the one field that exists to carry provenance honestly.
+# Reserved like CHAIN_ARG and WT_ARG, and the one of the family with a real
+# enforcement rather than only an absence: run_chain STRIPS any inherited copy
+# before setting its own, so inside a chain -- the only place the value means
+# anything -- a caller cannot forge it. On a lone delegation it is settable from
+# the wire like every other reserved arg (see the family note above); there is
+# no next link there, so the lie goes no further than that run's own prompt.
+# The slot's whole value is the sentence "the previous link validated this",
+# which is the one thing a task string could not carry honestly.
 CARRIED_ARG = "_carried"
 
 # U5.2, same reserved-arg convention: the submitted run's id, and the result of
