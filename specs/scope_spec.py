@@ -4,7 +4,7 @@ Spec for qd/core/scope.py -- what one run OWNS, and must dispose of.
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-Step 5 of docs/DESIGN-modular-architecture.md §5. One rule:
+Step 5 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. One rule:
 
     A run disposes of what it owns, and never of what it borrows.
 

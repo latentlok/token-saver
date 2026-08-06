@@ -49,11 +49,14 @@ class ItDoesNotContradictItself(unittest.TestCase):
         self.assertNotIn("Query graphify's MCP", self.skill)
         self.assertIn("don't query the graph yourself", self.skill.lower())
 
-    def test_it_agrees_with_USAGE_about_whose_tool_the_graph_is(self):
+    def test_it_agrees_with_AGENT_about_whose_tool_the_graph_is(self):
         # Two documents disagreeing is worse than either being wrong, because
         # whichever the reader met first wins and neither knows.
-        usage = read("docs/USAGE.md")
-        self.assertIn("the **worker** uses", usage)
+        # The claim moved from docs/USAGE.md to AGENT.md when the pre-0.6.0
+        # set was archived; the pairing is what this test protects, not the
+        # filename. RED until AGENT.md carries the claim.
+        agent_doc = read("AGENT.md")
+        self.assertIn("the **worker** uses", agent_doc)
         self.assertIn("the WORKER's tool", self.skill)
 
 

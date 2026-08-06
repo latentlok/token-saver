@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What a detector RETURNS, instead of writing into the record it read from.
 
-Step 2 of docs/DESIGN-modular-architecture.md §4, the other half of step 1:
+Step 2 of docs/archive/a92e876/DESIGN-modular-architecture.md §4, the other half of step 1:
 
     FACTS are computed once, in dependency order, and read by everyone.
     FINDINGS are pure functions of facts. Nothing writes a fact after collect().

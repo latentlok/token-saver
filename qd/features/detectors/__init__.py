@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The registry: every detector, enumerable, in one place.
 
-Step 2 of docs/DESIGN-modular-architecture.md. What this buys, concretely --
+Step 2 of docs/archive/a92e876/DESIGN-modular-architecture.md. What this buys, concretely --
 before it, adding a sixth detector meant finding where the other five were
 called (five statements inside a 1,111-line function, with nothing naming them
 as a group), and removing one meant proving nothing downstream had come to rely

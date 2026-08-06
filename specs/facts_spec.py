@@ -4,7 +4,7 @@ Spec for qd/core/facts.py -- the run's tree observations, computed once.
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-Step 1 of docs/DESIGN-modular-architecture.md. Most of this file is about WHEN
+Step 1 of docs/archive/a92e876/DESIGN-modular-architecture.md. Most of this file is about WHEN
 and HOW MANY TIMES, not about values, because that is the half that fails
 silently: a fact gathered a moment too late, or gathered twice from a moving
 tree, leaves the receipt GREEN and saying the wrong thing. Nothing in a passing

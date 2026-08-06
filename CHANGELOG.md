@@ -6,7 +6,7 @@ The first round driven by a field ledger rather than a design doc: 23 findings f
 building a real project with the plugin, **none of which had been fixed**. One
 insight organises all of it — *almost every finding is the plugin knowing something
 and not acting on it* — so the round replaces prose that instructs with code that
-acts. Live tracker: `docs/PLAN-v06-ledger.md`; evidence: `docs/archive/plugin-improvement.md`.
+acts. Live tracker: `docs/archive/a92e876/PLAN-v06-ledger.md`; evidence: `docs/archive/plugin-improvement.md`.
 
 **Stops losing work**
 - Child processes now die with their parent (`start_new_session` + `killpg` on both
@@ -101,7 +101,7 @@ acts. Live tracker: `docs/PLAN-v06-ledger.md`; evidence: `docs/archive/plugin-im
   was only possible because the two calls are logged apart. *(The **+50% input,
   +16% wall** figure first recorded here was wrong — the counter it came from
   double-counts a resumed session. Corrected to +2% input and no wall-clock
-  difference; see G5 in docs/FINDINGS.md.)*
+  difference; see G5 in docs/archive/a92e876/FINDINGS.md.)*
 
 **Stops counting non-evidence**
 - The `trust="self"` vacuous-pass guard no longer counts SKIPPED tests. Five
@@ -205,7 +205,7 @@ builds; a smart model orchestrates and verifies through an objective gate.
 
 ### Skills & docs
 - `lld-principles` loaded on demand in the manager (was ~52% of weekly Claude usage;
-  trimmed ~18%). README + `docs/USAGE` rebuilt against v0.5. `docs/HLD.md` contracts
+  trimmed ~18%). README + `docs/archive/a92e876/USAGE.md` rebuilt against v0.5. `docs/archive/a92e876/HLD.md` contracts
   amended for the async flip.
 
 ---

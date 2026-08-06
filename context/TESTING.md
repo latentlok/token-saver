@@ -91,7 +91,7 @@ produce confusing results.
 work only. Create a throwaway git repo there (`git init`, commit a baseline); the first
 delegation writes `QWEN.md` itself. Everything under `~/scratch/`
 is disposable; delete it when done. If an experiment produces a finding worth keeping,
-write the finding into `docs/FINDINGS.md` and let the artifact go.
+write the finding into `docs/archive/a92e876/FINDINGS.md` and let the artifact go.
 
 ### A. Tools load
 Confirm `qwen_delegate` and `qwen_query` are available, and `/offload` is invocable.
@@ -192,8 +192,8 @@ delegation above:
 
 ## 7. Where the reasoning lives
 
-- `../docs/PRINCIPLES.md` — the structural rules, abstracted. Start here for the reasoning.
-- `../docs/FINDINGS.md` — every measurement behind every design decision. **Read this before
+- `../docs/archive/a92e876/PRINCIPLES.md` — the structural rules, abstracted. Start here for the reasoning.
+- `../docs/archive/a92e876/FINDINGS.md` — every measurement behind every design decision. **Read this before
   concluding a guard is paranoid**; each one was bought with a real failure.
 
 **Two things that will confuse a test run if you don't know them:**
@@ -206,6 +206,6 @@ delegation above:
    that Qwen refuses to touch a spec even under direct order — so the auto-revert path is
    unreachable until you remove `QWEN.md` and re-run. Do that deliberately, in a scratch
    repo.
-- `../docs/HLD.md` — the v2 design: contracts, lifecycle, concurrency.
+- `../docs/archive/a92e876/HLD.md` — the v2 design: contracts, lifecycle, concurrency.
 - `../agents/qwen-manager.md` — the manager's full workflow.
 - `../skills/lld-principles/SKILL.md` — the design discipline it must follow.

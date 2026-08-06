@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tree observations for one run, computed once. Frozen by specs/facts_spec.py.
 
-Step 1 of docs/DESIGN-modular-architecture.md §4. The rule this module exists to
+Step 1 of docs/archive/a92e876/DESIGN-modular-architecture.md §4. The rule this module exists to
 establish:
 
     FACTS are computed once, in dependency order, and read by everyone.

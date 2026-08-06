@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The receipt as a LIST of blocks, not a cascade of branches.
 
-Step 3 of docs/DESIGN-modular-architecture.md §5. Before this, every feature
+Step 3 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. Before this, every feature
 that wanted a line edited an 888-line function, and the receipt's droppable
 region was 20 `if X: c2_blocks.append((f"...", True, 1))` statements whose text,
 droppability and priority were all inline. The measured consequence is in §1:

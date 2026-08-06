@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The few things that can REFUSE a run, behind one interface.
 
-Step 4 of docs/DESIGN-modular-architecture.md §5. A gate answers exactly one
+Step 4 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. A gate answers exactly one
 question -- **refuse, or proceed?** -- and a gate is a module with:
 
     NAME            a stable machine name

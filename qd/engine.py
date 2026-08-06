@@ -350,7 +350,7 @@ def _challenge_brief(profile, task, work_cwd, timeout, session_id=None):
     MEASURED TWICE, and the first measurement was wrong. It read "cold 148,267
     in / warm 222,407 in -- +50% input, +16% wall", and attributed the gap to a
     resumed session re-sending its history. Both halves were mistaken: the
-    counter was double-counting (G5 in docs/FINDINGS.md -- `result.usage` is a
+    counter was double-counting (G5 in docs/archive/a92e876/FINDINGS.md -- `result.usage` is a
     SESSION total, and a resumed process starts it at the previous run's), and
     re-sending history is what EVERY turn of every session does, warm or cold.
 

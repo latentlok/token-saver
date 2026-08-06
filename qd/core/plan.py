@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What was ASKED FOR: settings resolved once, in one place.
 
-Step 6 of docs/DESIGN-modular-architecture.md §5. Four layers of precedence --
+Step 6 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. Four layers of precedence --
 
     call argument  >  project .qwen-delegate.json  >  machine config  >  builtin
 

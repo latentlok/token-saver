@@ -4,7 +4,7 @@ Spec for qd/features/gates/ -- the few things that can REFUSE a run.
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-Step 4 of docs/DESIGN-modular-architecture.md §5. One question, one shape:
+Step 4 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. One question, one shape:
 
     A gate answers REFUSE or PROCEED, and nothing else.
 

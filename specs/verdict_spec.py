@@ -887,7 +887,7 @@ class TheGENUINENextMustCrossACleanGreenBoundary(SlotBattery, Fixture):
                   (context, not instructions -- your task follows)
 
     Link 2 never learns what link 1 said comes next, which is the entire point
-    of the grade. docs/DESIGN-v06-test-first.md §10.3 declares `handoff` as
+    of the grade. docs/archive/a92e876/DESIGN-v06-test-first.md §10.3 declares `handoff` as
     "the four typed lines"; the ordinary chain link shipped one of them.
 
     WHY IT HID. Two readers share one document and only one of them was

@@ -13,7 +13,7 @@ further, never interleaves them -- so they hold on any box. This file
 carries exactly those, so the locks that keep two agents off one tree or one
 GPU are enforced by CI rather than by whoever remembers to run dispatch_spec
 by hand (the 0.4.0 cross-process endpoint slot shipped with zero CI
-coverage; docs/PENDING.md carried the item).
+coverage; docs/archive/a92e876/PENDING.md carried the item).
 
 Claims:
 

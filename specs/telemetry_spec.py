@@ -4,7 +4,7 @@ Spec for per-phase run telemetry -- where a run's wall-clock GOES (PARKED D).
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-docs/PARKED.md:126-128 states the gap: "gate runs and subprocess work are not
+docs/archive/a92e876/PARKED.md:126-128 states the gap: "gate runs and subprocess work are not
 calls in the log, so wall-clock attribution stops at the executor boundary."
 
 The defect underneath it is arithmetic, not cosmetic. `duration_ms`

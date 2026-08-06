@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What one run OWNS, and must dispose of. Frozen by specs/scope_spec.py.
 
-Step 5 of docs/DESIGN-modular-architecture.md §5. One rule:
+Step 5 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. One rule:
 
     A run disposes of what it owns, and never of what it borrows.
 

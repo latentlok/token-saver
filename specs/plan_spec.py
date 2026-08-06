@@ -4,7 +4,7 @@ Spec for qd/core/plan.py -- settings resolved once, in one place.
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-Step 6 of docs/DESIGN-modular-architecture.md. One rule, and everything else is
+Step 6 of docs/archive/a92e876/DESIGN-modular-architecture.md. One rule, and everything else is
 a consequence of it:
 
     None means "this layer did not answer".

@@ -4,7 +4,7 @@ Spec for the detectors -- the things that OBSERVE a finished run and report.
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-Step 2 of docs/DESIGN-modular-architecture.md §4. Facts are computed once and
+Step 2 of docs/archive/a92e876/DESIGN-modular-architecture.md §4. Facts are computed once and
 read by everyone; findings are pure functions of facts. This file owns the half
 of that rule the facts spec cannot state: what a detector is allowed to cost
 when it goes wrong.

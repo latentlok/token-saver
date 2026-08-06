@@ -19,8 +19,8 @@ spec and in no non-doc source file, and `specs/chain_spec.py:469` exercises
 only the "none" value. PRINCIPLES.md:110-114: "an instrument that can fail
 silently eventually will, and you will not notice."
 
-WHAT §10.3 DECLARES (docs/DESIGN-v06-test-first.md:668-686 -- note that
-docs/PARKED.md:79 points at DESIGN-modular-architecture.md, which has no §10.3;
+WHAT §10.3 DECLARES (docs/archive/a92e876/DESIGN-v06-test-first.md:668-686 -- note that
+docs/archive/a92e876/PARKED.md:79 points at DESIGN-modular-architecture.md, which has no §10.3;
 that is a known doc error, not the design):
 
     none        nothing                        full isolation

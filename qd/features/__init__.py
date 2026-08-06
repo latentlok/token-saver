@@ -1,6 +1,6 @@
 """Features: the things a run can do that are not the run itself.
 
-Step 2 of docs/DESIGN-modular-architecture.md §5. Two roles, deliberately not
+Step 2 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. Two roles, deliberately not
 one interface:
 
     gates/      may REFUSE a run   (few)
