@@ -663,6 +663,16 @@ Green receipt ≈ 8 lines. What to actually look at:
   Change the brief or the gate. The worker was already told mid-run (it is
   switched to diagnose-before-editing on the first repeat); this is the caller
   being told.
+- **`contract`** — path to a criteria document with numbered clauses (`C1:`,
+  `- **C2**:`, `### C3 --`). Turns on three things at once: every clause must
+  have a delivered test naming it or the attempt fails with `UNCOVERED: C2`;
+  the receipt pins `CONTRACT: path @ digest` so a reviewer weeks later can tell
+  whether the file they are reading is the file that ran; and a later chain link
+  refuses if the contract moved since the gate was written against it. Add the
+  path to `spec_globs` too, so the worker cannot edit it.
+- **`review_brief`** (default off) — after the run, asks the worker whether the
+  diff delivers the brief. Advisory only: it never touches STATUS and never
+  reaches the worker. Costs one executor pass on a finished run.
 - **`SUPPRESSED:`** names any of the above that did NOT report — either the
   size cap shed it to fit, or the check itself failed. Read it as *this
   receipt is not telling you those checks were clean*, because a missing

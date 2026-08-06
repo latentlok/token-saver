@@ -1,7 +1,7 @@
 # Handover — after the restructure round
 
-**State: clean. Branch `v0.6`, 76 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,208 tests** (was 1,013).
+**State: clean. Branch `v0.6`, 79 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
+`bash ci/run-specs.sh` → exit 0, **1,227 tests** (was 1,013).
 **All five patterns from DESIGN §7 are built.**
 **Steps 1–7 done; 8's user-visible half done. The one real gap is `core/pipeline.py` — see below.**
 Verified live against `snowy` several times, including two mutation-checked live runs.
@@ -179,15 +179,14 @@ caller that has never misbehaved.
    *Also nominally missing from §5: `surface/schema.py` and `surface/runlog.py`
    — but those are MOVES of `qd/schemas.py` and `qd/runlog.py`. Cosmetic; left
    undone on purpose rather than churned for a tick in a table.*
-2. **A2 + A4 — contract pinning and clause coverage. THE remaining feature.**
-   The red gate's fourth check is unbuilt because it needs a contract format.
-   With it, *"failed for a legible reason"* stops being an exception-type
-   heuristic and becomes exact: the traceback must name the entry point the
-   contract declares missing. It also buys the receipt line the design wants
-   most — *your brief had 5 clauses, the gate covers 3, C3 is UNCOVERED* — and
-   §6.2 is explicit that `UNCOVERED` should be a **status change, not a
-   warning**. Design is written (DESIGN-v06-test-first §3.3, §6.2); this is the
-   largest single item left and deserves a session of its own.
+2. ~~**A2 + A4**~~ **DONE.** `qd/core/contract.py`, `features/guards/clauses.py`
+   (coverage gates link 1), `features/gates/contract.py` (the cross-link pin),
+   and the non-droppable `CONTRACT:` receipt line. **One thing it did NOT
+   close:** the red gate's check 3 is still an exception-type heuristic, because
+   exactness needs the contract to declare its ENTRY POINT as a symbol rather
+   than as prose. `red.py`'s docstring says so rather than claiming a precision
+   it lacks — closing it means extending the contract format, not the gate.
+
 3. **The free ones:** the two playbooks, a doctor check, the skill pass, server
    lifecycle, G5 (cold-vs-warm retry, answerable from existing telemetry).
 4. **Release:** 0.6.0 is bumped and the changelog written. PR → CI →
