@@ -617,7 +617,7 @@ def accum_stats(cum, st, attempt=True):
     # Same rule for the ACTIVITY counts, which the loop above SUMS: one attempt
     # that reported no `stats` block makes the total an undercount, and an
     # undercount labelled "measured" is exactly the streamed-zero lie one level
-    # up -- now on a number a receipt prints (qd/verdict.py:509).
+    # up -- now on a number a receipt prints (qd/verdict.py:566).
     #
     # The token ladder above cannot be copied here. It is memoryless over its
     # value set, and with only "stats"/"none" neither ordering works: let "none"
@@ -629,11 +629,16 @@ def accum_stats(cum, st, attempt=True):
     #
     # A missing key is neutral rather than "none": accum_stats is called with no
     # stats at all for a pass that produced no telemetry (the challenge pass,
-    # qd/engine.py:1579), and such a call adds 0 to every sum. Nothing was
+    # qd/engine.py:1600), and such a call adds 0 to every sum. Nothing was
     # undercounted, so nothing may be downgraded. Every real attempt goes
     # through parse_stats, which always sets the key.
+    #
+    # "unset" is refused on the way IN for the same reason it exists on the way
+    # out: it is the absence of an observation, not one. Accepting it would let
+    # a cum that already read "stats" merge with a nothing-happened seed and
+    # come out "partial", inventing an undercount nobody measured.
     now = st.get("stats_source")
-    if now:
+    if now and now != "unset":
         was = cum.get("stats_source", "unset")
         cum["stats_source"] = (now if was == "unset"
                                else was if was == now else "partial")

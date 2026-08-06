@@ -116,11 +116,30 @@ def detect_test_cmd(cwd):
         # `*.py`, not unittest's default `test*.py`, for the same reason the
         # pytest branches above override python_files: the gate convention here
         # is `*_spec.py`, which `test*.py` matches NONE of. No single glob spans
-        # test_*.py / *_test.py / *_spec.py, and a pattern matching only a
-        # SUBSET exits 0 having graded part of the suite -- the silent skip the
-        # comment above says must not happen, wearing a green receipt. Quoted so
-        # the shell (these run under shell=True) cannot expand it against the
-        # project root before unittest ever sees it.
+        # test_*.py / *_test.py / *_spec.py, so the choice is which way to be
+        # wrong, and collecting too little is the worse way -- it exits 0 having
+        # graded a SUBSET, the silent skip the comment above says must not
+        # happen, wearing a green receipt.
+        #
+        # The cost is real and is accepted deliberately: `*.py` also imports
+        # every NON-test module in the directory. Measured 2026-08-06 on a
+        # package-shaped tests/ holding a helpers.py that fails to import --
+        # `-t . -v` gave "Ran 1, OK, exit 0"; `-t . -p "*.py" -v` gives
+        # "FAILED (errors=1), exit 1", and __init__.py is imported TWICE, so any
+        # side effect in it runs twice. A conftest.py gets imported too. So a
+        # broken helper now turns the gate red instead of sitting unnoticed.
+        # That is the right trade for a GATE -- a loud false red gets looked at,
+        # a silent partial grade does not -- but it is a behaviour change, not a
+        # free win. Pinned by DetectedCommandActuallyRuns's package fixtures.
+        #
+        # The pattern is quoted because these run under shell=True and a bare
+        # `*.py` would be glob-expanded against the project root before unittest
+        # ever saw it. {d} is deliberately NOT quoted to match: the gate pins the
+        # bare spelling in two assertions that predate this fix
+        # (specs/bootstrap_spec.py:263 `-s t `, :269 `unittest discover -s
+        # tests`), and quoting it reddens both -- verified 2026-08-06. So a
+        # test_dir containing a space stays broken here; it needs the gate
+        # changed first, which is not this fix's to do.
         return f'python3 -m unittest discover -s {d}{top} -p "*.py" -v'
     return ""
 

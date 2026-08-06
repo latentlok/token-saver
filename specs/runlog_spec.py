@@ -115,6 +115,42 @@ class RecordShape(Fixture):
         r = runlog.leverage_record("q", self.cwd, "ok", "v", {}, 0)
         self.assertEqual(r["token_source"], "none")
 
+    def test_the_activity_counts_are_labelled_measured_or_not(self):
+        # The record writes tools.calls and lines_added as 0 whether they were
+        # measured at 0 or never reported (a streamed run carries no `stats`
+        # block on the wire). token_source was projected here from the start;
+        # stats_source was not, so every persisted record kept the unlabelled
+        # zero -- and THIS is the copy read back later, when nobody remembers
+        # which runs were streamed. An unlabelled zero is a zero that gets
+        # averaged.
+        r = self.rec()
+        self.assertIn("stats_source", r)
+        streamed = dict(STATS, stats_source="none", tools=0, lines_added=0)
+        rs = runlog.leverage_record("q", self.cwd, "ok", "v", streamed, 0)
+        measured = dict(STATS, stats_source="stats", tools=0, lines_added=0)
+        rm = runlog.leverage_record("q", self.cwd, "ok", "v", measured, 0)
+        # Same numbers on both records -- only the label separates them.
+        self.assertEqual((rs["tools"]["calls"], rs["lines_added"]),
+                         (rm["tools"]["calls"], rm["lines_added"]))
+        self.assertEqual(rs["stats_source"], "none")
+        self.assertEqual(rm["stats_source"], "stats")
+
+    def test_stats_source_defaults_to_none_string(self):
+        # Mirrors token_source's default exactly: a record assembled from no
+        # stats at all claims no measurement.
+        r = runlog.leverage_record("q", self.cwd, "ok", "v", {}, 0)
+        self.assertEqual(r["stats_source"], "none")
+
+    def test_a_partly_unmeasured_run_keeps_its_label_to_disk(self):
+        # accum_stats reports "partial" when one attempt of several reported no
+        # stats, which makes the summed counts an UNDERCOUNT. The record must
+        # carry that through verbatim rather than flattening it to a two-value
+        # measured/not -- the run log is where an undercount would otherwise be
+        # read as a measurement forever.
+        r = runlog.leverage_record("q", self.cwd, "ok", "v",
+                                   dict(STATS, stats_source="partial"), 0)
+        self.assertEqual(r["stats_source"], "partial")
+
     def test_c5_executor_and_cost_always_present(self):
         r = self.rec()
         self.assertEqual(r["executor"], "qwen-local")

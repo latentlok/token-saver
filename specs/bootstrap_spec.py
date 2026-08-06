@@ -411,6 +411,59 @@ class DetectedCommandActuallyRuns(unittest.TestCase):
         put(d, "t/alpha_spec.py", spec_src("alpha"))
         self.assertRan(*self.detected_run(d), "alpha")
 
+    def test_an_ordinary_helper_module_beside_the_tests_is_harmless(self):
+        # The widened `-p "*.py"` imports NON-test modules too, which the
+        # default `test*.py` never did. The ordinary case must survive that, or
+        # the parity fix above costs every suite that keeps a helper next to
+        # its tests -- which is most of them.
+        d = tempfile.mkdtemp()
+        put(d, "tests/__init__.py", "")
+        put(d, "tests/helpers.py", "VALUE = 7\n")
+        put(d, "tests/test_thing.py",
+            "import unittest\n"
+            "from .helpers import VALUE\n"
+            "class Case(unittest.TestCase):\n"
+            "    def test_case(self):\n"
+            "        print('RAN:thing')\n"
+            "        self.assertEqual(VALUE, 7)\n")
+        # Also pins the relative import, and so the `-t .` half of the fix: the
+        # start directory has to stay a PACKAGE for `from .helpers` to resolve.
+        # Dropping `-t .` unconditionally passes every other test in this class
+        # and breaks exactly this (measured 2026-08-06: "attempted relative
+        # import with no known parent package").
+        self.assertRan(*self.detected_run(d), "thing")
+
+    def test_a_helper_that_cannot_import_now_fails_LOUDLY_not_silently(self):
+        # The accepted COST of the widened pattern, pinned so it stays a
+        # decision rather than a surprise. No single glob spans test_*.py /
+        # *_test.py / *_spec.py, so the pattern has to widen, and a widened
+        # pattern imports the broken helper too.
+        #
+        # Measured 2026-08-06 on this exact tree: the old `-t . -v` reported
+        # "Ran 1 test ... OK", exit 0 -- unittest's default test*.py never
+        # looked at helpers.py, so the breakage sat there wearing a green
+        # receipt. It is a red gate now.
+        #
+        # That is the right way round for a GATE -- a false red gets read, a
+        # green that graded a subset does not -- but it IS a behaviour change,
+        # so it is asserted rather than left to be rediscovered as a
+        # regression. The test still gets collected: this is a loud failure,
+        # not a discovery crash like the one this class exists for.
+        d = tempfile.mkdtemp()
+        put(d, "tests/__init__.py", "")
+        put(d, "tests/helpers.py", "import a_module_that_does_not_exist\n")
+        put(d, "tests/test_thing.py", spec_src("thing"))
+        cmd, p, out = self.detected_run(d)
+        self.assertNotIn(
+            "Start directory is not importable", out,
+            f"{cmd!r} crashed on discovery rather than reporting the helper")
+        self.assertIn("RAN:thing", out,
+                      f"{cmd!r} stopped collecting the real test because a "
+                      f"neighbouring module was broken:\n{out[-600:]}")
+        self.assertNotEqual(p.returncode, 0,
+                            f"{cmd!r} graded this suite green while a module "
+                            f"in it could not be imported:\n{out[-600:]}")
+
     def test_the_fixtures_above_are_shaped_like_this_repo(self):
         # Keeps the fixtures honest. If this repo's own layout drifts away
         # from what the fixtures model, these tests stop being evidence about

@@ -504,6 +504,15 @@ def leverage_record(tool, cwd, status, verdict, stats, peak,
         "tokens_main": stats.get("tokens_main") or _tok_zero(),
         "tokens_overhead": stats.get("tokens_overhead") or _tok_zero(),
         "token_source": stats.get("token_source") or "none",
+        # Projected for the same reason token_source is, and it was the more
+        # urgent of the two: `tools.calls` and `lines_added` below are written
+        # as 0 whether they were measured at 0 or never reported at all (a
+        # streamed run carries no `stats` block). A receipt can survive that --
+        # qd/verdict.py:566 is truthiness-guarded -- but THIS is the copy kept
+        # for later analysis, where nobody is around to remember which runs
+        # were streamed. An unlabelled zero in the run log is a zero that will
+        # be averaged.
+        "stats_source": stats.get("stats_source") or "none",
         "peak_context": peak,
         "verdict_chars": v_chars,
         "verdict_tokens_est": v_tokens,
