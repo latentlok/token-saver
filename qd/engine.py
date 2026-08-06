@@ -1014,6 +1014,19 @@ def _delegate(args, t0_dir):
     # declared, silently widening a boundary the call had just narrowed.
     shell_allow = setting("shell_allow", args, cfg)
     mcp_allow = setting("mcp_allow", args, cfg)
+    # The bootstrap notice PROMISES the worker will locate code through the
+    # graph instead of reading files. Nothing made that true: the worker has no
+    # shell unless one is granted, so the promise was kept only by callers who
+    # happened to wire `shell_allow` themselves. Grant the READ-ONLY
+    # subcommands when a graph actually exists here.
+    #
+    # Only under `scoped`: `auto-edit` has no shell at all, so adding patterns
+    # there would be a permission that reads as granted and does nothing.
+    # `update` is never included -- see qd.graph.READ_ONLY.
+    if approval_mode == "scoped" and graph.read_state(cwd):
+        _ro = graph.read_only_allow()
+        if _ro not in (shell_allow or []):
+            shell_allow = list(shell_allow or []) + [_ro]
     # Default: project config, else 3; clamped 1..10 -- the schema has promised
     # both since v1, and the engine port had silently dropped them.
     max_iter = (args.get("max_iterations")

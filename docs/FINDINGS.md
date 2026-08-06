@@ -916,6 +916,39 @@ The fix itself was then verified at the seam: with a project permitting
 `^echo`, a caller passing `[]` resolves to `[]` and a silent caller resolves to
 `["^echo"]`.
 
+## Concurrency on snowy: 2 workers, not 1 and not 4
+
+Re-measured after the first attempt was retracted for running on a contended
+GPU. Every flaw the retraction listed is fixed: levels **interleaved**
+(1,2,3,1,2,3) rather than sequential, two rounds, a longer generation than the
+first probe's ~500 tokens, and the K=1 arm run again at the very end as a drift
+control. 14 real delegations.
+
+    K   wall (median)   per-run (median)   throughput
+    1        11.0s            11.0s          5.4/min
+    2        14.7s            13.0s          8.2/min   +52%
+    3        21.1s            20.8s          8.5/min   +57%
+
+**Drift control: K=1 was 11.0s first and 11.0s last.** Nothing moved under the
+measurement, which is what makes the rest of the table worth reading.
+
+**The first reading was wrong in the other direction.** It reported flat
+throughput and concluded the endpoint serialises. It does not -- vLLM batches
+this workload perfectly well, and contention alone produced that result. Both
+the original claim and its retraction are kept above/below this entry, because
+the sequence is the lesson: an uncontrolled measurement did not merely fail to
+answer, it answered CONFIDENTLY AND BACKWARDS.
+
+**The actionable shape: 2.** Going 1 → 2 buys **+52% throughput** for +18%
+per-run latency. Going 2 → 3 buys **+4%** for another +60% latency. The knee is
+at 2, and `parallel_max: 4` is past it -- a caller watching one delegation waits
+nearly twice as long for throughput they do not get.
+
+Caveat, stated because it is the one thing still not verified: the GPU was idle
+per the operator, not per a reading. It is remote, so `nvidia-smi` was not
+available. The drift control is the evidence that nothing changed DURING the
+run; it cannot prove the machine was quiet before it.
+
 ## Concurrency on snowy — MEASUREMENT RETRACTED, another process held the GPU
 
 An earlier version of this entry reported that snowy "serialises" and that

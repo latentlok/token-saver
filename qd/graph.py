@@ -90,6 +90,28 @@ def graphify_cmd(cwd, files=None):
     return [graphify_bin(), "update", cwd, "--no-cluster"]
 
 
+# The read-only subcommands, and ONLY those. `^graphify\b` would also permit
+# `graphify update`, which on a repo with a semantic index configured can bill a
+# cloud account -- the A10 lesson: a command pattern grants every SUBCOMMAND the
+# command has, so the real boundary is the most powerful one reachable through
+# it (PRINCIPLES §III).
+#
+# `update` is deliberately absent even though the plugin itself runs it: the
+# plugin runs it AFTER the verdict, on its own terms, where the cost is a
+# decision somebody made. A worker that can call it decides for them.
+READ_ONLY = ("explain", "query", "affected", "god-nodes", "stats", "show")
+
+
+def read_only_allow():
+    """The `shell_allow` pattern that lets a WORKER read the graph.
+
+    Returned rather than applied, because whether to grant it is a decision
+    about the run and belongs to whoever owns the run's permissions. This module
+    owns only what graphify is.
+    """
+    return r"^graphify (?:%s)\b" % "|".join(READ_ONLY)
+
+
 def bootstrap_line():
     """One SETUP sentence about the code graph, for a first delegation on a fresh repo.
 

@@ -663,6 +663,16 @@ Green receipt ≈ 8 lines. What to actually look at:
   Change the brief or the gate. The worker was already told mid-run (it is
   switched to diagnose-before-editing on the first repeat); this is the caller
   being told.
+- **`parallel_max`** — measured on this endpoint: **2 is the knee.** 1 → 2 buys
+  +52% throughput for +18% per-run latency; 2 → 3 buys +4% for another +60%.
+  Past 2, a caller watching one delegation waits nearly twice as long for
+  throughput they do not get. See FINDINGS for the method.
+- **The worker and the code graph.** If `graphify` has indexed the repo, a
+  `scoped` run now grants the worker the READ-ONLY subcommands automatically —
+  you no longer have to wire `shell_allow` yourself. `update` is never granted:
+  it can bill a cloud account, and the plugin runs it after the verdict on its
+  own terms. Under `auto-edit` there is no shell at all, so nothing is granted
+  and the worker falls back to reading files.
 - **`contract`** — path to a criteria document with numbered clauses (`C1:`,
   `- **C2**:`, `### C3 --`). Turns on three things at once: every clause must
   have a delivered test naming it or the attempt fails with `UNCOVERED: C2`;
