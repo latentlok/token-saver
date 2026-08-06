@@ -62,8 +62,8 @@ plumbing, batch-of-chains, handoff forwarding) all shipped.
 | A3 | ~~**Tier map**~~ **DONE** — `qd/core/tiers.py`. Declared never guessed; refuses with the question (and the JSON to paste) when a seam is crossed and nothing is declared. `detect_test_cmd` stays the fallback | §2.2 | done |
 | A4 | ~~**Clause coverage**~~ **DONE** — `features/guards/clauses.py`. A GUARD, so it fails the attempt and tells the worker which clause is missing, rather than demoting at the end | §6.2 | done |
 | A5 | ~~**`SEAM CROSSED, UNIT-GATED ONLY`**~~ **DONE** — `features/detectors/seam_crossed.py`. Predicate on the new SYMBOL, and `mocked_seams` became a FACT because a second reader appeared (§4's own prescription) | §7 | done |
-| A6 | **`*_qwen` naming rule** in generated `QWEN.md` + `_created()` compliance check | §2.5 | `provenance/` feature |
-| A7 | **`playbooks/write-gate.md`, `playbooks/implement.md`** | §4.2 | documents |
+| A6 | ~~**`*_qwen` naming rule**~~ **DONE** — the rule is stated in `templates/QWEN.md` (lines ~74 and ~148, both worker-facing copies); enforced by `qd/features/detectors/unmarked_tests.py`, a detector rather than the `_created()` compliance check or `provenance/` feature first sketched here | §2.5 | `features/detectors/` |
+| A7 | ~~**`playbooks/write-gate.md`, `playbooks/implement.md`**~~ **DONE** — both exist, pinned by `specs/playbooks_spec.py` | §4.2 | documents |
 | A8 | ~~**Contract lifecycle**~~ **DONE** — scoped to stale PINS rather than symbol references: a pin is mechanical and exact, where 'symbols named in prose' is a guess, and a doctor check that guesses gets switched off | §11 item 8 | done |
 
 **Residual risk, unchanged:** both links read the same brief. `challenge_brief`
