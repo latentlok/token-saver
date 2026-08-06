@@ -55,5 +55,5 @@ version you installed until you run:
 
 ## Read next
 
-`AGENT.md` — the full worked example, for an agent driving the tool.
+`AGENT.md` — the reference for an agent driving the tool.
 `ARCHITECTURE.md` — how it works, in one page.
