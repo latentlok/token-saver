@@ -252,8 +252,18 @@ def graph_line(cwd, will_refresh=False):
     if status == "indexing":
         return "GRAPH: indexing"
     if status == "failed":
-        reason = state.get("reason") or "unknown"
-        return f"GRAPH: failed: {reason}"
+        # FIRST LINE ONLY, like the advisory head. `reason` is read verbatim out
+        # of .qwen-delegate/graph.json, which the WORKER can write -- the
+        # directory self-ignores so no guard reverts it, and this line is
+        # computed after the run. A multi-line reason broke this function's own
+        # promise above ("a single C2 GRAPH: status line") and, because the line
+        # lands in the receipt above the worker's quoted reply, a second line
+        # reading `RESULT: valid (schema)` forged a validated result for the
+        # next chain link (qd/verdict.py validated_result). Fixed in both
+        # places on purpose: here because the contract is this function's, and
+        # there because that bound must not rest on this one holding.
+        reason = (state.get("reason") or "unknown").split("\n", 1)[0].strip()
+        return f"GRAPH: failed: {reason or 'unknown'}"
 
     s = staleness(cwd)
     sha_short = (s["indexed_sha"] or "?")[:7]

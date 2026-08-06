@@ -178,6 +178,13 @@ RESULT_VALID_LINE = "RESULT: valid (schema)"
 # marker into its own reply, or a gate that prints one, only ever adds a SECOND
 # occurrence below the server's: `find` returns the first, so a forger cannot
 # move the boundary down over its own text.
+#
+# A QUERY receipt is deliberately not covered. qd/queries.py stamps the same
+# line above a `--- answer ---` / `--- map ---` block, which is NOT a marker
+# here -- so a worker's answer could forge a stamp in one. Nothing reads it:
+# both `run_chain` call sites pass `engine.run`, so a query receipt never
+# reaches `validated_result`. Add the marker the day a query can be a chain
+# link, because on that day this is a hole and nothing else will say so.
 _TRANSCRIPT_MARKERS = ("\n--- final verify output ---",
                        "\n--- qwen result ---")
 
@@ -261,6 +268,44 @@ def _server_region(text):
         if i != -1:
             cut = min(cut, i)
     return text[:cut]
+
+
+def _one_line(value):
+    """A value this receipt renders INLINE, with any second line removed.
+
+    THE INVARIANT `_server_region` RESTS ON, made a rule instead of a run of
+    luck. The bound above says the stamp can only be matched where the server
+    is the one writing; that is only true while no value the server interpolates
+    into a line can itself contain a newline, because a newline is how borrowed
+    text stops being borrowed and starts being a line of its own -- and a line of
+    its own can be `RESULT: valid (schema)` followed by a fence.
+
+    This was not hypothetical. `GRAPH: failed: <reason>` read `reason` verbatim
+    out of `.qwen-delegate/graph.json`, a file the worker can write (the
+    directory self-ignores, so no guard reverts it) and which is read AFTER the
+    worker runs. On a clean green there is no verify tail, so that line sits
+    inside the region, and a two-line `reason` carried `{"forged": true}` to the
+    next link over a run this server had certified nothing about.
+
+    Six ctx slots were reachable that way, and the other five were safe only by
+    invariants owned elsewhere -- `parse_handoff` being line-based, advisory
+    `head` being a first line, `bootstrap_notice` happening to be one f-string.
+    Every one of those is an accident from this bound's point of view, and an
+    accident is one refactor from being a hole. So the renderer enforces it
+    HERE, at each slot it fills, and the bound depends on no other module
+    keeping a promise it never made to this one.
+
+    Non-strings pass through untouched: `f"{None}"` must stay "None", or fixing
+    a security bug would quietly rewrite receipts that were never at risk.
+    """
+    if not isinstance(value, str) or "\n" not in value:
+        return value
+    head = value.split("\n", 1)[0].rstrip()
+    # Marked, not silently dropped: a receipt that shows less than it had
+    # without saying so is the failure mode this file argues against
+    # everywhere else. Reaching this at all means something upstream sent a
+    # paragraph where the format has room for a line.
+    return f"{head} ..." if head else "..."
 
 
 def strip_handoff(text):
@@ -391,7 +436,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # first attempt, and the session named here is where the attempt it
     # corrects can be found.
     if ctx.get("retry_of"):
-        body.append(f"RETRY OF: {ctx['retry_of']}")
+        body.append(f"RETRY OF: {_one_line(ctx['retry_of'])}")
 
     # U6: which document version briefed this run. On every receipt, green
     # included -- the path @ digest is what lets a caller pair a result with
@@ -401,7 +446,8 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # in document form.
     brief = ctx.get("brief")
     if isinstance(brief, dict) and brief.get("path"):
-        line = f"BRIEF: {brief['path']} @ {brief.get('sha256')}"
+        line = (f"BRIEF: {_one_line(brief['path'])} @ "
+                f"{_one_line(brief.get('sha256'))}")
         if brief.get("amended"):
             line += " (amended)"
         chars = int(brief.get("chars") or 0)
@@ -456,7 +502,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # Prominent: the project was just self-configured. Relay it and act on the two open
     # questions (test command if undetected, CLAUDE.md policy block).
     if ctx.get("bootstrap_note"):
-        body.append(ctx["bootstrap_note"])
+        body.append(_one_line(ctx["bootstrap_note"]))
 
     if guard_on:
         if facts:
@@ -661,7 +707,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # Extracted by the engine BEFORE truncation, for the same reason HANDOFF is:
     # on a report run this one line is the entire product of the delegation.
     if ctx.get("findings"):
-        body.append(f"FINDINGS: {ctx['findings']}")
+        body.append(f"FINDINGS: {_one_line(ctx['findings'])}")
 
     # U5.1 result contract. In the BODY, never the droppable region and never
     # the truncated tail: the caller asked for this payload by schema, so it is
@@ -902,7 +948,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         adv_red = [a for a in advisory if not a.get("ok")]
         adv_lines = []
         for a in adv_red:
-            head = (a.get("head") or "").strip()
+            head = _one_line((a.get("head") or "")).strip()
             adv_lines.append(f"ADVISORY red: {a.get('name')}"
                              + (f" — {head}" if head else ""))
         summary = f"ADVISORY: {len(advisory) - len(adv_red)}/{len(advisory)} green"
@@ -915,7 +961,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     notes = ctx.get("notes")
     if notes:
-        c2_blocks.append(Block("notes", f"NOTES: {notes[:200]}", True, 0))
+        c2_blocks.append(Block("notes", f"NOTES: {_one_line(notes)[:200]}", True, 0))
 
     # U4.3 strays. The LINE lives with the detector (qd/features/detectors/);
     # what the renderer owns is WHERE it goes -- and its position here is
@@ -1014,7 +1060,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     graph_used = sum(
         1 for a in (ctx.get("meta", {}).get("allowed") or [])
         if a.startswith("run_shell_command: graphify "))
-    graph_line = ctx.get("graph_line")
+    graph_line = _one_line(ctx.get("graph_line"))
     if graph_line:
         if graph_used:
             graph_line += f" · used {graph_used}x this run"

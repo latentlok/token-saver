@@ -96,12 +96,22 @@ _DEFAULT_BURN_BUDGET = 10_000_000
 # There is no `additionalProperties: false` and no filtering at the wire seam --
 # qd/server.py's tools/call handler passes `params["arguments"]` through as it
 # arrives -- so an off-schema key does reach engine.run on a LONE delegation.
-# The exposure is bounded (a lone run has no next link, so a forged value only
-# colours that run's own prompt, which is the caller lying to their own worker),
-# but it is real, and a comment that overstates a protection is worse than no
-# comment: it stops the next reader from looking. Closing it means filtering
-# reserved keys at that one seam for ALL SIX names at once, which is a change to
-# five args this file's other owners hold and is gated by a spec CI skips
+#
+# EIGHT keys, not the five declared in this file: `_brief` (set at
+# qd/playbook.py:292) and `_batch_size` (qd/server.py:873) are reserved by the
+# same convention and live elsewhere. `_brief` is the one with a demonstrated
+# bite -- its `path` is rendered into the receipt's BRIEF: line, high enough up
+# to sit ABOVE a genuine result stamp, so a caller-supplied newline in it forged
+# a validated result for the next chain link (closed now, in qd/verdict.py's
+# `_one_line`, and pinned by specs/verdict_spec.py::StampedResult). That is this
+# same class of hole with a caller rather than a worker holding the pen.
+#
+# The exposure that remains is bounded (a lone run has no next link, so a forged
+# value only colours that run's own prompt, which is the caller lying to their
+# own worker), but it is real, and a comment that overstates a protection is
+# worse than no comment: it stops the next reader from looking. Closing it means
+# filtering reserved keys at that one seam for ALL EIGHT names at once, which is
+# a change to args other owners hold and is gated by a spec CI skips
 # (dispatch_spec) -- queued deliberately rather than half-applied here.
 #
 # U4.1: the chain position run_chain injects into each link's args. Absent from
