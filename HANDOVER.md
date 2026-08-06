@@ -1,7 +1,8 @@
 # Handover — after the restructure round
 
-**State: clean. Branch `v0.6`, 69 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,172 tests** (was 1,013).
+**State: clean. Branch `v0.6`, 71 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
+`bash ci/run-specs.sh` → exit 0, **1,187 tests** (was 1,013).
+**All five patterns from DESIGN §7 are built.**
 **Steps 1–7 done; 8's user-visible half done. The one real gap is `core/pipeline.py` — see below.**
 Verified live against `snowy` several times, including two mutation-checked live runs.
 
@@ -90,6 +91,8 @@ tangled, the wiring is.* **Pin things where they run, not where they are defined
     qd/core/violation.py    Violation(kind,trail,prompt,rider,notes)
     qd/core/attempt.py      Attempt(n, of, changed, writes)
     qd/core/runnable.py     of(args) -> Run | ChainOfRuns
+    qd/core/prompt.py       compose/tail              -- the Decorator
+    qd/core/pipeline.py     ratchet_minimum           -- started
     qd/features/detectors/  6 detectors, enumerable
     qd/features/gates/      2 gates (challenge, red)
     qd/features/guards/     4 guards (specs, brief, touch_scope, fixtures)
@@ -112,7 +115,7 @@ Detectors are now `detect(facts, scope, plan)`. There is no bag to grow back.
 
 ## Honest measurements
 
-**`_delegate`: 1,106 → 1,135 → 953 lines.** It GREW through steps 2–6 and only
+**`_delegate`: 1,106 → 1,135 → 949 lines.** It GREW through steps 2–6 and only
 began shrinking when the VERBS started leaving. The diagnosis is the important
 part: **every step until then extracted a NOUN** — facts, findings, scope, plan,
 blocks — **and none extracted the sequence that orders them.** `core/status.py`
@@ -165,11 +168,14 @@ caller that has never misbehaved.
 
 ## What is left, best first
 
-1. **`core/pipeline.py` — the rest of the phase sequence. THE structural gap.**
-   `core/status.py` and `features/guards/` are the first two verbs out (1,135 →
-   953 lines, golden byte-identical throughout). Still owed: the preflight, the
-   invoke/prefilter/gate sequence, and the post-run region. This is what makes
-   `_delegate` a coordinator instead of the run.
+1. **`core/pipeline.py` — started, and read its docstring before continuing.**
+   `status.py` and `features/guards/` took the two phases that were whole
+   IDEAS. What remains in `_delegate` is largely **orchestration** — run the
+   gate, share the verdict, time it, thread the result on — which is the loop's
+   own job and does not improve by being moved somewhere and called. What
+   belongs in `pipeline.py` is the *logic* those phases carry:
+   `ratchet_minimum` is the first, and its "sum across files" rule had lived in
+   a comment with no test. Look for more of those, not for more phases.
    *Also nominally missing from §5: `surface/schema.py` and `surface/runlog.py`
    — but those are MOVES of `qd/schemas.py` and `qd/runlog.py`. Cosmetic; left
    undone on purpose rather than churned for a tick in a table.*
