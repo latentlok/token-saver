@@ -534,6 +534,44 @@ def peak_context(stdout):
     return best
 
 
+def turn_tokens(stdout):
+    """{prompt, completion} summed over the run's OWN assistant turns, or None.
+
+    The companion to peak_context: same records, summed instead of maxed.
+
+    It exists because `result.usage` is a SESSION counter, not a run counter.
+    `qwen -r <id>` replays the stored session, and replayUsageMetadata() feeds
+    every stored assistant turn's usageMetadata back through emitUsageMetadata(),
+    which does `cumulative.promptTokens += ...` -- so a resumed process starts
+    its counter at the previous run's total. Measured 2026-08-06 against
+    snowy/vLLM through a logging reverse proxy:
+
+        cold 1st call   turns summing 49,626    result.usage  49,626
+        WARM 2nd call   turns summing 101,670   result.usage 152,075
+
+    Nobody sent the extra 50,405. The proxy's request bodies carry the first
+    task exactly once and grow 2 -> 4 -> 6 -> 8 -> 10 messages like any other
+    conversation. Replayed turns are NOT re-emitted as assistant records, so
+    summing the records is the run's own cost.
+
+    None rather than zero when no turn carried usage: "nothing reported" and
+    "reported nothing" send a reader to different places, and only the first
+    means fall back to result.usage.
+    """
+    prompt = completion = 0
+    seen = False
+    for m in records(stdout):
+        if not isinstance(m, dict) or m.get("type") != "assistant":
+            continue
+        u = (m.get("message") or {}).get("usage") or {}
+        i, o = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+        if i or o:
+            seen = True
+            prompt += i
+            completion += o
+    return {"prompt": prompt, "completion": completion} if seen else None
+
+
 def tok_zero():
     return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "thoughts": 0}
 
@@ -650,6 +688,17 @@ def parse_stats(stdout):
             tok = {"prompt": int(u.get("input_tokens") or 0),
                    "completion": int(u.get("output_tokens") or 0),
                    "total": 0, "cached": 0, "thoughts": 0}
+            # The turns win where they exist: `usage` is cumulative for the
+            # SESSION, so on a resumed run it carries every previous run's
+            # tokens too (turn_tokens; measured at 152,075 reported against
+            # 101,670 sent). On a cold run the two are equal to the token --
+            # 49,626/49,626, 49,611/49,611, 74,862/74,862 -- so this changes
+            # only the runs that were wrong. `usage` stays the floor for a run
+            # that ended before any turn reported.
+            own = turn_tokens(stdout)
+            if own is not None:
+                tok["prompt"] = own["prompt"]
+                tok["completion"] = own["completion"]
             if tok["prompt"] or tok["completion"]:
                 tok["total"] = tok["prompt"] + tok["completion"]
                 out["token_source"] = "usage"

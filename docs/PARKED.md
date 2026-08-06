@@ -27,7 +27,6 @@ thing and this list stays another.
 | Parked item | Blocked until | Then it lives in |
 |---|---|---|
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
-| **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
 
 ### Not blocked by anything — can ship whenever
@@ -120,7 +119,7 @@ So it records and reports. `doctor` already prints the exact `kill` for a human
 who wants it, and the recorded VERSION is what lets anyone see that an old build
 is the one serving — which was most of the harm.
 
-**Measurement (A5).** A `PAID:` receipt line. *(A7 is closed —
+~~**Measurement (A5).**~~ **DONE** — the `PAID:` line. The only number on a receipt about the CALLER rather than the worker, and the one the product rests on. Excludes its own length and says so; silent when the worker burned nothing. *(A7 is closed —
 `advisory_gates` is documented in USAGE.md. It pairs with the `*_qwen` marker
 (A6) as the other half of grading worker tests.)*
 

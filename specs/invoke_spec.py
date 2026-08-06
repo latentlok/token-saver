@@ -689,6 +689,95 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(invoke.peak_context(RESULT_JSON), 20285)
         self.assertEqual(invoke.peak_context("garbage"), 0)
 
+    # --- G5 correction: result.usage is a SESSION counter, not a RUN counter ---
+    #
+    # Measured 2026-08-06 against snowy/vLLM through a logging reverse proxy, so
+    # the wire and the counter could be compared directly:
+    #
+    #   cold 1st call   assistant turns 24,734 + 24,892 = 49,626   result.usage 49,626
+    #   WARM 2nd call   turns 25,059 + 25,304 + 25,393 + 25,914
+    #                                              = 101,670   result.usage 152,075
+    #
+    # The 50,405 gap is not tokens anyone sent. `qwen -r <id>` replays the stored
+    # session: SessionReplay.replayUsageMetadata() feeds every stored assistant
+    # turn's usageMetadata back through emitUsageMetadata(), which does
+    # `cumulative.promptTokens += ...`. A resumed process therefore STARTS its
+    # counter at the previous run's total. The proxy log settles it -- the warm
+    # request bodies contained the first task exactly ONCE, and the conversation
+    # grew 2 -> 4 -> 6 -> 8 -> 10 messages like any other.
+    #
+    # This is what produced the retired "resuming re-sends the whole prompt"
+    # finding, and a receipt that over-reports a warm run by a whole prior
+    # session is the silent-failure class this file exists to catch.
+
+    def test_resumed_run_reports_its_own_turns_not_the_session_counter(self):
+        # The warm second call above, in the shape the executor emits it.
+        resumed = "\n".join(json.dumps(r) for r in [
+            {"type": "assistant", "message": {"usage": {"input_tokens": 25059,
+                                                        "output_tokens": 158}}},
+            {"type": "assistant", "message": {"usage": {"input_tokens": 25304,
+                                                        "output_tokens": 62}}},
+            {"type": "assistant", "message": {"usage": {"input_tokens": 25393,
+                                                        "output_tokens": 120}}},
+            {"type": "assistant", "message": {"usage": {"input_tokens": 25914,
+                                                        "output_tokens": 66}}},
+            {"type": "result", "result": "ok", "session_id": "s-warm",
+             "duration_ms": 8033, "num_turns": 4,
+             "usage": {"input_tokens": 152075, "output_tokens": 872}},
+        ])
+        st = invoke.parse_stats(resumed)
+        self.assertEqual(st["tokens"]["prompt"], 101670)
+        self.assertEqual(st["tokens"]["completion"], 406)
+        self.assertEqual(st["tokens_main"]["prompt"], 101670)
+        # Still measured, and still labelled as the coarse source it is.
+        self.assertEqual(st["token_source"], "usage")
+
+    def test_cold_run_is_unchanged_by_that_correction(self):
+        # The control. On every cold call measured, the per-turn sum equalled
+        # result.usage EXACTLY -- 49,626/49,626, 49,611/49,611, 74,862/74,862 --
+        # so preferring the turns costs a cold run nothing. If that ever stops
+        # holding, this is the test that says so.
+        cold = "\n".join(json.dumps(r) for r in [
+            {"type": "assistant", "message": {"usage": {"input_tokens": 24820,
+                                                        "output_tokens": 68}}},
+            {"type": "assistant", "message": {"usage": {"input_tokens": 24915,
+                                                        "output_tokens": 125}}},
+            {"type": "assistant", "message": {"usage": {"input_tokens": 25127,
+                                                        "output_tokens": 50}}},
+            {"type": "result", "result": "ok", "session_id": "s-cold",
+             "duration_ms": 5100, "num_turns": 3,
+             "usage": {"input_tokens": 74862, "output_tokens": 243}},
+        ])
+        st = invoke.parse_stats(cold)
+        self.assertEqual(st["tokens"]["prompt"], 74862)
+        self.assertEqual(st["tokens"]["completion"], 243)
+
+    def test_a_run_with_no_turn_usage_still_reports_what_it_has(self):
+        # A run can end before any assistant turn carries usage (an early error,
+        # an adapter that omits it). Reporting 0 there would void BURN and COST
+        # for exactly the runs worth investigating, so result.usage remains the
+        # floor -- the turns are preferred, never required.
+        st = invoke.parse_stats(json.dumps({
+            "type": "result", "result": "done", "session_id": "s-1",
+            "duration_ms": 48995, "num_turns": 7,
+            "usage": {"input_tokens": 1_200_000, "output_tokens": 3_400},
+        }))
+        self.assertEqual(st["tokens"]["prompt"], 1_200_000)
+        self.assertEqual(st["tokens"]["completion"], 3_400)
+
+    def test_turn_tokens_reports_absence_as_absence(self):
+        # None, not a zero: "no turn said anything" and "every turn cost 0" are
+        # different findings, and only one of them means fall back.
+        self.assertIsNone(invoke.turn_tokens("garbage"))
+        self.assertIsNone(invoke.turn_tokens(json.dumps(
+            {"type": "assistant", "message": {"usage": {"input_tokens": 0,
+                                                        "output_tokens": 0}}})))
+        self.assertEqual(
+            invoke.turn_tokens(json.dumps(
+                {"type": "assistant",
+                 "message": {"usage": {"input_tokens": 7, "output_tokens": 2}}})),
+            {"prompt": 7, "completion": 2})
+
     def test_compaction_thresholds_match_measured(self):
         warn, auto = invoke.compaction_thresholds(196608)
         self.assertEqual(int(auto), 163608)

@@ -33,3 +33,31 @@ step 3 is where they became load-bearing rather than incidental:
 from collections import namedtuple
 
 Block = namedtuple("Block", "kind text droppable priority")
+
+
+def paid_line(receipt_chars, tokens_in, tokens_out):
+    """A5: the trade, on the run that made it.
+
+    Every other number on a receipt is about the WORKER -- what it burned, how
+    long it took, what it changed. This is the only one about the CALLER, and it
+    is the one the whole product rests on: *judgment stays with the expensive
+    scarce thing, execution goes to the cheap plentiful thing.* That trade is
+    either solvent on this run or it is not, and until now nothing said which.
+
+    `receipt_chars` EXCLUDES this line, and the text says so. Including it would
+    mean the number described a receipt that only exists because the number was
+    added -- and a self-referential measurement is one nobody can check.
+
+    Silent when the worker burned nothing: a refusal or a cached run made no
+    trade, and a leverage figure over zero work is a number pretending to be a
+    measurement.
+    """
+    if not tokens_in:
+        return None
+    # ~4 chars per token is the same rough conversion the brief-size guard
+    # uses. Approximate on purpose, and marked `~`: the point is the ORDER of
+    # magnitude -- 200x versus 2x -- not a figure anyone should reconcile.
+    paid = max(1, receipt_chars // 4)
+    return (f"PAID: ~{paid:,} tokens of your context (this receipt, excluding "
+            f"this line) for {tokens_in:,} in / {tokens_out:,} out on free "
+            f"compute -- ~{(tokens_in + tokens_out) // paid:,}x leverage")

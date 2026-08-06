@@ -11,7 +11,7 @@ from qd.runlog import (
 from qd import limits, refs
 from qd.features import detectors
 from qd.features.detectors import find as _finding
-from qd.surface.receipt import Block
+from qd.surface.receipt import Block, paid_line
 
 
 RESULT_CAP = 3000
@@ -987,13 +987,22 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # every pass of the loop below, so the line reflects the FINAL set of drops
     # rather than a snapshot taken partway through.
     suppressed = []
+    cum_for_paid = ctx.get("cum") or {}
     failed_detectors = list(ctx.get("detections_failed") or [])
 
     def _assembled():
         parts = list(body)
         for blk in c2_blocks:
             parts.append(blk.text)
+        # A5: computed from the parts assembled SO FAR, so the figure describes
+        # the receipt the caller would have had without it. Appended last for
+        # the same reason.
+        _paid = paid_line(sum(len(p) + 1 for p in parts),
+                          int((cum_for_paid.get("tokens") or {}).get("prompt") or 0),
+                          int((cum_for_paid.get("tokens") or {}).get("completion") or 0))
         _sup = _suppressed_line(suppressed, failed_detectors)
+        if _paid:
+            parts.append(_paid)
         if _sup:
             # NON-DROPPABLE by construction: it is not in c2_blocks at all, so
             # the loop cannot shed the one line that reports shedding. A
