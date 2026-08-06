@@ -26,7 +26,6 @@ thing and this list stays another.
 
 | Parked item | Blocked until | Then it lives in |
 |---|---|---|
-| **A3** tier map | step 6 | `core/plan.py` (it is config resolution) |
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
@@ -44,7 +43,7 @@ elsewhere:
 | ~~**D** server lifecycle (A0d)~~ | **DONE** — `qd/core/lifecycle.py`. Scope corrected during the build: it records and REPORTS, it does not kill. See below |
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |
 | **F** decisions owed | version bump, `reset_worktree()`, the `challenge_brief` false-positive rate |
-| **G5** cold-vs-resumed retry | a measurement on telemetry that already exists |
+| ~~**G5** cold-vs-resumed retry~~ | **MEASURED.** Cold is 40% cheaper: a resumed call carries a FULL COPY of the previous prompt (verbatim, not a delta), so the cost is the ~50k PREFIX paid twice and it compounds O(N²). Not changed on n=3 — see FINDINGS |
 
 **The useful read:** most of the pipeline work waits on steps 1–4, and *nothing*
 waits past step 6. Roughly half the list is not blocked at all.
@@ -61,7 +60,7 @@ plumbing, batch-of-chains, handoff forwarding) all shipped.
 |---|---|---|---|
 | A1 | ~~**Red gate generator**~~ **DONE** — three of four checks (parses, ran-and-none-skipped, failed legibly) in `qd/features/gates/red.py`. The fourth, clause coverage, needs the contract format and stays as A4 | §6.1 | `features/gates/` |
 | A2 | ~~**Contract pinning**~~ **DONE** — `qd/core/contract.py`, the `CONTRACT:` receipt line (non-droppable), and `features/gates/contract.py` for the cross-link compare | §3.3 | done |
-| A3 | **Tier map** — `"tests": {unit, integration, e2e}`, declared never guessed; refuse-and-ask when a seam is crossed and nothing is declared | §2.2 | config + `tiers/` |
+| A3 | ~~**Tier map**~~ **DONE** — `qd/core/tiers.py`. Declared never guessed; refuses with the question (and the JSON to paste) when a seam is crossed and nothing is declared. `detect_test_cmd` stays the fallback | §2.2 | done |
 | A4 | ~~**Clause coverage**~~ **DONE** — `features/guards/clauses.py`. A GUARD, so it fails the attempt and tells the worker which clause is missing, rather than demoting at the end | §6.2 | done |
 | A5 | ~~**`SEAM CROSSED, UNIT-GATED ONLY`**~~ **DONE** — `features/detectors/seam_crossed.py`. Predicate on the new SYMBOL, and `mocked_seams` became a FACT because a second reader appeared (§4's own prescription) | §7 | done |
 | A6 | **`*_qwen` naming rule** in generated `QWEN.md` + `_created()` compliance check | §2.5 | `provenance/` feature |

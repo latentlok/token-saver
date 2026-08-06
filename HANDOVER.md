@@ -1,7 +1,7 @@
 # Handover — after the restructure round
 
-**State: clean. Branch `v0.6`, 79 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,227 tests** (was 1,013).
+**State: clean. Branch `v0.6`, 84 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
+`bash ci/run-specs.sh` → exit 0, **1,290 tests** (was 1,013).
 **All five patterns from DESIGN §7 are built.**
 **Steps 1–7 done; 8's user-visible half done. The one real gap is `core/pipeline.py` — see below.**
 Verified live against `snowy` several times, including two mutation-checked live runs.
@@ -187,8 +187,19 @@ caller that has never misbehaved.
    than as prose. `red.py`'s docstring says so rather than claiming a precision
    it lacks — closing it means extending the contract format, not the gate.
 
-3. **The free ones:** the two playbooks, a doctor check, the skill pass, server
-   lifecycle, G5 (cold-vs-warm retry, answerable from existing telemetry).
+3. **What is actually left**, all unblocked and none large:
+   **B** continuity grades (`structured` / `session` — its own warning matters:
+   `session` is the cheapest grade and the most dangerous, cost and safety
+   pointing opposite ways), **D** the `PAID:` line and telemetry past the
+   executor, **A8** a doctor check for contracts naming symbols that no longer
+   exist, **E** the adapter carryovers (several are *"has never run live"* —
+   probes, not features).
+
+   **Also open, and it is a decision not a build:** G5 measured that resuming a
+   session re-sends the entire previous prompt verbatim — 40% more input tokens,
+   compounding O(N²). The retry loop still resumes. Both cost and the skill's own
+   *"go cold for repairs"* point one way; it was not changed on n=3.
+
 4. **Release:** 0.6.0 is bumped and the changelog written. PR → CI →
    squash-merge → tag is the user's, per [docs/RELEASING.md](docs/RELEASING.md).
 
