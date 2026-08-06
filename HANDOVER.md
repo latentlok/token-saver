@@ -108,12 +108,11 @@ and is now four**, three of them marked for the work that would take them.
 replaced it cost more lines than the terse calls did. Steps 2–6 bought
 *enumerability*, not size. Do not report this as a size win.
 
-**Concurrency on snowy buys latency, not throughput.** Measured through real
-delegations: 1 → 3 concurrent leaves throughput flat (4.1 → 4.2 runs/min) while
-per-run latency nearly triples (14.7s → 28.6–42.4s). The endpoint serialises; a
-27B model already saturates the GPU. `parallel_max > 1` does not make a batch
-finish sooner — it makes every run inside it wait ~3× longer for the same finish
-time. Caveats in FINDINGS: N=1 per level, tiny tasks, a shared GPU.
+**Concurrency on snowy: measurement RETRACTED.** An earlier reading (throughput
+flat, latency tripling from 1 → 3 concurrent) was taken while another process
+held the GPU. Contention alone explains it, so the data cannot distinguish that
+from vLLM declining to batch. `parallel_max: 4` stands; nothing measured argues
+against it. FINDINGS lists what a real measurement would need.
 
 **Endpoint reality:** ceiling is 4, another build uses ~2 intermittently, so keep
 live tests at ≤3. Raw HTTP probes need `VLLM_TOKEN` in env; delegations do not
