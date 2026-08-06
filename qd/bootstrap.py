@@ -12,6 +12,7 @@ to a refusal instead of killing the delegation.
 
 import os
 import re
+import shlex
 import shutil
 import sys
 
@@ -132,15 +133,32 @@ def detect_test_cmd(cwd):
         # a silent partial grade does not -- but it is a behaviour change, not a
         # free win. Pinned by DetectedCommandActuallyRuns's package fixtures.
         #
-        # The pattern is quoted because these run under shell=True and a bare
-        # `*.py` would be glob-expanded against the project root before unittest
-        # ever saw it. {d} is deliberately NOT quoted to match: the gate pins the
-        # bare spelling in two assertions that predate this fix
-        # (specs/bootstrap_spec.py:263 `-s t `, :269 `unittest discover -s
-        # tests`), and quoting it reddens both -- verified 2026-08-06. So a
-        # test_dir containing a space stays broken here; it needs the gate
-        # changed first, which is not this fix's to do.
-        return f'python3 -m unittest discover -s {d}{top} -p "*.py" -v'
+        # Everything interpolated here is quoted, because everything built here
+        # is eventually handed to a shell (qd/engine.py runs the detected
+        # command with shell=True). The pattern is a constant but would be
+        # glob-expanded against the project root before unittest ever saw it.
+        # `d` is the dangerous one: it comes from `test_dir` in
+        # .qwen-delegate.json, so it is ATTACKER-CONTROLLED for anyone who
+        # delegates into a repo carrying a hostile config, and unquoted it was
+        # arbitrary command execution, not merely a spaces bug --
+        #
+        #   test_dir = 'tests; touch /tmp/PWNED ;'
+        #     -> python3 -m unittest discover -s tests; touch /tmp/PWNED ; -p ...
+        #     -> marker created (reproduced 2026-08-06)
+        #
+        # shlex.quote and not an f-string '"{d}"': it adds quotes only when the
+        # value actually needs them, so the ordinary names ("tests", "specs",
+        # "t") pass through byte-identical and the gate's existing string
+        # assertions keep pinning the exact command a real project gets, rather
+        # than being loosened to accommodate the fix.
+        #
+        # `top` is a computed literal (" -t ." or ""), and the `-p` value is a
+        # constant, so those two carry no taint. The only other config-derived
+        # value in this function is `test_command` at the top, which is returned
+        # verbatim BY DESIGN -- it is the project declaring its own command, not
+        # a fragment interpolated into someone else's.
+        return (f'python3 -m unittest discover -s {shlex.quote(d)}{top}'
+                f' -p "*.py" -v')
     return ""
 
 

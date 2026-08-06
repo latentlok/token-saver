@@ -464,6 +464,57 @@ class DetectedCommandActuallyRuns(unittest.TestCase):
                             f"{cmd!r} graded this suite green while a module "
                             f"in it could not be imported:\n{out[-600:]}")
 
+    def test_a_hostile_test_dir_cannot_execute_anything(self):
+        # `test_dir` is read from .qwen-delegate.json, which is REPO DATA -- so
+        # it is attacker-controlled for anyone who delegates into a repo they
+        # did not write, and the string it is interpolated into is handed to a
+        # shell (qd/engine.py runs the detected command with shell=True).
+        # Unquoted, that was arbitrary command execution rather than the
+        # cosmetic spaces bug it was first taken for. Reproduced 2026-08-06:
+        #
+        #   test_dir = "tests; touch <marker> ;"
+        #     -> python3 -m unittest discover -s tests; touch <marker> ; -p ...
+        #     -> marker created
+        #
+        # Same class as the `-p "*.py"` quoting, which is what makes that one
+        # load-bearing rather than tidy. Note this class RUNS the command, so
+        # this is observed, not argued from the string's shape.
+        for payload in ("tests; touch {m} ;",
+                        "tests$(touch {m})",
+                        "tests`touch {m}`",
+                        # Trailing `#` swallows the rest of the line. Without
+                        # it this payload is VACUOUS: touch inherits the
+                        # remaining `-p "*.py" -v`, rejects `-p`, and creates
+                        # nothing -- so the sub-case passed even against the
+                        # unquoted build. Caught by mutation-testing the gate
+                        # rather than by reading it.
+                        "tests | touch {m} #"):
+            with self.subTest(payload=payload):
+                d = tempfile.mkdtemp()
+                marker = os.path.join(tempfile.mkdtemp(), "PWNED")
+                put(d, ".qwen-delegate.json",
+                    json.dumps({"test_dir": payload.format(m=marker)}))
+                put(d, "tests/alpha_spec.py", spec_src("alpha"))
+                cmd = bootstrap.detect_test_cmd(d)
+                subprocess.run(cmd, shell=True, cwd=d, capture_output=True,
+                               text=True, timeout=60,
+                               stdin=subprocess.DEVNULL)
+                self.assertFalse(
+                    os.path.exists(marker),
+                    f"{cmd!r} executed a command injected through "
+                    f"test_dir in .qwen-delegate.json")
+
+    def test_quoting_the_test_dir_did_not_loosen_the_ordinary_command(self):
+        # The fix above quotes MINIMALLY (shlex.quote), so an ordinary folder
+        # name passes through byte-identical and the assertions that pin the
+        # exact command a real project gets (TestLocation, :263 and :269) keep
+        # binding. Asserted here so nobody "simplifies" it to a blanket
+        # '"{d}"', which would close the hole while quietly making those two
+        # assertions describe a command no longer issued.
+        d = tempfile.mkdtemp()
+        put(d, "tests/test_thing.py", spec_src("thing"))
+        self.assertIn(" -s tests ", bootstrap.detect_test_cmd(d))
+
     def test_the_fixtures_above_are_shaped_like_this_repo(self):
         # Keeps the fixtures honest. If this repo's own layout drifts away
         # from what the fixtures model, these tests stop being evidence about

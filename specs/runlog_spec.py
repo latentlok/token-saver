@@ -41,6 +41,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qd import runlog  # noqa: E402
+# Imported for cum_zero() so the seed under test is the REAL one: a literal
+# "unset" here would keep passing if invoke.py renamed its seed.
+from qd import invoke  # noqa: E402
 
 
 STATS = {
@@ -139,6 +142,16 @@ class RecordShape(Fixture):
         # Mirrors token_source's default exactly: a record assembled from no
         # stats at all claims no measurement.
         r = runlog.leverage_record("q", self.cwd, "ok", "v", {}, 0)
+        self.assertEqual(r["stats_source"], "none")
+
+    def test_the_accumulator_seed_never_reaches_disk(self):
+        # cum_zero() seeds "unset" -- "no attempt has reported yet" -- which is
+        # a live-accumulator state, not a fact about a finished run.
+        # accum_stats refuses it on the way IN; this is the other end of the
+        # same seam. Without it the two sides disagree, and a record could
+        # carry a fourth provenance value nothing else in the system emits.
+        r = runlog.leverage_record("q", self.cwd, "ok", "v",
+                                   invoke.cum_zero(), 0)
         self.assertEqual(r["stats_source"], "none")
 
     def test_a_partly_unmeasured_run_keeps_its_label_to_disk(self):

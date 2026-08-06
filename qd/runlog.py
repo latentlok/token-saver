@@ -495,6 +495,17 @@ def leverage_record(tool, cwd, status, verdict, stats, peak,
     tokens = stats.get("tokens") or _tok_zero()
     v_chars = len(verdict or "")
     v_tokens = round(v_chars / 4.0)
+    # "unset" is cum_zero()'s seed -- "no attempt has reported yet", a state of
+    # a live accumulator and not a fact about a finished run. accum_stats
+    # already refuses it on the way IN (qd/invoke.py); refusing it on the way
+    # OUT keeps both ends of the seam agreeing, so a record can never carry a
+    # fourth provenance value that nothing else in the system emits. Not
+    # reachable through today's call graph -- both callers accumulate at least
+    # once -- but it was untested, and a latent value that only escapes on a
+    # path nobody exercises is exactly what gets read as real later.
+    stats_source = stats.get("stats_source") or "none"
+    if stats_source == "unset":
+        stats_source = "none"
     rec = {
         "ts": now_iso(),
         "tool": tool,
@@ -512,7 +523,7 @@ def leverage_record(tool, cwd, status, verdict, stats, peak,
         # for later analysis, where nobody is around to remember which runs
         # were streamed. An unlabelled zero in the run log is a zero that will
         # be averaged.
-        "stats_source": stats.get("stats_source") or "none",
+        "stats_source": stats_source,
         "peak_context": peak,
         "verdict_chars": v_chars,
         "verdict_tokens_est": v_tokens,
