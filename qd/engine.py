@@ -1951,7 +1951,49 @@ def _delegate(args, t0_dir):
         if qwen_files:
             test_cmd = detect_test_cmd(cwd)
             if test_cmd:
-                tc = f"./{test_cmd}" if not test_cmd.startswith(".") else test_cmd
+                # The detected command runs VERBATIM. It used to be prefixed
+                # with `./` (`f"./{test_cmd}"`, unless it already began with a
+                # dot), which was in the very first landing of this file
+                # (93bf235) with no rationale recorded. The `startswith(".")`
+                # guard says what it was aimed at: the ONE detector branch that
+                # answers with a repo-relative script path, `venv/bin/pytest`
+                # / `.venv/bin/pytest`. It was wrong for every other answer
+                # bootstrap.detect_test_cmd could already give at that same
+                # commit -- `npm test`, `cargo test`, `go test ./...`,
+                # `bundle exec rspec`, `python -m pytest` -- and for the
+                # stdlib-discovery branch and the `test_command` config branch
+                # (`make check`, an absolute path) added since.
+                #
+                # Reproduced 2026-08-07 on a plain stdlib-layout fixture (a
+                # tests/ folder, no venv), driving this loop:
+                #
+                #   detected: python3 -m unittest discover -s tests -p "*.py" -v
+                #   ran:      ./python3 -m unittest discover ... calc_qwen.py
+                #   shell:    /bin/sh: 1: ./python3: not found     (exit 127)
+                #
+                # 127 is non-zero, so `prefilter_failed` was UNCONDITIONALLY
+                # true on every such project -- the prefilter never ran at all
+                # -- and the branch below put `NOTES: self-tests failing` on
+                # the receipt of a run whose gate passed on attempt 1. A green
+                # run reporting a failure that never happened, plus a
+                # correction telling the worker to root-cause a command that
+                # does not exist.
+                #
+                # Nothing needs the prefix, including the branch it was aimed
+                # at: a word containing `/` is resolved by the shell as a path
+                # relative to cwd without help (measured -- `sh -c
+                # 'venv/bin/pytest -q calc_qwen.py'` with cwd set runs the
+                # script). And the rest of this project already agrees: with
+                # the SAME string from the SAME function, `_ensure_self_gate`
+                # interpolates it into the gate script bare, and
+                # bootstrap.render_worker_rules prints it to the worker bare
+                # under "Use exactly that command" -- so the prefix also made
+                # the engine run something other than what it told the worker
+                # to run. Pinned by Prefilter's enable_prefilter_on_path tests,
+                # which reach the stub as a command NAME; the pre-existing ones
+                # install `venv/bin/pytest` and so only ever exercised the one
+                # branch where the prefix was harmless.
+                tc = test_cmd
                 # Nothing timed this before -- no t0 wrapped it at all. Its
                 # budget is 60s, and the except branch below is reached BY that
                 # timeout, so the unrecorded case was the expensive one: a full

@@ -281,6 +281,33 @@ class Fixture(unittest.TestCase):
         self.plog = os.path.join(self.sdir, "pytest.log")
         os.environ["STUB_PYTEST_LOG"] = self.plog
 
+    def enable_prefilter_on_path(self):
+        """Same stub, reached the way EVERY detector output but one is reached:
+        as a command NAME resolved through PATH.
+
+        `enable_prefilter` above installs `venv/bin/pytest`, which is the single
+        branch of `bootstrap.detect_test_cmd` whose answer is a repo-relative
+        SCRIPT PATH. Every other answer it can give is a command to look up --
+        `npm test`, `cargo test`, `go test ./...`, `bundle exec rspec`,
+        `python -m pytest ...`, `python3 -m unittest discover ...`, and any
+        `test_command` a project declares (`make check`, an absolute path). A
+        harness that only ever exercises the one path-shaped branch cannot see
+        anything the engine does to the command NAME, which is why the
+        `./`-prefix defect below survived a green suite.
+        """
+        bindir = tempfile.mkdtemp()
+        p = os.path.join(bindir, "qdstub-runner")
+        with open(p, "w") as f:
+            f.write(PYTEST_STUB)
+        os.chmod(p, 0o755)
+        os.environ["PATH"] = bindir + os.pathsep + os.environ["PATH"]
+        # `test_command` is detect_test_cmd's FIRST branch and it is returned
+        # verbatim, so this is the detector's own output, not a bypass of it.
+        self.commit_cfg({"challenge_brief": False,
+                         "test_command": "qdstub-runner -q"})
+        self.plog = os.path.join(self.sdir, "pytest.log")
+        os.environ["STUB_PYTEST_LOG"] = self.plog
+
 
 class Loop(Fixture):
     def test_success_first_attempt_c3_shape(self):
@@ -765,6 +792,83 @@ class Prefilter(Fixture):
         r = self.delegate()
         self.assertEqual(r["status"], "success")
         self.assertEqual(r["ctx"]["notes"], "")
+
+    # The prefilter must RUN THE COMMAND THE PROJECT DECLARED. It used to
+    # prefix `./` to it, which only ever made sense for the one detector branch
+    # that answers with a repo-relative script path (`venv/bin/pytest`) -- and
+    # was not needed even there, since a word containing `/` is resolved as a
+    # path by the shell without help. For every other answer the detector can
+    # give, the prefix turned a command name into a path that does not exist.
+    #
+    # Reproduced 2026-08-07 against the pre-fix build, driving this same loop
+    # with an ordinary stdlib-layout fixture (a tests/ folder, no venv):
+    #
+    #   detected: python3 -m unittest discover -s tests -p "*.py" -v
+    #   ran:      ./python3 -m unittest discover -s tests -p "*.py" -v calc_qwen.py
+    #   shell:    /bin/sh: 1: ./python3: not found        (exit 127)
+    #
+    # 127 is non-zero, so `prefilter_failed` was UNCONDITIONALLY true for every
+    # such project -- the prefilter never actually ran once -- and the receipt
+    # of a run whose gate passed on attempt 1 carried `NOTES: self-tests
+    # failing`. A green run reporting a failure that did not happen.
+    #
+    # Two more pieces of evidence that the prefix was never load-bearing:
+    # `_ensure_self_gate` (qd/engine.py) interpolates the SAME detected string
+    # into its gate script bare, and `bootstrap.render_worker_rules` prints it
+    # to the worker bare under "Use exactly that command" -- so the prefix also
+    # made the engine run something different from what it told the worker to.
+    #
+    # These use a PATH-resolved name rather than the real `python3 -m unittest`
+    # so the fixture is hermetic AND so they stay isolated from the separate
+    # `-s`-override defect: the prefilter appends its file paths POSITIONALLY,
+    # and `unittest discover`'s first positional is start_dir, so on that
+    # detector branch the file hijacks the discovery root
+    # ("ImportError: Start directory is not importable: 'calc_qwen.py'").
+    # That is a different bug; pinning it here would make these tests unable to
+    # go green on this fix alone.
+    def test_a_command_name_test_cmd_actually_reaches_the_shell(self):
+        self.enable_prefilter_on_path()
+        self.steps([{"write": {"out.py": "MARKER\n", "calc_qwen.py": "x\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        # The log only exists if the stub EXECUTED, so this cannot be satisfied
+        # by a command that merely failed differently.
+        self.assertTrue(
+            os.path.exists(self.plog),
+            "the prefilter never ran: the detected command was mangled before "
+            "it reached the shell")
+        with open(self.plog) as f:
+            logged = f.read().strip()
+        self.assertTrue(logged.endswith(" calc_qwen.py"),
+                        f"prefilter argv: {logged!r}")
+
+    def test_a_green_run_carries_no_note_about_tests_that_never_ran(self):
+        self.enable_prefilter_on_path()
+        self.steps([{"write": {"out.py": "MARKER\n", "calc_qwen.py": "x\n"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(
+            r["ctx"]["notes"], "",
+            "the gate passed and the self-tests passed, but the receipt "
+            "reports failing self-tests -- the note is the shell failing to "
+            "find a command, not a test result")
+
+    def test_the_prefilter_reports_the_command_the_project_declared(self):
+        # Gate RED on attempt 1, prefilter red on its own terms (rc 1), so the
+        # "Also: your own self-tests failed (<cmd>)" line is guaranteed present
+        # and the command it names can be read. What the worker is TOLD it ran
+        # has to be what was run, or the root-cause sentence the correction
+        # demands is being asked for about a command that does not exist.
+        self.enable_prefilter_on_path()
+        self.steps([{"write": {"out.py": "wrong\n", "calc_qwen.py": "x\n",
+                               ".pytest_rc": "1"}},
+                    {"write": {"out.py": "MARKER\n", ".pytest_rc": "0"}}])
+        r = self.delegate()
+        self.assertEqual(r["status"], "success")
+        correction = self.task_seen(2)
+        self.assertIn("(qdstub-runner -q ", correction)
+        self.assertNotIn("./qdstub-runner", correction)
+        self.assertNotIn("not found", correction)
 
     # The prefilter's arguments are FILENAMES THE WORKER CHOSE. Creating files
     # is the whole job we hire the worker for, so this is not a hostile-config
