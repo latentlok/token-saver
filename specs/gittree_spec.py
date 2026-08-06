@@ -400,6 +400,155 @@ class CQuotedPaths(Fixture):
             with self.subTest(raw=raw):
                 self.assertEqual(gittree.unquote_path(raw), raw)
 
+
+class HostileSpecName(unittest.TestCase):
+    """A spec file the guard cannot NAME is a spec file the worker may rewrite.
+
+    PRINCIPLES §I is that the gate comes from a different hand than the builder.
+    The spec guard enforces it by reverting the worker's edits to protected
+    files -- so any filename shape that makes a spec invisible to that guard
+    lets a worker weaken its own gate AND KEEP the change, on a run whose
+    receipt still says it passed. That is worse than any injection: injection
+    needs the run to notice nothing once; this makes the noticing itself blind.
+
+    Two independent shapes did exactly that, both measured on git 2.53. Both
+    live at the SAME seam -- `spec_files()` output being fed straight back to
+    git as a pathspec:
+
+    1. C-QUOTING (the input half that f75572a's porcelain fix did not reach).
+       `git ls-files` quotes a path just as porcelain does -- so `spec_files`
+       returned the 20-character STRING `"tab\\tchar_spec.py"`, quotes and
+       backslash included, and `violated_specs` handed that to
+       `git diff --name-only -- <that>`. No file has that name, so the diff came
+       back EMPTY and the guard reported nothing to revert. Measured before the
+       fix, for tab / newline / double-quote / backslash / control-byte names
+       under BOTH core.quotePath settings, plus non-ASCII under the default
+       quotePath=true: detected=False, reverted=False, file still SABOTAGED.
+
+       A space is the interesting near-miss and the reason this needed measuring
+       rather than reasoning: porcelain quotes `my calc_spec.py`, but
+       `ls-files`, `diff --name-only` and `diff --numstat` all emit it BARE.
+       The space case was therefore never broken here -- which is precisely why
+       "we handled the space one" was not evidence about the others.
+
+    2. PATHSPEC MAGIC, which no amount of unquoting fixes. git needs no quoting
+       for `:(icase)magic_spec.py` and emits it bare, but a leading `:` in a
+       pathspec is git's magic prefix, so feeding that name back made git search
+       for `magic_spec.py` case-insensitively and match nothing. Same outcome by
+       a different route: undetected, unreverted, sabotage kept.
+
+    The fix has to be both halves -- decode the name, then pass it as
+    `:(literal)<name>` so git reads it as a filename and not as a query.
+    """
+
+    # Every class in the step-1 measurement, plus the two that need no quoting
+    # at all. `star*_spec.py` is here because :(literal) must not break the
+    # names that already worked: without it a `*` would glob.
+    HOSTILE = ("tab\tchar_spec.py",        # control byte: quoted by every cmd
+               "nl\nchar_spec.py",         # newline: the worst wire-format case
+               "café_spec.py",             # non-ASCII: quoted only when quotePath=true
+               'dq"uote_spec.py',          # the escape that also delimits
+               "back\\slash_spec.py",      # backslash
+               "bel\x07char_spec.py",      # another control byte
+               "my calc_spec.py",          # space: porcelain quotes, ls-files does not
+               ":(icase)magic_spec.py",    # pathspec MAGIC -- unquoting cannot help
+               "star*_spec.py",            # glob char: bare, must stay literal
+               "plain_spec.py")            # control: must keep working
+
+    def _repo(self, name):
+        cwd = make_repo()
+        put(cwd, name, "def test_contract():\n    assert True\n")
+        put(cwd, "decoy_spec.py", "def test_other():\n    assert True\n")
+        put(cwd, "impl.py", "x = 1\n")
+        commit_all(cwd, "base")
+        rc, pre = gittree.git(cwd, "rev-parse", "HEAD")
+        return cwd, pre.strip()
+
+    def test_hostile_named_spec_is_detected_and_reverted(self):
+        # The decisive test: a worker sabotages a protected spec, the guard
+        # runs, and the question is whether the sabotage is still on disk.
+        for name in self.HOSTILE:
+            for quote_path in ("true", "false"):
+                with self.subTest(name=name, quotePath=quote_path):
+                    cwd, pre = self._repo(name)
+                    sh(cwd, "git", "config", "core.quotePath", quote_path)
+
+                    # spec_files is the INPUT to the guard. If it cannot name
+                    # the file, nothing downstream can either.
+                    self.assertIn(name, gittree.spec_files(cwd))
+
+                    put(cwd, name, "def test_contract():\n    pass  # SABOTAGED\n")
+                    self.assertEqual(gittree.violated_specs(cwd, base=pre),
+                                     [name])                       # DETECTED
+
+                    gittree.revert_specs(cwd, [name], base=pre)
+                    with open(os.path.join(cwd, name)) as f:
+                        body = f.read()
+                    self.assertNotIn("SABOTAGED", body)            # REVERTED
+                    self.assertIn("assert True", body)
+                    self.assertEqual(gittree.violated_specs(cwd, base=pre), [])
+
+    def test_hostile_name_does_not_drag_in_innocent_specs(self):
+        # :(literal) and the decode must NARROW nothing and WIDEN nothing: the
+        # decoy spec is untouched, so it must not be reported as violated.
+        # Without :(literal), `star*_spec.py` would glob and could sweep in
+        # files the worker never wrote -- a false accusation, which is the
+        # other way this guard fails a caller.
+        cwd, pre = self._repo("star*_spec.py")
+        put(cwd, "starXYZ_spec.py", "def test_x():\n    assert True\n")
+        commit_all(cwd, "add lookalike")
+        rc, pre2 = gittree.git(cwd, "rev-parse", "HEAD")
+        put(cwd, "star*_spec.py", "pass  # SABOTAGED\n")
+        self.assertEqual(gittree.violated_specs(cwd, base=pre2.strip()),
+                         ["star*_spec.py"])
+
+    def test_committed_sabotage_of_a_hostile_named_spec_still_caught(self):
+        # The committed-edit hole and the hostile-name hole compose: a worker
+        # that both renames-around the guard AND commits would otherwise be
+        # invisible twice over.
+        name = "tab\tchar_spec.py"
+        cwd, pre = self._repo(name)
+        put(cwd, name, "pass  # SABOTAGED\n")
+        commit_all(cwd, "sabotage")
+        self.assertEqual(gittree.violated_specs(cwd, base=pre), [name])
+        gittree.revert_specs(cwd, [name], base=pre)
+        with open(os.path.join(cwd, name)) as f:
+            self.assertIn("assert True", f.read())
+
+    def test_dodge_marker_in_a_hostile_named_test_file_is_seen(self):
+        # Same `diff --name-only` parse, different detector: a quoted path was
+        # skipped by the `_TESTY` filter AND produced an empty per-file diff, so
+        # a @pytest.mark.skip added to `tab\tchar_spec.py` was reported as no
+        # dodge at all. Measured {} before the fix.
+        name = "tab\tchar_spec.py"
+        cwd, pre = self._repo(name)
+        put(cwd, name, "import pytest\n\n\n@pytest.mark.skip\n"
+                       "def test_contract():\n    assert True\n")
+        self.assertEqual(gittree.dodge_markers(cwd, pre).get(name),
+                         ["pytest.mark.skip"])
+
+    def test_blast_radius_reports_line_counts_for_a_hostile_name(self):
+        # The blast-radius caller: snapshot() keys are decoded (porcelain seam)
+        # while numstat_map() keys were not, so the two maps could never agree
+        # for a quoted name and CHANGED silently dropped the +/- counts on
+        # exactly the files most worth looking at.
+        name = "tab\tchar_spec.py"
+        cwd, pre = self._repo(name)
+        pre_snap = gittree.snapshot(cwd)
+        put(cwd, name, "def test_contract():\n    assert True\n\n\nEXTRA = 1\n")
+        self.assertIn("(+3/-0)", gittree.blast_radius(cwd, pre_snap))
+
+    def test_committed_during_run_names_a_hostile_file(self):
+        # Third `diff --name-only` parse. Report-only, but the report is what a
+        # caller reads to decide whether to trust the run.
+        name = "café_spec.py"
+        cwd, pre = self._repo(name)
+        put(cwd, name, "pass  # changed\n")
+        commit_all(cwd, "worker committed")
+        moved, count, files = gittree.committed_during_run(cwd, pre)
+        self.assertTrue(moved)
+        self.assertEqual(files, [name])
+
     def test_a_rename_record_is_left_exactly_as_it_was(self):
         # `R  "a b.py" -> "c d.py"` starts and ends with a quote but is TWO
         # paths in one field, so a decoder that trusted its own first and last

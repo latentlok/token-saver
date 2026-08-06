@@ -115,6 +115,28 @@ def unquote_path(field):
     return field                           # never closed: not ours to guess
 
 
+def literal_pathspec(path):
+    """`path` as a pathspec git will read as a NAME, never as a query.
+
+    A pathspec is not a filename: git reads a leading `:` as its magic prefix
+    and reads glob characters as a pattern. So handing a real filename straight
+    back to git as a pathspec -- which is exactly what violated_specs does with
+    spec_files' output -- is a second decoding bug wearing different clothes,
+    and unquoting alone does not touch it.
+
+    Measured, git 2.53, on a repo holding `:(icase)magic_spec.py`: git needs no
+    quoting for that name and `ls-files` emits it bare, but
+    `diff --name-only <base> -- ':(icase)magic_spec.py'` searched for
+    `magic_spec.py` case-insensitively, matched nothing, and returned EMPTY --
+    so a worker could sabotage that spec and the guard would report nothing to
+    revert, on a run whose receipt said it passed. `star*_spec.py` fails the
+    other way: it globs, so an untouched `starXYZ_spec.py` gets accused.
+
+    `:(literal)` is git's own answer and turns both off.
+    """
+    return f":(literal){path}"
+
+
 def is_git_repo(cwd):
     rc, out = git(cwd, "rev-parse", "--is-inside-work-tree")
     return rc == 0 and out == "true"
@@ -327,14 +349,24 @@ def spec_globs(cwd):
 
 
 def spec_files(cwd):
-    """Tracked protected-spec paths, repo-relative. Language-agnostic."""
+    """Tracked protected-spec paths, repo-relative. Language-agnostic.
+
+    Paths arrive DECODED. `git ls-files` C-quotes exactly as porcelain does
+    (measured, git 2.53: tab, newline, `"`, `\\`, control bytes under both
+    core.quotePath settings; non-ASCII under the default true), and this list is
+    fed straight back to git as a PATHSPEC by violated_specs. Undecoded, the
+    pathspec was the literal 20-char string `"tab\\tchar_spec.py"` -- quotes and
+    all -- which names no file, so the guard's diff came back empty and a
+    sabotaged spec was never even DETECTED, let alone reverted. The `*_spec.*`
+    GLOBS above are patterns and stay raw; only ls-files' OUTPUT is a filename.
+    """
     pats = []
     for g in spec_globs(cwd):
         pats += [g, f"**/{g}"]
     rc, out = git(cwd, "ls-files", *pats)
     if rc != 0 or not out:
         return []
-    return sorted({p for p in out.splitlines() if p.strip()})
+    return sorted({unquote_path(p) for p in out.splitlines() if p.strip()})
 
 
 def violated_specs(cwd, base=None):
@@ -350,11 +382,21 @@ def violated_specs(cwd, base=None):
     specs = spec_files(cwd)
     if not specs:
         return []
-    args = ["diff", "--name-only"] + ([base] if base else []) + ["--"] + specs
+    # :(literal) on the way in, unquote_path on the way out. Both directions are
+    # load-bearing and neither substitutes for the other: without the decode the
+    # pathspec is a quoted string matching nothing, and without :(literal) a name
+    # beginning `:` is read as pathspec magic. Either way the diff came back
+    # EMPTY for a spec the worker had just rewritten -- the guard that exists to
+    # keep the gate out of the builder's hands reported nothing to revert, and
+    # the run passed. Measured for tab / newline / `"` / `\` / control-byte /
+    # non-ASCII / `:(icase)` names; a SPACE was the near-miss that hid this,
+    # since ls-files and diff emit it bare while porcelain quotes it.
+    args = (["diff", "--name-only"] + ([base] if base else []) + ["--"]
+            + [literal_pathspec(p) for p in specs])
     rc, out = git(cwd, *args)
     if rc != 0 or not out:
         return []
-    return [p for p in out.splitlines() if p.strip()]
+    return [unquote_path(p) for p in out.splitlines() if p.strip()]
 
 
 def revert_specs(cwd, paths, base=None, t0=None):
@@ -386,7 +428,11 @@ def committed_during_run(cwd, pre_sha):
     rc, out = git(cwd, "rev-list", "--count", f"{pre_sha}..HEAD")
     count = int(out) if rc == 0 and out.strip().isdigit() else 0
     rc, out = git(cwd, "diff", "--name-only", pre_sha, "HEAD")
-    files = [p for p in (out or "").splitlines() if p.strip()] if rc == 0 else []
+    # Decoded like every other path this module hands out: this list is printed
+    # on the receipt a caller reads to decide whether to trust the run, and
+    # `"caf\303\251_spec.py"` names nothing a human or a later tool can act on.
+    files = [unquote_path(p) for p in (out or "").splitlines()
+             if p.strip()] if rc == 0 else []
     return True, count, files
 
 
@@ -431,10 +477,15 @@ def new_public_symbols(cwd):
     out = {}
     # 1. tracked changes: added publics minus removed publics (cancels renames/moves)
     rc, changed = git(cwd, "diff", "--name-only")
-    for path in (changed.splitlines() if rc == 0 else []):
+    for path in (unquote_path(p) for p in
+                 (changed.splitlines() if rc == 0 else [])):
+        # Decoded before the _TESTY test, not after: `"tab\tchar_spec.py"` does
+        # not contain the substring `_spec.` (the quoting broke it apart), so an
+        # undecoded quoted path slipped past the test-file exclusion and then
+        # produced an empty per-file diff anyway -- wrong twice.
         if not path.strip() or any(t in path for t in _TESTY):
             continue
-        rc2, diff = git(cwd, "diff", "--", path)
+        rc2, diff = git(cwd, "diff", "--", literal_pathspec(path))
         if rc2 != 0:
             continue
         added, removed = [], []
@@ -693,10 +744,14 @@ def dodge_markers(cwd, pre_sha, pre_status=None):
     out = {}
     base = [pre_sha] if pre_sha else []
     rc, changed = git(cwd, "diff", "--name-only", *base)
-    for path in (changed.splitlines() if rc == 0 else []):
+    for path in (unquote_path(p) for p in
+                 (changed.splitlines() if rc == 0 else [])):
+        # Same decode-before-_TESTY reason as new_public_symbols, and here it is
+        # a detector rather than a report: a `@pytest.mark.skip` added to
+        # `tab\tchar_spec.py` was reported as NO dodge at all (measured: {}).
         if not path.strip() or not any(t in path for t in _TESTY):
             continue
-        rc2, diff = git(cwd, "diff", *base, "--", path)
+        rc2, diff = git(cwd, "diff", *base, "--", literal_pathspec(path))
         if rc2 != 0:
             continue
         found = []
@@ -736,14 +791,21 @@ def dodge_markers(cwd, pre_sha, pre_status=None):
 
 
 def numstat_map(cwd):
-    """{path: (added, removed)} from `git diff --numstat`."""
+    """{path: (added, removed)} from `git diff --numstat`.
+
+    Keys DECODED, because blast_radius joins this map to snapshot()'s -- whose
+    keys come through the porcelain seam and have been decoded since f75572a.
+    Undecoded, the two maps could never agree for any name git quotes, so
+    CHANGED silently dropped the +/- counts on exactly the files most worth
+    looking at and printed the bare status code instead.
+    """
     rc, numstat = git(cwd, "diff", "--numstat")
     lines = {}
     if rc == 0 and numstat:
         for row in numstat.splitlines():
             parts = row.split("\t")
             if len(parts) == 3:
-                lines[parts[2]] = (parts[0], parts[1])
+                lines[unquote_path(parts[2])] = (parts[0], parts[1])
     return lines
 
 
