@@ -36,7 +36,13 @@ from qd.gittree import (
 from qd.core.plan import RunPlan, setting
 from qd.core import contract as core_contract
 from qd.core.attempt import Attempt
-from qd.core.pipeline import ratchet_minimum
+from qd.core.pipeline import (
+    gate_is_slow,
+    graph_shell_grant,
+    peak_high_water,
+    preflight_shareable,
+    ratchet_minimum,
+)
 from qd.core.prompt import tail as prompt_tail
 from qd.core.status import classify as run_status
 from qd.core.scope import RunScope
@@ -1057,19 +1063,21 @@ def _delegate(args, t0_dir):
     # declared, silently widening a boundary the call had just narrowed.
     shell_allow = setting("shell_allow", args, cfg)
     mcp_allow = setting("mcp_allow", args, cfg)
-    # The bootstrap notice PROMISES the worker will locate code through the
-    # graph instead of reading files. Nothing made that true: the worker has no
-    # shell unless one is granted, so the promise was kept only by callers who
-    # happened to wire `shell_allow` themselves. Grant the READ-ONLY
-    # subcommands when a graph actually exists here.
+    # Grant the graph's READ-ONLY subcommands when this run can actually use
+    # them. Every condition -- `scoped` only, a graph only, never twice, never
+    # `update` -- is in core/pipeline.py with its reason, because the boundary
+    # used to be guarded by a GREP for the `if` line that stood here and a
+    # widening which kept that line left the whole suite green.
     #
-    # Only under `scoped`: `auto-edit` has no shell at all, so adding patterns
-    # there would be a permission that reads as granted and does nothing.
-    # `update` is never included -- see qd.graph.READ_ONLY.
-    if approval_mode == "scoped" and graph.read_state(cwd):
-        _ro = graph.read_only_allow()
-        if _ro not in (shell_allow or []):
-            shell_allow = list(shell_allow or []) + [_ro]
+    # The mode is deliberately NOT re-tested here as a short-circuit: half a
+    # permission rule sitting at the call site is how the other half stopped
+    # being read. `graph.read_state` is a pure read (absent or unparseable ->
+    # None) whose only trace is the self-ignoring `.qwen-delegate/` that
+    # `git status` never reports and `write_runlog` creates on every run
+    # regardless, so asking it under every mode costs a stat and changes
+    # nothing a caller, a guard or a gate can observe.
+    shell_allow = graph_shell_grant(
+        approval_mode, graph.read_state(cwd) is not None, shell_allow)
     # Default: project config, else 3; clamped 1..10 -- the schema has promised
     # both since v1, and the engine port had silently dropped them.
     max_iter = (args.get("max_iterations")
@@ -1251,18 +1259,16 @@ def _delegate(args, t0_dir):
     # would report one gate run where the caller waited for two.
     preflight_calls = []
     if verify:
-        # `_preflight_once` shares one verdict across items keyed on
-        # (base sha, worktrees dir, gate), and its stated invariant is that
-        # "every item is cut from the SAME base commit into its own clean
-        # worktree, so that answer is identical for every item by
-        # construction". True for a batch. FALSE for a chain link after the
-        # first: its tree deliberately holds the previous links' commits, which
-        # is the entire point of a chain. Tiers make the collision likelier
-        # rather than rarer -- once projects declare `tests`, every pipeline's
-        # gate becomes the same command string, so concurrent chains from one
-        # base would share a key while holding genuinely different trees.
-        _pos = (args.get(CHAIN_ARG) or {}).get("pos") or 1
-        shareable = wt is not None and _pos == 1
+        # Whether this run may be served a verdict another item paid for. The
+        # rule, and the `_preflight_once` invariant a chain link after the first
+        # violates by design, are in core/pipeline.py.
+        #
+        # The chain position goes in RAW: `preflight_shareable` normalises
+        # absence to link 1 itself, so resolving it with `or 1` here as well
+        # would be the same decision written in two places, one of which nobody
+        # would think to test.
+        shareable = preflight_shareable(
+            wt is not None, (args.get(CHAIN_ARG) or {}).get("pos"))
         _served = []
         preflight, preflight_out, gate_ms, gate_timed_out = _preflight_once(
             verify, work_cwd, verify_timeout, pre_sha_full, shareable,
@@ -1411,9 +1417,12 @@ def _delegate(args, t0_dir):
         "gate_ms": gate_ms,
         "verify_timeout_sec": verify_timeout,
         "preflight_expect": preflight_expect,
-        # A pre-flight past half the budget is paid AGAIN by every attempt: at
-        # max_iter 3 the gate alone can outlast the work it is grading.
-        "gate_slow": bool(verify) and gate_ms > verify_timeout * 500,
+        # Past HALF the budget -- a pre-flight there is paid AGAIN by every
+        # attempt, so at max_iter 3 the gate alone can outlast the work it is
+        # grading. core/pipeline.py carries the arithmetic and why the constant
+        # is not x100 or x1000. `bool(verify)` stays HERE on purpose: whether
+        # there is a gate at all is this loop's question, not the threshold's.
+        "gate_slow": bool(verify) and gate_is_slow(gate_ms, verify_timeout),
         # U5.5: this run is a corrected re-run of another session, started cold.
         "retry_of": args.get("retry_of"),
         # U6: which document briefed this run -- the receipt names it and the
@@ -1700,7 +1709,10 @@ def _delegate(args, t0_dir):
         ctx["meta"] = meta
         ctx["writes"] = _repo_relative(writes_all, work_cwd)
         ctx["attribution"] = "hook" if hooked else "none"
-        ctx["peak"] = max(ctx.get("peak", 0), meta.get("peak", 0))
+        # A HIGH-WATER mark across attempts, not the latest attempt's figure --
+        # core/pipeline.py names the three readers that lose the spike if this
+        # ever becomes an assignment.
+        ctx["peak"] = peak_high_water(ctx.get("peak"), meta.get("peak"))
         accum_stats(ctx["cum"], meta.get("stats"))
 
         if sid:

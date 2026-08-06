@@ -68,23 +68,42 @@ class ThePattern(unittest.TestCase):
 
 
 class TheGrant(unittest.TestCase):
-    """Granting it is the engine's call, and it is conditional on two things."""
+    """Granting it is the run's call, and it is conditional on two things.
 
-    def test_the_module_states_both_conditions(self):
-        # Read from the engine's own comment rather than re-derived here: a
-        # test that restates a rule can agree with a stale version of it.
-        with open(os.path.join(os.path.dirname(_HERE), "qd", "engine.py")) as f:
-            src = f.read()
-        self.assertIn('if approval_mode == "scoped" and graph.read_state(cwd):',
-                      src)
+    **These two tests used to read qd/engine.py AS TEXT** -- assertIn on the
+    `if approval_mode == "scoped" and graph.read_state(cwd):` line and on the
+    words "has no shell at all". A grep cannot see what it claims to guard: a
+    WIDENING that keeps that line verbatim and adds a second branch granting
+    the pattern under auto-edit or yolo passes both assertions untouched, and
+    the run measured 2026-08-06 confirms it -- that mutation left the entire
+    1,000-test suite green. The rule is now asserted by asking the decision
+    what it decides.
+
+    Only the two claims the old assertions made are re-made here. The full rule
+    (never duplicated, absent modes unchanged, what the pattern permits) is in
+    specs/pipeline_spec.py, and that the ENGINE consults it -- QGATE_EXTRA, the
+    boundary itself -- in specs/pipeline_wiring_spec.py."""
+
+    def setUp(self):
+        # Imported here rather than at module scope on purpose: the rest of this
+        # file is about qd/graph.py and stays runnable, and readable, whatever
+        # happens to where the grant decision lives.
+        from qd.core.pipeline import graph_shell_grant
+        self.grant = graph_shell_grant
+
+    def test_it_takes_both_scoped_and_a_graph(self):
+        # The condition the old assertion quoted. Stated as three answers, so
+        # dropping either half of the `and` is visible.
+        self.assertEqual(self.grant("scoped", True, None),
+                         [graph.read_only_allow()])
+        self.assertIsNone(self.grant("scoped", False, None))
+        self.assertIsNone(self.grant("auto-edit", True, None))
 
     def test_auto_edit_gets_nothing_because_it_has_no_shell(self):
         # Adding patterns under auto-edit would be a permission that reads as
         # granted and does nothing -- worse than absent, because a caller would
         # believe the worker could use the graph.
-        with open(os.path.join(os.path.dirname(_HERE), "qd", "engine.py")) as f:
-            src = f.read()
-        self.assertIn("has no shell at all", src)
+        self.assertEqual(self.grant("auto-edit", True, ["^make$"]), ["^make$"])
 
 
 if __name__ == "__main__":
