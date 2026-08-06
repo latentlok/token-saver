@@ -110,6 +110,34 @@ def write_runlog(cwd, record):
         pass
 
 
+def completed_runs(cwd, tool="qwen_delegate", limit=200):
+    """The last `limit` FINISHED run records for this project, oldest first.
+
+    Submission markers (`status: "running"`, U5.2) are skipped: they carry no
+    telemetry, and counting them would let an in-flight run steer a decision
+    about how long runs take. Tolerant line-by-line parse; never raises.
+    """
+    out = []
+    try:
+        path = os.path.join(cwd, RUNLOG_DIR, RUNLOG_FILE)
+        if not os.path.isfile(path):
+            return out
+        with open(path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict) or rec.get("tool") != tool:
+                    continue
+                if (rec.get("status") or "") == "running":
+                    continue
+                out.append(rec)
+    except Exception:
+        return out
+    return out[-limit:]
+
+
 def ledger_summary(cwd):
     """Aggregate of this project's qwen_delegate history, for the LEDGER line.
 
@@ -319,6 +347,143 @@ def _tok_zero():
     return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "thoughts": 0}
 
 
+class ExecutorCall:
+    """One invocation of the executor, with the arithmetic that belongs to it.
+
+    Was a dict inside CallLog.record. The fields were the same; what a dict
+    could not carry is the arithmetic every reader had to redo -- summing its
+    tokens, pricing it, deciding whether it counted as an attempt. Those live
+    here now, so "what did the challenge cost in dollars" is one call rather
+    than a formula copied to wherever the question is asked.
+
+    Kinds are open by design ("challenge", "attempt", and whatever a later pass
+    adds). A closed enum would have to be edited in step with every new call
+    site, and a log that rejects a call it does not recognise records less than
+    one that accepts it and labels it honestly.
+    """
+
+    __slots__ = ("kind", "session", "prompt", "completion", "cached",
+                 "ms", "turns", "err")
+
+    def __init__(self, kind, session=None, prompt=0, completion=0, cached=0,
+                 ms=0, turns=0, err=None):
+        self.kind = kind
+        self.session = session or None
+        self.prompt = int(prompt or 0)
+        self.completion = int(completion or 0)
+        self.cached = int(cached or 0)
+        self.ms = int(ms or 0)
+        self.turns = int(turns or 0)
+        self.err = err or None
+
+    @classmethod
+    def from_meta(cls, kind, meta, session=None, err=None):
+        """Build from run_executor's `meta`. Missing or partial never raises --
+        an unmeasured call is still a call, and dropping it would under-report
+        exactly the runs worth investigating."""
+        st = (meta or {}).get("stats") or {}
+        tok = st.get("tokens") or {}
+        return cls(kind, session=session,
+                   prompt=tok.get("prompt"), completion=tok.get("completion"),
+                   cached=tok.get("cached"), ms=st.get("ms"),
+                   turns=st.get("turns"), err=err)
+
+    @property
+    def tokens(self):
+        return self.prompt + self.completion
+
+    @property
+    def fresh_prompt(self):
+        """Input actually paid for. On a caching endpoint the cached remainder
+        is not re-billed, and reading `prompt` as spend overstates it."""
+        return max(0, self.prompt - self.cached)
+
+    def cost(self, profile):
+        """USD for this call alone -- the per-KIND question in money."""
+        try:
+            from qd.profiles import cost_usd
+            return float(cost_usd(profile, self.prompt, self.completion))
+        except Exception:
+            return 0.0
+
+    def as_dict(self):
+        return {"kind": self.kind, "session": self.session,
+                "prompt": self.prompt, "completion": self.completion,
+                "cached": self.cached, "ms": self.ms, "turns": self.turns,
+                "err": self.err}
+
+    def __repr__(self):
+        return (f"ExecutorCall({self.kind!r}, prompt={self.prompt}, "
+                f"completion={self.completion}, ms={self.ms})")
+
+
+class CallLog:
+    """The ExecutorCalls one delegation made.
+
+    `accum_stats` sums everything into one `cum` dict, which answered the only
+    question a run used to raise: what did this delegation cost? A run was one
+    KIND of call -- an attempt -- repeated until it passed or ran out.
+
+    That stopped being true. A run is now heterogeneous: a `challenge_brief`
+    pass, then N attempts, each with its own tokens and its own reason for
+    existing. Folded into one sum they are indistinguishable, so "what do
+    challenge passes cost us" -- the question that decides whether default-on
+    is worth it -- had no answer anywhere in the system. It has one now, and it
+    is what overturned the warm-handoff default: cold vs warm was only
+    measurable because the two calls are logged apart.
+
+    An object rather than a list of dicts for the same reason `EndpointGuard`
+    is one: the append and the totalling belong to the thing being logged, and
+    every caller that had to remember to do both is a caller that could forget.
+    Kept deliberately thin -- it accumulates and reports, it decides nothing.
+    """
+
+    __slots__ = ("calls",)
+
+    def __init__(self):
+        self.calls = []
+
+    def record(self, kind, meta, session=None, err=None):
+        """Append one call. `meta` is run_executor's meta; None is fine."""
+        call = ExecutorCall.from_meta(kind, meta, session=session, err=err)
+        self.calls.append(call)
+        return call
+
+    def __len__(self):
+        return len(self.calls)
+
+    def __iter__(self):
+        return iter(self.calls)
+
+    def of_kind(self, kind):
+        return [c for c in self.calls if c.kind == kind]
+
+    def by_kind(self, profile=None):
+        """{kind: {calls, prompt, completion, ms, cost_usd?}} -- the aggregate
+        that makes 'what did challenges cost' answerable without re-reading
+        every line. `profile` adds money to the answer."""
+        out = {}
+        for c in self.calls:
+            agg = out.setdefault(c.kind, {"calls": 0, "prompt": 0,
+                                          "completion": 0, "ms": 0})
+            agg["calls"] += 1
+            agg["prompt"] += c.prompt
+            agg["completion"] += c.completion
+            agg["ms"] += c.ms
+            if profile is not None:
+                agg["cost_usd"] = round(
+                    agg.get("cost_usd", 0.0) + c.cost(profile), 6)
+        return out
+
+    def as_record(self, profile=None):
+        """The shape that goes into the run log. Empty stays empty rather than
+        writing `{"calls": []}` into every historical-looking record."""
+        if not self.calls:
+            return {}
+        return {"calls": [c.as_dict() for c in self.calls],
+                "calls_by_kind": self.by_kind(profile)}
+
+
 def leverage_record(tool, cwd, status, verdict, stats, peak,
                     executor="qwen-local", cost_usd=0.0, extra=None):
     """
@@ -330,6 +495,17 @@ def leverage_record(tool, cwd, status, verdict, stats, peak,
     tokens = stats.get("tokens") or _tok_zero()
     v_chars = len(verdict or "")
     v_tokens = round(v_chars / 4.0)
+    # "unset" is cum_zero()'s seed -- "no attempt has reported yet", a state of
+    # a live accumulator and not a fact about a finished run. accum_stats
+    # already refuses it on the way IN (qd/invoke.py); refusing it on the way
+    # OUT keeps both ends of the seam agreeing, so a record can never carry a
+    # fourth provenance value that nothing else in the system emits. Not
+    # reachable through today's call graph -- both callers accumulate at least
+    # once -- but it was untested, and a latent value that only escapes on a
+    # path nobody exercises is exactly what gets read as real later.
+    stats_source = stats.get("stats_source") or "none"
+    if stats_source == "unset":
+        stats_source = "none"
     rec = {
         "ts": now_iso(),
         "tool": tool,
@@ -339,6 +515,15 @@ def leverage_record(tool, cwd, status, verdict, stats, peak,
         "tokens_main": stats.get("tokens_main") or _tok_zero(),
         "tokens_overhead": stats.get("tokens_overhead") or _tok_zero(),
         "token_source": stats.get("token_source") or "none",
+        # Projected for the same reason token_source is, and it was the more
+        # urgent of the two: `tools.calls` and `lines_added` below are written
+        # as 0 whether they were measured at 0 or never reported at all (a
+        # streamed run carries no `stats` block). A receipt can survive that --
+        # qd/verdict.py:566 is truthiness-guarded -- but THIS is the copy kept
+        # for later analysis, where nobody is around to remember which runs
+        # were streamed. An unlabelled zero in the run log is a zero that will
+        # be averaged.
+        "stats_source": stats_source,
         "peak_context": peak,
         "verdict_chars": v_chars,
         "verdict_tokens_est": v_tokens,

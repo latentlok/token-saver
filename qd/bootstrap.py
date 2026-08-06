@@ -12,6 +12,7 @@ to a refusal instead of killing the delegation.
 
 import os
 import re
+import shlex
 import shutil
 import sys
 
@@ -98,7 +99,66 @@ def detect_test_cmd(cwd):
     # a directory that may not exist -- is the wrong default.
     d = test_dir(cwd)
     if d:
-        return f"python3 -m unittest discover -s {d} -t . -v"
+        # `-t .` makes unittest REQUIRE the start directory to be an importable
+        # package, and this branch is reached precisely when there is no
+        # packaging metadata -- so it crashed before collecting anything:
+        #   ImportError: Start directory is not importable: '.../specs'
+        # Measured 2026-08-06 (py3.14) on four shapes; the plain `tests/` +
+        # `test_*.py` layout -- the majority case this branch exists for --
+        # crashed identically to this repo's `specs/`. The default top level is
+        # the start directory itself, which is legal for any folder.
+        #
+        # Keep `-t .` for the ONE shape where it is both legal and load-bearing:
+        # inside a package it is what makes intra-suite relative imports
+        # resolve. Same measurement -- dropping it on a tests/ dir holding an
+        # __init__.py turns `from .helpers import VALUE` into
+        # "ImportError: attempted relative import with no known parent package".
+        top = " -t ." if os.path.isfile(j(d, "__init__.py")) else ""
+        # `*.py`, not unittest's default `test*.py`, for the same reason the
+        # pytest branches above override python_files: the gate convention here
+        # is `*_spec.py`, which `test*.py` matches NONE of. No single glob spans
+        # test_*.py / *_test.py / *_spec.py, so the choice is which way to be
+        # wrong, and collecting too little is the worse way -- it exits 0 having
+        # graded a SUBSET, the silent skip the comment above says must not
+        # happen, wearing a green receipt.
+        #
+        # The cost is real and is accepted deliberately: `*.py` also imports
+        # every NON-test module in the directory. Measured 2026-08-06 on a
+        # package-shaped tests/ holding a helpers.py that fails to import --
+        # `-t . -v` gave "Ran 1, OK, exit 0"; `-t . -p "*.py" -v` gives
+        # "FAILED (errors=1), exit 1", and __init__.py is imported TWICE, so any
+        # side effect in it runs twice. A conftest.py gets imported too. So a
+        # broken helper now turns the gate red instead of sitting unnoticed.
+        # That is the right trade for a GATE -- a loud false red gets looked at,
+        # a silent partial grade does not -- but it is a behaviour change, not a
+        # free win. Pinned by DetectedCommandActuallyRuns's package fixtures.
+        #
+        # Everything interpolated here is quoted, because everything built here
+        # is eventually handed to a shell (qd/engine.py runs the detected
+        # command with shell=True). The pattern is a constant but would be
+        # glob-expanded against the project root before unittest ever saw it.
+        # `d` is the dangerous one: it comes from `test_dir` in
+        # .qwen-delegate.json, so it is ATTACKER-CONTROLLED for anyone who
+        # delegates into a repo carrying a hostile config, and unquoted it was
+        # arbitrary command execution, not merely a spaces bug --
+        #
+        #   test_dir = 'tests; touch /tmp/PWNED ;'
+        #     -> python3 -m unittest discover -s tests; touch /tmp/PWNED ; -p ...
+        #     -> marker created (reproduced 2026-08-06)
+        #
+        # shlex.quote and not an f-string '"{d}"': it adds quotes only when the
+        # value actually needs them, so the ordinary names ("tests", "specs",
+        # "t") pass through byte-identical and the gate's existing string
+        # assertions keep pinning the exact command a real project gets, rather
+        # than being loosened to accommodate the fix.
+        #
+        # `top` is a computed literal (" -t ." or ""), and the `-p` value is a
+        # constant, so those two carry no taint. The only other config-derived
+        # value in this function is `test_command` at the top, which is returned
+        # verbatim BY DESIGN -- it is the project declaring its own command, not
+        # a fragment interpolated into someone else's.
+        return (f'python3 -m unittest discover -s {shlex.quote(d)}{top}'
+                f' -p "*.py" -v')
     return ""
 
 

@@ -1,6 +1,7 @@
 {
   "name": "token-saver",
   "owner": { "name": "latentlok" },
+  "description": "Supervised delegation to a free local model: Claude architects and verifies, the local model builds, and an objective gate decides what ships.",
   "plugins": [
     {
       "name": "token-saver",

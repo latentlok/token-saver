@@ -12,6 +12,7 @@ import random
 import shutil
 import subprocess
 import threading
+import time
 
 
 class WorktreeError(Exception):
@@ -42,7 +43,7 @@ def _main_git_dir(repo):
     """Return the main (common) git dir, resolving linked worktrees."""
     p = subprocess.run(
         ["git", "rev-parse", "--git-common-dir"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         raise WorktreeError(f"Not a git repository: {repo}")
@@ -61,7 +62,7 @@ def _resolve_toplevel(common_dir, repo):
     # Ask git for the actual top-level of the main working tree.
     p = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         # Fallback: try to derive from common_dir
@@ -74,7 +75,7 @@ def _resolve_toplevel(common_dir, repo):
 def _branch_exists(main_dir, branch):
     p = subprocess.run(
         ["git", "-C", main_dir, "rev-parse", "--verify", branch],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     return p.returncode == 0
 
@@ -92,7 +93,7 @@ def acquire(repo):
         # Check HEAD exists (refuse unborn HEAD).
         p = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=main_dir, capture_output=True, text=True,
+            cwd=main_dir, capture_output=True, text=True, stdin=subprocess.DEVNULL,
         )
         if p.returncode != 0:
             raise WorktreeError(
@@ -104,7 +105,7 @@ def acquire(repo):
         # Dirty check on the main tree.
         p = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=main_dir, capture_output=True, text=True,
+            cwd=main_dir, capture_output=True, text=True, stdin=subprocess.DEVNULL,
         )
         dirty = bool(p.stdout.strip())
 
@@ -133,7 +134,7 @@ def acquire(repo):
                 "git", "-C", main_dir,
                 "worktree", "add", wt_path, "-b", branch, "HEAD",
             ],
-            capture_output=True, text=True,
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
         )
         if p.returncode != 0:
             raise WorktreeError(f"git worktree add failed: {p.stderr.strip()}")
@@ -155,18 +156,68 @@ def release(repo, path, branch):
     # git worktree remove --force (best-effort, tolerate missing)
     subprocess.run(
         ["git", "-C", main_dir, "worktree", "remove", "--force", path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
 
     # git branch -D (best-effort, tolerate missing)
     subprocess.run(
         ["git", "-C", main_dir, "branch", "-D", branch],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
 
     # Clean up leftover directory
     if os.path.isdir(path):
         shutil.rmtree(path)
+
+
+def stale(repo, older_than_s=6 * 3600):
+    """Our worktrees for `repo` that nothing has touched in `older_than_s`.
+
+    A chain holds ONE container across all its links (see server.run_chain), so
+    a chain that dies mid-flight -- killed session, crashed server, a link that
+    hung past its budget -- leaves that container behind with no owner. A lone
+    run's container is disposed of inside the run itself; a chain's outlives
+    every link by design, which is exactly what makes it orphanable.
+
+    Age, not liveness, is the signal on purpose. The owning process is a daemon
+    thread inside an MCP server that may itself be gone, and a pid recorded in
+    the tree would be the same stale-state class as the sidecar that claimed
+    "fresh". Mtime is a fact about the tree.
+
+    Reports; never deletes. A worktree holds delivered work whose receipt the
+    caller may not have read yet, and this project has spent a phase removing
+    code that destroys work on an inference.
+    """
+    out = []
+    try:
+        main_dir = _main_git_dir(repo)
+        base = os.path.realpath(_base_dir())
+        p = subprocess.run(
+            ["git", "-C", main_dir, "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+        if p.returncode != 0:
+            return out
+        now = time.time()
+        path = branch = None
+        for line in (p.stdout or "").splitlines() + [""]:
+            if line.startswith("worktree "):
+                path, branch = line[len("worktree "):].strip(), None
+            elif line.startswith("branch "):
+                branch = line[len("branch "):].strip().replace("refs/heads/", "")
+            elif not line.strip() and path:
+                real = os.path.realpath(path)
+                # Only ours: a developer's own `git worktree add` elsewhere in
+                # the repo is not this function's business.
+                if real.startswith(base + os.sep) and os.path.isdir(real):
+                    age = now - os.stat(real).st_mtime
+                    if age >= older_than_s:
+                        out.append({"path": path, "branch": branch,
+                                    "age_s": int(age)})
+                path = branch = None
+    except Exception:
+        return out
+    return out
 
 
 def merge_lines(res):
@@ -197,7 +248,7 @@ def classify_merge(repo, branch):
     # Get HEAD of main tree.
     p = subprocess.run(
         ["git", "-C", main_dir, "rev-parse", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         raise WorktreeError("Cannot resolve HEAD for merge classification")
@@ -206,7 +257,7 @@ def classify_merge(repo, branch):
     # Get branch sha.
     p = subprocess.run(
         ["git", "-C", main_dir, "rev-parse", branch],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
     if p.returncode != 0:
         raise WorktreeError(f"Cannot resolve branch {branch!r}")
@@ -216,7 +267,7 @@ def classify_merge(repo, branch):
     # Exit 0 = clean merge, nonzero = conflicts.
     p = subprocess.run(
         ["git", "-C", main_dir, "merge-tree", "--write-tree", head_sha, branch_sha],
-        capture_output=True, text=True,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
     )
 
     return "clean" if p.returncode == 0 else "conflict"

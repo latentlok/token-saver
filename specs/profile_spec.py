@@ -110,7 +110,7 @@ class BuiltinPin(Fixture):
         self.assertEqual(p["rules_file"], "QWEN.md")
         self.assertEqual(p["altitude"], "lld")
         self.assertEqual(p["defaults"],
-                         {"workers": 1, "max_iterations": 3, "timeout": 900})
+                         {"max_iterations": 3, "timeout": 900})
 
     def test_resolve_with_nothing_configured_returns_builtin(self):
         p = profiles.resolve(self.cwd, None)
@@ -214,7 +214,7 @@ class Endpoints(Fixture):
         self.assertIsNone(p["settings_overlay"])
         self.assertEqual(p["env"], {})
         self.assertEqual(p["defaults"],
-                         {"workers": 1, "max_iterations": 3, "timeout": 900})
+                         {"max_iterations": 3, "timeout": 900})
 
 
 class Dispatch(Fixture):

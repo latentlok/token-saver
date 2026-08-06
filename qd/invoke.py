@@ -5,6 +5,7 @@ Executor invocation, behavior frozen by specs/invoke_spec.py.
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -98,16 +99,43 @@ def stream_argv(argv):
     return argv
 
 
-def _terminate(proc):
-    """Stop the executor: ask, then insist. Never raises."""
+def _signal_group(proc, sig):
+    """Send `sig` to the child's whole process GROUP, falling back to the
+    child alone. Never raises.
+
+    The child is spawned with start_new_session=True, so it leads its own
+    group and every grandchild inherits it. Signalling the group is the only
+    way to stop what the child spawned: an executor that shells out (`uv` ->
+    `pytest`, a wrapper script -> the real command) leaves the grandchildren
+    running when only the direct child is killed, and they reparent to init
+    and keep burning CPU with nothing recording that they exist.
+    """
     try:
-        proc.terminate()
+        os.killpg(os.getpgid(proc.pid), sig)
+        return
+    except Exception:
+        pass
+    try:                                  # no group (Windows, or already reaped)
+        proc.kill() if sig == signal.SIGKILL else proc.terminate()
+    except Exception:
+        pass
+
+
+def _terminate(proc):
+    """Stop the executor and everything it spawned: ask, then insist.
+
+    Never raises. SIGTERM to the group, then SIGKILL to whatever ignored it --
+    a `wait()` on the direct child is not proof the group is gone, but it is
+    the only completion signal available, so the SIGKILL is unconditional
+    after the grace period rather than conditional on the child surviving.
+    """
+    try:
+        _signal_group(proc, signal.SIGTERM)
         try:
             proc.wait(timeout=5)
-            return
         except subprocess.TimeoutExpired:
             pass
-        proc.kill()
+        _signal_group(proc, signal.SIGKILL)
     except Exception:
         pass
 
@@ -194,6 +222,23 @@ def _stream_process(argv, cwd, env, timeout, on_line=None, stall_after=None):
         proc = subprocess.Popen(
             argv, cwd=cwd, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
+            # A11, the transport half. The server speaks JSON-RPC over stdio,
+            # so fd 0 IS the protocol input stream -- and Popen without
+            # `stdin=` hands the child that exact fd. The executor's stdin is
+            # a PIPE (never a tty), which is precisely what a CLI checks to
+            # decide it has piped input to read, so it consumes the caller's
+            # NEXT request: the reader thread then sees EOF and main() drains
+            # DRAIN_SECONDS and exits. Field symptom: a second tool call during
+            # an in-flight build failing after 10s with "Connection closed" --
+            # DRAIN_SECONDS to the second. start_new_session does NOT cover
+            # this; it detaches the process group, not the descriptors.
+            stdin=subprocess.DEVNULL,
+            # Its own session/process group, so _terminate can reap the whole
+            # tree. Without this a timeout or an abort kills the executor and
+            # orphans everything it spawned (measured: four separate leaks --
+            # a gate suite, a cancelled query's worker, and two dropped-
+            # transport workers, all still running minutes later under init).
+            start_new_session=True,
         )
     except FileNotFoundError:
         return None, "", None, f"binary not found ({argv[0]})", None
@@ -489,6 +534,44 @@ def peak_context(stdout):
     return best
 
 
+def turn_tokens(stdout):
+    """{prompt, completion} summed over the run's OWN assistant turns, or None.
+
+    The companion to peak_context: same records, summed instead of maxed.
+
+    It exists because `result.usage` is a SESSION counter, not a run counter.
+    `qwen -r <id>` replays the stored session, and replayUsageMetadata() feeds
+    every stored assistant turn's usageMetadata back through emitUsageMetadata(),
+    which does `cumulative.promptTokens += ...` -- so a resumed process starts
+    its counter at the previous run's total. Measured 2026-08-06 against
+    snowy/vLLM through a logging reverse proxy:
+
+        cold 1st call   turns summing 49,626    result.usage  49,626
+        WARM 2nd call   turns summing 101,670   result.usage 152,075
+
+    Nobody sent the extra 50,405. The proxy's request bodies carry the first
+    task exactly once and grow 2 -> 4 -> 6 -> 8 -> 10 messages like any other
+    conversation. Replayed turns are NOT re-emitted as assistant records, so
+    summing the records is the run's own cost.
+
+    None rather than zero when no turn carried usage: "nothing reported" and
+    "reported nothing" send a reader to different places, and only the first
+    means fall back to result.usage.
+    """
+    prompt = completion = 0
+    seen = False
+    for m in records(stdout):
+        if not isinstance(m, dict) or m.get("type") != "assistant":
+            continue
+        u = (m.get("message") or {}).get("usage") or {}
+        i, o = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+        if i or o:
+            seen = True
+            prompt += i
+            completion += o
+    return {"prompt": prompt, "completion": completion} if seen else None
+
+
 def tok_zero():
     return {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "thoughts": 0}
 
@@ -499,13 +582,20 @@ def tok_add(dst, src):
     return dst
 
 
-def accum_stats(cum, st):
+def accum_stats(cum, st, attempt=True):
     """
     Sum one attempt's telemetry into the run total.
 
     ctx["meta"] holds only the LAST attempt, so a 3-attempt run costs roughly 3x what a
     last-attempt reading reports. Cost accounting has to see the whole run: the iterate
     loop is precisely where free tokens get spent.
+
+    `attempt=False` for executor calls that are NOT tries at the task -- the
+    pre-build `challenge_brief` pass is the first. Their tokens are real and
+    must land in BURN and COST, but `ATTEMPTS: 2/3` on a receipt means two
+    tries at the work, and a question asked before any work is not one of them.
+    Folding them in with attempt=True would make every receipt over-report by
+    one and quietly change what the number means.
     """
     st = st or {}
     for k in ("tokens", "tokens_main", "tokens_overhead"):
@@ -524,7 +614,36 @@ def accum_stats(cum, st):
     cum["token_source"] = ("usage" if "usage" in seen
                            else "blended" if "blended" in seen
                            else "bySource" if "bySource" in seen else "none")
-    cum["attempts"] = (cum.get("attempts") or 0) + 1
+    # Same rule for the ACTIVITY counts, which the loop above SUMS: one attempt
+    # that reported no `stats` block makes the total an undercount, and an
+    # undercount labelled "measured" is exactly the streamed-zero lie one level
+    # up -- now on a number a receipt prints (qd/verdict.py:566).
+    #
+    # The token ladder above cannot be copied here. It is memoryless over its
+    # value set, and with only "stats"/"none" neither ordering works: let "none"
+    # absorb and a fresh cum + one measured attempt reads unmeasured; let
+    # "stats" win and measured-then-streamed reads fully measured. So the SEED
+    # is a third value -- "unset" is "no attempt has reported yet", which is not
+    # the same claim as "an attempt reported nothing", and the merge needs that
+    # difference to start clean.
+    #
+    # A missing key is neutral rather than "none": accum_stats is called with no
+    # stats at all for a pass that produced no telemetry (the challenge pass,
+    # qd/engine.py:1600), and such a call adds 0 to every sum. Nothing was
+    # undercounted, so nothing may be downgraded. Every real attempt goes
+    # through parse_stats, which always sets the key.
+    #
+    # "unset" is refused on the way IN for the same reason it exists on the way
+    # out: it is the absence of an observation, not one. Accepting it would let
+    # a cum that already read "stats" merge with a nothing-happened seed and
+    # come out "partial", inventing an undercount nobody measured.
+    now = st.get("stats_source")
+    if now and now != "unset":
+        was = cum.get("stats_source", "unset")
+        cum["stats_source"] = (now if was == "unset"
+                               else was if was == now else "partial")
+    if attempt:
+        cum["attempts"] = (cum.get("attempts") or 0) + 1
     return cum
 
 
@@ -532,7 +651,12 @@ def cum_zero():
     return {"tokens": tok_zero(), "tokens_main": tok_zero(),
             "tokens_overhead": tok_zero(), "ms": 0, "turns": 0, "tools": 0,
             "tool_fail": 0, "api_errors": 0, "lines_added": 0, "lines_removed": 0,
-            "tool_names": [], "models": [], "attempts": 0, "token_source": "none"}
+            "tool_names": [], "models": [], "attempts": 0, "token_source": "none",
+            # NOT "none": see accum_stats. "none" is a claim an attempt made;
+            # this is the absence of any attempt, and merging the two spellings
+            # makes the first measured attempt indistinguishable from an
+            # unmeasured one.
+            "stats_source": "unset"}
 
 
 def norm_tokens(t):
@@ -570,13 +694,24 @@ def parse_stats(stdout):
     out = {"tools": 0, "tool_fail": 0, "tool_names": [], "ms": 0, "turns": 0,
            "api_errors": 0, "lines_added": 0, "lines_removed": 0,
            "tokens": tok_zero(), "tokens_main": tok_zero(),
-           "tokens_overhead": tok_zero(), "models": [], "token_source": "none"}
+           "tokens_overhead": tok_zero(), "models": [], "token_source": "none",
+           # tools/lines_added get the provenance marker tokens already had.
+           # They are reported as 0 whether the executor called nothing or the
+           # wire carried nothing, and until this key existed the two were the
+           # same reading -- the unmeasured-zero class this module exists to
+           # catch, sitting in the module that catches it. Stays "none" when no
+           # result record parses at all, mirroring token_source.
+           "stats_source": "none"}
     for m in reversed(records(stdout)):
         if not isinstance(m, dict) or m.get("type") != "result":
             continue
         out["ms"] = m.get("duration_ms") or 0
         out["turns"] = m.get("num_turns") or 0
         st = m.get("stats") or {}
+        # Presence of the block, not whether its numbers are non-zero: a run
+        # that genuinely called no tools is MEASURED at zero and must keep the
+        # "stats" label, or the marker just restates `tools == 0`.
+        out["stats_source"] = "stats" if st else "none"
         t = st.get("tools") or {}
         out["tools"] = t.get("totalCalls") or 0
         out["tool_fail"] = t.get("totalFail") or 0
@@ -597,6 +732,17 @@ def parse_stats(stdout):
             tok = {"prompt": int(u.get("input_tokens") or 0),
                    "completion": int(u.get("output_tokens") or 0),
                    "total": 0, "cached": 0, "thoughts": 0}
+            # The turns win where they exist: `usage` is cumulative for the
+            # SESSION, so on a resumed run it carries every previous run's
+            # tokens too (turn_tokens; measured at 152,075 reported against
+            # 101,670 sent). On a cold run the two are equal to the token --
+            # 49,626/49,626, 49,611/49,611, 74,862/74,862 -- so this changes
+            # only the runs that were wrong. `usage` stays the floor for a run
+            # that ended before any turn reported.
+            own = turn_tokens(stdout)
+            if own is not None:
+                tok["prompt"] = own["prompt"]
+                tok["completion"] = own["completion"]
             if tok["prompt"] or tok["completion"]:
                 tok["total"] = tok["prompt"] + tok["completion"]
                 out["token_source"] = "usage"
@@ -703,9 +849,9 @@ def parse_qwen_json(stdout):
 
 # Truncation is a CLIENT-side cap, so it is invisible in the endpoint's config:
 # qwen-code always sends max_tokens, defaulting to 32k for a model name it does
-# not recognise (its normalize() keeps only the part after ":", so an Ollama tag
-# like "qwen3.6:27b-agent-q8-maxctx" reads as "27b-agent-q8-maxctx" and matches no
-# known-limits pattern). Thinking tokens count against that cap. When the cut
+# not recognise (its normalize() keeps only the part after ":", so any
+# `family:variant` tag like "qwen3.6:27b-agent-q8-maxctx" reads as
+# "27b-agent-q8-maxctx" and matches no known-limits pattern). Thinking tokens count against that cap. When the cut
 # lands inside a tool call the call is rejected outright, so the run ends with
 # no result -- which used to reach the caller as an empty success.
 _TRUNCATION_HINT = (

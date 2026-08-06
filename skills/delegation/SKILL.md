@@ -119,10 +119,32 @@ run. `NOTES`/`MISREPORT`/`DENIALS`/`FINDINGS` are leads to check, never trusted.
 
 ## Existing codebases: read the map, not the code
 
-Don't read a repo into your context. Query graphify's MCP for the scoped subgraph
-("what calls X?"), verify only load-bearing claims against source (INFERRED edges and
-semantic summaries are leads; tree-sitter coordinates are trustworthy), then pin the
-change as a spec. The receipt's `GRAPH` line tells you if the map is fresh.
+Don't read a repo into your context — and don't query the graph yourself either.
+**The graph is the WORKER's tool**, which is the whole point: architect-side `graphify`
+calls measured **+64% total cost** (see above), because every call is a turn whose output
+stays in your context forever.
+
+So: ask with one `qwen_query` ("what calls X?"), and let the worker read the graph on
+free tokens. Treat what comes back as leads — INFERRED edges and semantic summaries are
+claims to verify, tree-sitter coordinates are trustworthy — then pin the change as a
+spec. The receipt's `GRAPH` line tells you whether the map the worker used was fresh.
+
+### Letting the worker use the graph — two things that bite
+
+**It needs `approval_mode="scoped"`.** `auto-edit` has no shell at all, so a worker told
+to use the graph under the default silently falls back to grep and you pay for the
+reading you were trying to avoid. Nothing in the receipt says this happened.
+
+**`shell_allow` patterns match the COMMAND, not the subcommand.** `^graphify\b` permits
+`graphify update` as well as `graphify explain` — and `update` can bill a cloud account
+on a repo with a semantic index configured. Allow the read-only subcommands explicitly:
+
+```json
+"shell_allow": ["^graphify (explain|query|affected|god-nodes|update-check)\\b"]
+```
+
+The general rule: `^cmd\b` is not "let it run cmd", it is "let it run every subcommand
+cmd has". Ask what the most powerful one is before you write the pattern.
 
 ## Greenfield = iteration zero
 
@@ -130,21 +152,21 @@ Same loop. Write the HLD, commit every inter-module contract as a `*_spec.*` fil
 **before any code**, then delegate bottom-up (each unit gated on its own spec + its
 dependencies'). Contracts-first is what makes the pieces compose.
 
-## Serial by default (`dispatch`)
+## Concurrency (`parallel_max`)
 
-One local endpoint is one GPU. Concurrent requests do not each get a private
-context — on Ollama the loaded context is split across parallel slots — so fan-out
-buys wall-clock at the price of a shorter effective context per request, which is
-how a turn comes back truncated mid tool-call. Out of the box every endpoint holds
-**one slot**, and that slot is held machine-wide (a file lock), not just within
-this session — two Claude sessions pointed at one box now queue instead of
-colliding.
+Each endpoint declares how many requests it serves at once — `parallel_max` in the
+`endpoints` section of `~/.qwen-delegate/executors.json`. That one number is the whole
+model: slots are held machine-wide (a file lock), so two Claude sessions on one
+endpoint queue instead of colliding, and an endpoint with one slot is simply serial.
+Undeclared means one slot, so fan-out is opt-in.
 
-Set `"dispatch": "serial"` in `.qwen-delegate.json` (or `~/.qwen-delegate/config.json`)
-to pin that even where an endpoint declares `parallel_max > 1`: batches then run
-their items in order, and every call queues for the single slot. `"parallel"`
-honours the declared capacity. Anything else reads as serial — a typo must not
-turn concurrency on.
+**Concurrency needs isolation.** Endpoint slots only buy overlap for runs that don't
+share a tree — `worktree="auto"` (or the project default). In-tree items still take
+the repo lock one at a time, because two workers editing one tree is corruption, not
+throughput.
+
+**You never have to predict what a call got** — a fan-out receipt states it:
+`DISPATCH: parallel · endpoint gpu · 4 slot(s) · 3 item(s)`.
 
 ## Fan-out (parallel builds)
 
@@ -155,7 +177,7 @@ otherwise these queue and buy nothing. Pin the contracts, then either:
 - **`worktree="auto"`** per call (or the project config default) — isolates each build
   on a `qwen/<id>` branch; the receipt carries the exact `MERGE:` command. A merge
   conflict is a design signal (two units' contracts overlapped) — escalate, don't force.
-Cap is per-endpoint (your hardware); more workers = raise it in the executor profile.
+Cap is per-endpoint (your hardware); raise `parallel_max` in the executor profile.
 
 ## touch_scope
 
@@ -205,9 +227,6 @@ the stop is what you can count on. `reinject` (continue on the summarised histor
 `discard` (cold restart) are still there if you deliberately want them. For any run you
 choose to continue after a compaction, put critical rules in the TASK TEXT — QWEN.md
 does not survive one.
-
-**workers (best-of-N):** N independent candidates, first gate-pass wins. Free tokens but
-N× wall time; needs `verify` and a committed base.
 
 **qwen_query:** keep questions bounded to a few files — a forced whole-repo read pushes
 Qwen past compaction, after which it fabricates having read things. Structure and
@@ -314,8 +333,8 @@ turn — all user-side.
 
 ## Escalation ladder (build won't converge)
 
-Reflexion retries (automatic, in the loop) → best-of-N (`workers=N`) → read the failing
-sliver → patch it yourself as last resort. Escalate to the USER only for genuine calls:
+Reflexion retries (automatic, in the loop) → read the failing sliver → patch it
+yourself as last resort. Escalate to the USER only for genuine calls:
 direction, outward-facing or hard-to-undo actions, a merge conflict.
 
 ## Mutation-test your own gates

@@ -74,6 +74,9 @@ HARD_DENY = [r"\brm\b", r"\bmv\b", r"\bcurl\b", r"\bwget\b", r"\bsudo\b",
 # shell metacharacters that could chain/redirect around the allowlist
 UNSAFE_META = [";", "&&", "||", "|", "`", "$(", ">", "<", "&", "\n"]
 
+# Exactly a trailing stderr merge, nothing more: no target, no second redirect.
+_STRIP_STDERR = re.compile(r"\s*2>&1\s*$")
+
 # Inputs that mean "this call has an effect somewhere". An UNKNOWN tool carrying
 # one is denied: the old default-allow tail passed anything not named above as
 # "read-only", which is the same hole a denied `touch` walks through as a
@@ -85,7 +88,8 @@ EFFECT_KEYS = ("file_path", "path", "command", "content")
 # would deny file search outright, and a gate that blocks reading is the kind
 # that gets switched off entirely -- so the read tools are named.
 READ_ONLY = ("read_file", "read_many_files", "glob", "grep",
-             "search_file_content", "list_directory", "ls")
+             "grep_search", "search_file_content", "list_directory", "ls",
+             "find_files", "read_folder", "list_dir")
 
 
 def _append(path, what):
@@ -128,11 +132,18 @@ def decide(tool, ti):
         if VERIFY and cmd == VERIFY.strip():
             log_allow(f"run_shell_command: {cmd}")
             return True, "exact verify command"          # trusted; may contain &&/pipes
-        if any(m in cmd for m in UNSAFE_META):
+        # A TRAILING `2>&1` is how anyone runs a test and reads the output:
+        # it merges stderr into stdout and reaches nothing else. Rejecting it
+        # meant the worker could not run the exact command it was told to make
+        # pass -- the rule defeating its own purpose. Stripped before the
+        # metacharacter scan, so `2>&1 > /etc/passwd` still fails on the `>`
+        # that remains.
+        scan = _STRIP_STDERR.sub("", cmd).strip()
+        if any(m in scan for m in UNSAFE_META):
             return False, "compound/redirect/substitution not allowed"
-        if any(re.search(p, cmd) for p in HARD_DENY):
+        if any(re.search(p, scan) for p in HARD_DENY):
             return False, "state-changing or network command"
-        if any(re.search(p, cmd) for p in DEFAULT_ALLOW + EXTRA):
+        if any(re.search(p, scan) for p in DEFAULT_ALLOW + EXTRA):
             log_allow(f"run_shell_command: {cmd}")
             return True, "on allowlist"
         return False, "not on the shell allowlist"

@@ -4,7 +4,7 @@ Spec for qd/queries.py -- read-only Q&A (LLD "qd/queries.py").
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
-Port of run_query/run_investigate with the v2 seam: the executor comes from the
+Port of run_query with the v2 seam: the executor comes from the
 profile chain (qd.profiles.resolve honoring the per-call "executor" arg), runs
 through qd.invoke.run_executor, and the log record carries C5 executor/cost.
 The stub profile is injected through the REAL resolution chain via
@@ -20,8 +20,7 @@ Load-bearing:
      STILL logged -- a timed-out query burned real tokens.
 
 Public surface pinned here:
-    qd.queries.run_query(args) -> str
-    qd.queries.run_investigate(args) -> str      (alias: format='map')
+    qd.queries.run_query(args) -> str            (format='answer' | 'map')
     qd.queries.ANSWER_SUFFIX, qd.queries.INVESTIGATE_SUFFIX
 
 Run:  python3 specs/queries_spec.py
@@ -122,11 +121,11 @@ class Basics(Fixture):
         self.assertNotEqual(queries.ANSWER_SUFFIX, queries.INVESTIGATE_SUFFIX)
         self.assertTrue(queries.ANSWER_SUFFIX.strip())
 
-    def test_investigate_alias(self):
-        out = queries.run_investigate({"question": "map it",
-                                       "cwd": self.cwd,
-                                       "executor": "stub"})
-        self.assertIn("--- map ---", out)
+    # `test_investigate_alias` was here. `queries.run_investigate` is gone: it
+    # set format="map" and called run_query, and its only caller was a dispatch
+    # entry (`qwen_investigate`) that no schema declared, so no conformant MCP
+    # client could reach it. `test_map_format_distinct` above already pins the
+    # capability through the surviving, advertised route.
 
     def test_unconfigured_warns_but_proceeds(self):
         out = self.q()  # fixture cwd has no rules file
@@ -242,6 +241,72 @@ class ResultSchema(Fixture):
         self.assertNotIn("RESULT:", out)
 
 
+class ResultSchemaOutOfSubset(Fixture):
+    """A contract this side cannot check is refused before the question is put.
+
+    `validate()` honours five keywords and skips the rest, so a `minimum: 5`
+    nested under `properties` is reported as satisfied by a payload of
+    {"n": 1} -- and because `schema_suffix` pastes the schema into the prompt,
+    the worker usually obeys it and the constraint LOOKS enforced until the day
+    it does not. On this surface the damage is worse than on the delegate one:
+    there is no retry loop and no gate, so the RESULT line is the caller's only
+    evidence about the answer it is about to parse. "RESULT: valid (schema)"
+    over an unchecked constraint is the fuel gauge reading full because it is
+    disconnected (PRINCIPLES §IV).
+
+    The check is the SAME function qd/engine.py's `_preconditions` calls.
+    qwen_query never enters engine.py, and a keyword list maintained twice
+    drifts on the first edit -- which is exactly the shape of bug this repo
+    keeps finding: covered on one surface, silently open on the other.
+
+    Narrowness is pinned by the class above rather than restated here: a
+    schema that is not a dict at all stays non-fatal
+    (test_a_malformed_schema_is_ignored_not_fatal).
+    """
+
+    BAD = {"type": "object",
+           "properties": {"n": {"type": "integer", "minimum": 5}}}
+
+    def test_a_schema_the_check_cannot_enforce_is_refused_by_keyword(self):
+        # Refused, not "STATUS: error": the call is answerable, it just cannot
+        # be answered honestly as written, and the caller fixes it by deleting
+        # a line it can only delete if the refusal names it.
+        out = self.q(result_schema=self.BAD)
+        self.assertTrue(out.startswith("STATUS: refused"), out[:120])
+        self.assertIn("minimum", out)
+
+    def test_the_executor_never_ran(self):
+        # A refusal that still asks the question spends the tokens it was
+        # meant to save, and hands back an answer nobody can trust the shape of.
+        self.q(result_schema=self.BAD)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "argv.json")))
+
+    def test_nothing_is_written_to_the_leverage_log(self):
+        # The inverse of test_executor_failure_is_error_receipt_and_logged: a
+        # failed query IS logged because it burned real tokens. This one burned
+        # none, and a ledger padded with zero-cost entries stops answering the
+        # question it exists for.
+        self.q(result_schema=self.BAD)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")))
+
+    def test_a_keyword_buried_deeper_is_refused_here_too(self):
+        out = self.q(result_schema={"type": "array", "items": {
+            "type": "string", "format": "email"}})
+        self.assertTrue(out.startswith("STATUS: refused"), out[:120])
+        self.assertIn("format", out)
+
+    def test_a_schema_inside_the_subset_is_still_answered(self):
+        # The refusal must cost nothing to the callers already using this.
+        os.environ["STUB_BODY"] = '```json\n{"files": ["a.py"]}\n```'
+        out = self.q(result_schema={
+            "type": "object", "required": ["files"],
+            "properties": {"files": {"type": "array",
+                                     "items": {"type": "string"}}}})
+        self.assertIn("STATUS: ok", out)
+        self.assertIn("RESULT: valid (schema)", out)
+
+
 class LogSeam(Fixture):
     def test_c5_fields_and_query_shape(self):
         self.q()
@@ -251,6 +316,22 @@ class LogSeam(Fixture):
         self.assertEqual(rec["cost_usd"], 0.0)
         self.assertEqual(rec["approval_mode"], "plan")
         self.assertTrue(rec["question"]["sha256"])
+
+    def test_the_query_is_logged_as_a_CALL_not_only_as_a_total(self):
+        # Step 8's cheap half (DESIGN §8.1). The log became heterogeneous when
+        # a delegation learned to separate its challenge pass from its build
+        # attempts; a query sat outside that vocabulary, so "what did we spend
+        # on queries" could not be asked in the shape every other question
+        # about the log uses. Its totals were recorded -- the CALL was not.
+        #
+        # Pinned HERE rather than against CallLog directly, because the unit is
+        # not what broke: mutating the wiring in queries.py left every
+        # CallLog test green. Tested logic, untested wiring, again.
+        self.q()
+        rec = self.log_records()[-1]
+        self.assertEqual(len(rec["calls"]), 1, "the query was not logged as a call")
+        self.assertEqual(rec["calls"][0]["kind"], "query")
+        self.assertIn("query", rec["calls_by_kind"])
 
 
 if __name__ == "__main__":

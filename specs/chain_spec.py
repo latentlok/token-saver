@@ -112,6 +112,64 @@ class Order(Fixture):
         self.assertEqual(server.run_chain([], self.handler()), "")
 
 
+class WholeChainReview(Fixture):
+    """G2: nothing ever read link 3 alongside link 1.
+
+    Each link could be challenged against the CODE, and the head link was by
+    default. What no pass performed was reading the links against EACH OTHER --
+    so a step that undid an earlier one surfaced only after the earlier one had
+    committed into the shared worktree, which is exactly when undoing it stops
+    being free.
+
+    Built as the SAME challenge pass with a wider subject, not a second
+    mechanism: every rule it already had still applies -- once per chain, refuse
+    only on evidence naming a path that exists, diagnosis runs exempt.
+    """
+
+    def test_the_head_link_is_challenged_against_the_whole_chain(self):
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        head = self.seen[0]
+        self.assertIn(CHAIN_BRIEF_ARG, head)
+        brief = head[CHAIN_BRIEF_ARG]
+        for step in ("step 1", "step 2", "step 3"):
+            self.assertIn(step, brief)
+
+    def test_the_steps_are_numbered_and_ordered(self):
+        # The contradictions that matter are ORDINAL: a later step undoing an
+        # earlier one is a contradiction; the same two briefs in the other order
+        # might be a perfectly good refactor. A flat unordered list would lose
+        # the only thing that tells them apart.
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        brief = self.seen[0][CHAIN_BRIEF_ARG]
+        self.assertLess(brief.index("STEP 1"), brief.index("STEP 2"))
+        self.assertLess(brief.index("STEP 2"), brief.index("STEP 3"))
+
+    def test_later_links_are_not_given_the_chain_brief(self):
+        # It is reviewed ONCE. Handing it to every link would pay N
+        # read-the-whole-chain passes to re-answer a settled question.
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        for later in self.seen[1:]:
+            self.assertNotIn(CHAIN_BRIEF_ARG, later)
+
+    def test_a_single_link_chain_gets_no_chain_brief(self):
+        # One step cannot contradict itself, and the wider subject would cost a
+        # longer prompt for a question with no answer.
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(1), self.handler(GREEN))
+        self.assertNotIn(CHAIN_BRIEF_ARG, self.seen[0])
+
+    def test_it_says_the_steps_share_a_tree_and_run_in_order(self):
+        # Without that, a reviewer cannot tell a contradiction from two
+        # independent tasks that happen to touch the same file.
+        brief = server.chain_brief([{"task": "a"}, {"task": "b"}])
+        low = brief.lower()
+        self.assertIn("in order", low)
+        self.assertIn("one working tree", low)
+
+
 class HaltOnRed(Fixture):
     """The load-bearing claim: a broken link stops the chain."""
 
@@ -248,6 +306,382 @@ class Routing(Fixture):
         self.assertEqual(len(calls), 1)
         self.assertEqual(out, GREEN)
         self.assertNotIn(CHAIN_ARG, calls[0])
+
+
+class BatchOfChains(Fixture):
+    """N independent pipelines in one call, each internally ordered.
+
+    `chain` + `batch` at the CALL level stays refused -- one call cannot be
+    both ordered and unordered. A batch OF chains is not that ambiguity, and
+    without it N pipelines cost N separate submits.
+    """
+
+    def chained(self, n_items, links=2):
+        return [{"cwd": self.cwd,
+                 "chain": [{"task": f"p{i}s{j}"} for j in range(1, links + 1)]}
+                for i in range(1, n_items + 1)]
+
+    def test_items_are_chains_and_links_stay_ordered(self):
+        from qd import engine
+        seen = []
+        real = engine.run
+        engine.run = lambda a: (seen.append(a["task"]), GREEN)[1]
+        try:
+            out = server.run_delegate_batch(
+                {"cwd": self.cwd, "batch": self.chained(2)})
+        finally:
+            engine.run = real
+        # Both pipelines ran, and each one's links kept their order.
+        self.assertEqual(sorted(seen), ["p1s1", "p1s2", "p2s1", "p2s2"])
+        self.assertLess(seen.index("p1s1"), seen.index("p1s2"))
+        self.assertLess(seen.index("p2s1"), seen.index("p2s2"))
+        self.assertEqual(out.count("=== chain link 1/2:"), 2)
+
+    def test_a_red_link_halts_only_its_own_pipeline(self):
+        from qd import engine
+        real = engine.run
+        engine.run = lambda a: RED if a["task"] == "p1s1" else GREEN
+        try:
+            out = server.run_delegate_batch(
+                {"cwd": self.cwd, "batch": self.chained(2)})
+        finally:
+            engine.run = real
+        # p1 halted at link 1; p2 is untouched by it -- that is the whole
+        # point of the items being independent.
+        self.assertIn("SKIPPED (chain halted at link 1", out)
+        self.assertIn("=== chain link 2/2: success ===", out)
+
+    def test_a_chain_item_takes_no_batch_level_guard(self):
+        # The correctness point: run_chain takes a guard per LINK. A guard
+        # taken here as well would have the item holding the endpoint slot its
+        # own first link then waits for -- a deadlock on a one-slot endpoint,
+        # not a slowdown.
+        log = []
+        real = server._guards_for
+
+        class G:
+            def acquire(self): log.append("acquire")
+            def release(self): log.append("release")
+
+        server._guards_for = lambda name, args: [G()]
+        realrun = None
+        try:
+            from qd import engine
+            realrun = engine.run
+            engine.run = lambda a: GREEN
+            server.run_batch(self.chained(1, links=2), server._batch_item)
+        finally:
+            server._guards_for = real
+            if realrun:
+                from qd import engine
+                engine.run = realrun
+        # Two links -> two acquire/release pairs, not three.
+        self.assertEqual(log.count("acquire"), 2)
+
+    def test_a_plain_item_still_takes_its_guard(self):
+        log = []
+        real = server._guards_for
+
+        class G:
+            def acquire(self): log.append("acquire")
+            def release(self): log.append("release")
+
+        server._guards_for = lambda name, args: [G()]
+        try:
+            from qd import engine
+            realrun = engine.run
+            engine.run = lambda a: GREEN
+            try:
+                server.run_batch([{"cwd": self.cwd, "task": "solo"}],
+                                 server._batch_item)
+            finally:
+                engine.run = realrun
+        finally:
+            server._guards_for = real
+        self.assertEqual(log, ["acquire", "release"])
+
+    def test_nesting_is_one_level(self):
+        out = server._batch_item({"cwd": self.cwd, "batch": [{"task": "x"}]})
+        self.assertIn("STATUS: error", out)
+        self.assertIn("nesting is one level", out)
+
+    def test_call_level_chain_plus_batch_is_still_refused(self):
+        out = server.run_delegate_batch(
+            {"cwd": self.cwd, "chain": [{"task": "a"}],
+             "batch": [{"task": "b"}]})
+        self.assertIn("mutually exclusive", out)
+
+
+class HandoffForwarding(Fixture):
+    """Link N's handoff reaches link N+1, without going through the caller.
+
+    The envelope already existed and was already spec-pinned -- every worker is
+    asked for HANDOFF/FILES/NEXT/FINDINGS and parse_handoff reads them back.
+    Nothing forwarded them, so the only route from link 1 to link 2 ran through
+    the orchestrator's context: the exact burn the product exists to prevent.
+    """
+
+    def reply(self, handoff="built the thing", files="a.py", nxt="nothing"):
+        return (f"STATUS: success\nSESSION: s\nprose\n"
+                f"HANDOFF: {handoff}\nFILES: {files}\nNEXT: {nxt}\n")
+
+    def test_link_two_receives_link_ones_handoff(self):
+        server.run_chain(self.items(2),
+                         self.handler(self.reply("alpha.txt written"), GREEN))
+        second = self.seen[1]["task"]
+        self.assertIn("HANDOFF: alpha.txt written", second)
+        self.assertIn("FILES: a.py", second)
+        self.assertIn("--- link 1 of 2 finished", second)
+
+    def test_the_original_task_survives_and_reads_last(self):
+        server.run_chain(self.items(2), self.handler(self.reply(), GREEN))
+        second = self.seen[1]["task"]
+        self.assertTrue(second.endswith("step 2"), second[-40:])
+        self.assertLess(second.index("HANDOFF:"), second.index("step 2"))
+
+    def test_the_preamble_is_framed_as_context_not_orders(self):
+        # NEXT: is "what a follow-up would know", written by a worker who was
+        # not told a follow-up would read it. Unframed it reads as a directive.
+        server.run_chain(self.items(2),
+                         self.handler(self.reply(nxt="delete the old module"),
+                                      GREEN))
+        self.assertIn("context, not instructions", self.seen[1]["task"])
+
+    def test_link_one_gets_no_preamble(self):
+        server.run_chain(self.items(2), self.handler(self.reply(), GREEN))
+        self.assertEqual(self.seen[0]["task"], "step 1")
+
+    def test_a_reply_with_no_handoff_lines_carries_nothing(self):
+        server.run_chain(self.items(2), self.handler(GREEN, GREEN))
+        self.assertEqual(self.seen[1]["task"], "step 2")
+
+    def test_only_the_previous_link_is_carried_not_the_whole_history(self):
+        # A chain of eight would otherwise accumulate eight preambles, and the
+        # oldest is the least relevant. One hop is what "the tree you inherit"
+        # means.
+        server.run_chain(self.items(3),
+                         self.handler(self.reply(handoff="from one"),
+                                      self.reply(handoff="from two"), GREEN))
+        third = self.seen[2]["task"]
+        self.assertIn("from two", third)
+        self.assertNotIn("from one", third)
+
+    def test_carry_none_opts_out(self):
+        items = self.items(2)
+        items[1]["carry"] = "none"
+        server.run_chain(items, self.handler(self.reply(), GREEN))
+        self.assertEqual(self.seen[1]["task"], "step 2")
+
+    def test_a_halted_chain_carries_nothing_onward(self):
+        # Nothing to inherit from a link that did not deliver, and the links
+        # after it are skipped anyway.
+        out = server.run_chain(self.items(3), self.handler(self.reply(), RED))
+        self.assertEqual(len(self.seen), 2)
+        self.assertIn("SKIPPED", out)
+
+
+class ChallengeOncePerChain(Fixture):
+    """The brief review happens at the HEAD of the chain, not per link.
+
+    Every link is its own delegate() call, so the default would fire on each
+    one -- an eight-link chain paying eight read-the-whole-codebase passes to
+    re-answer a settled question.
+    """
+
+    def test_only_the_first_link_is_left_to_challenge(self):
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        got = [a.get("challenge_brief") for a in self.seen]
+        self.assertIsNone(got[0], "link 1 must keep the default")
+        self.assertEqual(got[1:], [False, False])
+
+    def test_an_item_that_asks_for_it_explicitly_still_gets_it(self):
+        items = self.items(2)
+        items[1]["challenge_brief"] = True
+        server.run_chain(items, self.handler(GREEN, GREEN))
+        self.assertIs(self.seen[1]["challenge_brief"], True)
+
+    def test_an_item_that_declines_stays_declined(self):
+        items = self.items(2)
+        items[0]["challenge_brief"] = False
+        server.run_chain(items, self.handler(GREEN, GREEN))
+        self.assertIs(self.seen[0]["challenge_brief"], False)
+
+
+class SharedWorktree(Fixture):
+    """One container for the whole chain -- the dependency the shape promises.
+
+    Before this, every link called `worktrees.acquire` for itself and, on
+    success, committed to its OWN branch without merging back. So under
+    `worktree: "auto"` link 2 opened a clean checkout of HEAD holding none of
+    link 1's files, and run_chain's own "link 2 builds on link 1's tree" was
+    true only under `"off"` -- the mode that takes the repo lock and serializes
+    every concurrent chain. Isolation XOR dependency, pick one.
+    """
+
+    def repo(self):
+        import subprocess
+        d = tempfile.mkdtemp()
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", d] + a, capture_output=True)
+        with open(os.path.join(d, "seed.txt"), "w") as f:
+            f.write("seed\n")
+        subprocess.run(["git", "-C", d, "add", "-A"], capture_output=True)
+        subprocess.run(["git", "-C", d, "commit", "-qm", "init"],
+                       capture_output=True)
+        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+            f.write('{"worktree": "auto"}')
+        return d
+
+    def test_every_link_is_lent_the_same_tree(self):
+        from qd.engine import WT_ARG
+        d = self.repo()
+        items = [{"task": f"s{i}", "cwd": d} for i in (1, 2, 3)]
+        server.run_chain(items, self.handler(GREEN, GREEN, GREEN))
+        lent = [a.get(WT_ARG) for a in self.seen]
+        self.assertTrue(all(lent), "a link ran without the chain's tree")
+        self.assertEqual(len({w["path"] for w in lent}), 1,
+                         "links did not share one container")
+        self.assertNotEqual(lent[0]["path"], d, "the chain ran in the main tree")
+
+    def test_link_two_sees_what_link_one_wrote(self):
+        # The end-to-end claim, and the only one that proves the plumbing:
+        # a real file, written by link 1 into the lent tree and committed,
+        # readable by link 2. Everything else here is bookkeeping.
+        from qd.engine import WT_ARG
+        d = self.repo()
+        seen_by_two = {}
+
+        def h(args):
+            wt = args[WT_ARG]["path"]
+            if args["task"] == "s1":
+                open(os.path.join(wt, "from_one.txt"), "w").write("hello\n")
+                import subprocess
+                subprocess.run(["git", "-C", wt, "add", "-A"], capture_output=True)
+                subprocess.run(["git", "-C", wt, "commit", "-qm", "link1"],
+                               capture_output=True)
+            else:
+                p = os.path.join(wt, "from_one.txt")
+                seen_by_two["exists"] = os.path.isfile(p)
+                seen_by_two["body"] = open(p).read() if os.path.isfile(p) else None
+            return GREEN
+
+        server.run_chain([{"task": "s1", "cwd": d}, {"task": "s2", "cwd": d}], h)
+        self.assertTrue(seen_by_two.get("exists"),
+                        "link 2 could not see link 1's file -- the chain is "
+                        "not a chain")
+        self.assertEqual(seen_by_two.get("body"), "hello\n")
+
+    def test_a_kept_container_reports_how_to_merge_it(self):
+        d = self.repo()
+        out = server.run_chain([{"task": "s1", "cwd": d}], self.handler(GREEN))
+        self.assertIn("=== chain worktree:", out)
+        self.assertIn("MERGE: git merge", out)
+
+    def test_a_halted_chain_keeps_what_already_passed(self):
+        # Link 1 delivered and its gate went green. Link 3 failing does not
+        # retract that, and releasing the container would delete it unseen.
+        d = self.repo()
+        items = [{"task": f"s{i}", "cwd": d} for i in (1, 2)]
+        out = server.run_chain(items, self.handler(GREEN, RED))
+        self.assertIn("chain halted, kept anyway", out)
+        branch = out.split("=== chain worktree: ")[1].split(" ===")[0]
+        import subprocess
+        p = subprocess.run(["git", "-C", d, "branch", "--list", branch],
+                           capture_output=True, text=True)
+        self.assertIn(branch, p.stdout, "the kept branch is gone")
+
+    def test_a_chain_that_committed_nothing_leaves_no_container(self):
+        d = self.repo()
+        out = server.run_chain([{"task": "s1", "cwd": d}], self.handler(RED))
+        self.assertNotIn("=== chain worktree:", out)
+        base = os.path.expanduser("~/.qwen-delegate/worktrees")
+        import subprocess
+        p = subprocess.run(["git", "-C", d, "branch", "--list", "qwen/*"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.stdout.strip(), "",
+                         "a chain that delivered nothing left a branch behind")
+
+    def test_an_in_tree_chain_is_untouched(self):
+        # `worktree: "off"` is the long-standing default and keeps the repo
+        # lock path. Nothing here may change it.
+        from qd.engine import WT_ARG
+        d = self.repo()
+        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+            f.write('{"worktree": "off"}')
+        server.run_chain([{"task": "s1", "cwd": d}], self.handler(GREEN))
+        self.assertNotIn(WT_ARG, self.seen[0])
+
+    def test_a_lone_delegation_is_never_lent_a_tree(self):
+        # The hard constraint on this change: a single delegation and
+        # qwen_query must behave exactly as before. A lone run acquires and
+        # disposes of its own container; only a chain lends one. Driven through
+        # the real routing seam with engine.run stubbed, so this fails if the
+        # lone path ever starts reading WT_ARG.
+        from qd import engine
+        from qd.engine import WT_ARG
+        d = self.repo()
+        seen = []
+        real = engine.run
+        engine.run = lambda a: (seen.append(a), GREEN)[1]
+        try:
+            server.run_delegate_batch({"cwd": d, "task": "solo"})
+        finally:
+            engine.run = real
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn(WT_ARG, seen[0])
+
+    def test_an_empty_chain_acquires_nothing(self):
+        d = self.repo()
+        server.run_chain([], self.handler())
+        import subprocess
+        p = subprocess.run(["git", "-C", d, "branch", "--list", "qwen/*"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.stdout.strip(), "")
+
+
+class ChainPreflight(Fixture):
+    """The shared pre-flight verdict must not cross a chain link boundary.
+
+    `_preflight_once` keys on (base sha, worktrees dir, gate) and justifies
+    itself with "every item is cut from the SAME base commit into its own clean
+    worktree, so that answer is identical for every item by construction".
+    True for a batch; false for chain link 2, whose tree deliberately holds
+    link 1's commits.
+    """
+
+    def test_sharing_off_actually_bypasses_the_cache(self):
+        # The mechanism the fix relies on: `isolated=False` must RUN the gate,
+        # not answer from the shared dict. If this ever silently starts caching
+        # regardless, chain link 2 would be graded on link 1's verdict and the
+        # bug returns with the fix still in place.
+        from qd import engine
+        d = tempfile.mkdtemp()
+        engine._preflight_forget()
+        runs = []
+        real = engine._run_verify_timed
+        engine._run_verify_timed = lambda c, w, t: (
+            runs.append(c), (True, "", 1, False))[1]
+        try:
+            for _ in range(2):
+                engine._preflight_once("gate", d, 5, "abc123", False)
+            self.assertEqual(len(runs), 2, "an unshared pre-flight was cached")
+            runs.clear()
+            for _ in range(2):
+                engine._preflight_once("gate", d, 5, "abc123", True)
+            self.assertEqual(len(runs), 1, "a shared pre-flight stopped sharing")
+        finally:
+            engine._run_verify_timed = real
+            engine._preflight_forget()
+
+    def test_a_chain_link_after_the_first_is_marked_unshareable(self):
+        # And the wiring: the engine decides from CHAIN_ARG's position, so the
+        # positions run_chain injects are what actually reach that decision.
+        from qd.engine import CHAIN_ARG
+        d = tempfile.mkdtemp()
+        server.run_chain([{"task": "a", "cwd": d}, {"task": "b", "cwd": d}],
+                         self.handler(GREEN, GREEN))
+        self.assertEqual([a[CHAIN_ARG]["pos"] for a in self.seen], [1, 2])
 
 
 if __name__ == "__main__":

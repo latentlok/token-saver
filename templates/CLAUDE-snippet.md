@@ -1,7 +1,7 @@
 <!--
 Paste this into your project's CLAUDE.md to make delegation the default for mechanical
 work. Without it, delegation depends on Claude happening to remember the plugin exists;
-with it, the policy is in context every session.
+with it, the trigger is in context every session.
 
 Ask Claude to add it, or paste the block below yourself — everything between the
 begin / end markers, the markers included. The markers let a re-add detect the block
@@ -9,11 +9,23 @@ and skip it, so it is never duplicated.
 
 Once installed, the block is MANAGED: on the first session after a plugin update the
 setup hook rewrites everything between the markers from this template (the `v:` line
-says which version wrote it) and touches nothing outside them. That is how a new
-capability reaches the agents that would otherwise never hear about it.
+says which version wrote it) and touches nothing outside them.
 
-The block is a ~350-token capability map, resident in every session — the measured
-details live in the `delegation` skill, which loads only when a session delegates.
+DELIBERATELY SMALL (~120 tokens). It used to be ~520 tokens restating the `delegation`
+skill — trust modes, async, retries, playbooks, approval modes, worktrees — so every
+session paid for delegation knowledge whether or not it delegated, and the skill then
+loaded on first use and said all of it again.
+
+What is left is only what cannot come from anywhere else:
+
+  - the TRIGGER, which must fire before Claude has decided to look at the tools;
+  - the two rules that must hold BEFORE the skill loads, because forgetting either
+    costs real work — an uncommitted tree has no rollback, and a hand-re-run green
+    gate spends exactly the context this plugin exists to save.
+
+Everything else is in the `delegation` skill, which loads on first use. The skill's
+own `description:` line is already resident in every session and already carries the
+capability map, which is why this block no longer repeats it.
 -->
 
 <!-- qwen-delegate:begin (managed block; delete from begin to end to remove) -->
@@ -21,32 +33,16 @@ details live in the `delegation` skill, which loads only when a session delegate
 
 ## Delegating mechanical work
 
-token-saver is installed: a free local model types, you judge, a command decides.
-**Before doing mechanical work inline, ask: could a command prove this was done?**
-If yes, delegate — `qwen_delegate`, or the `qwen-manager` subagent for long
-multi-unit grinds: bulk edits, renames, codemods, tests-for-existing, boilerplate,
-lint sweeps. Keep design, specs, gates, anything irreversible or outward-facing.
-Codebase questions go to `qwen_query` (free, read-only; answers are leads, not
-truth). Load the `delegation` skill before first use.
+token-saver is installed: a free local model types, a command decides. **Before doing
+mechanical work inline, ask — could a command prove this was done?** If yes, delegate
+it (`qwen_delegate`); codebase questions go to `qwen_query`, free and read-only. Keep
+design, specs, gates, and anything irreversible or outward-facing. **Load the
+`delegation` skill before first use** — everything else is in there.
 
-- **Commit first** — git is the only rollback; no sandbox.
-- **The gate decides, never the worker's prose**: the server runs `verify`; trust
-  the receipt's STATUS. Never re-run a green gate or read the diff.
-- `trust="self"` is the default (worker grades its own suite). Work that must be
-  right: `trust="verified"` + your own `*_spec.*` gate — the worker can never edit
-  it. Tell it where tests live once (`test_dir` in `.qwen-delegate.json`).
-- **Async**: the response is a run id + receipt path — do other work, read the file
-  when it lands (its `WATCH:` line waits on it; `wait: true` blocks).
-- `stopped` / `compaction_refused` = task too big — split it; a rerun hits the same
-  wall. `error` = the executor, not this repo — relay it, don't debug.
-- Red receipt → `retry_of=<session>` + `retry_message` (replays the brief cold).
-  Recurring brief → `brief_file: "playbooks/x.md"`, a git-versioned document (front
-  matter = gate/scope, `{{slots}}` from `vars`, `chain: true` steps, `amend_brief`
-  folds corrections in). Value back → `result_schema`.
-- Prefer `auto-edit`; `touch_scope=[...]` bounds edits to named files (new files
-  stay allowed); `scoped` is a shell allowlist, not a sandbox.
-- **Co-work expected? Isolate.** `worktree="auto"` (or `"worktree": "auto"` in
-  `.qwen-delegate.json` as the standing default) builds on a `qwen/<id>` branch;
-  the receipt carries the `MERGE:` line. Worktrees branch from HEAD — commit first.
+Two rules that must hold before that skill loads:
+
+- **Commit first.** Git is the only rollback; there is no sandbox.
+- **The gate decides, never the worker's prose.** Trust the receipt's `STATUS`; never
+  re-run a green gate or read the diff to check it.
 
 <!-- qwen-delegate:end -->

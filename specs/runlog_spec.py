@@ -41,6 +41,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qd import runlog  # noqa: E402
+# Imported for cum_zero() so the seed under test is the REAL one: a literal
+# "unset" here would keep passing if invoke.py renamed its seed.
+from qd import invoke  # noqa: E402
 
 
 STATS = {
@@ -114,6 +117,52 @@ class RecordShape(Fixture):
     def test_token_source_defaults_to_none_string(self):
         r = runlog.leverage_record("q", self.cwd, "ok", "v", {}, 0)
         self.assertEqual(r["token_source"], "none")
+
+    def test_the_activity_counts_are_labelled_measured_or_not(self):
+        # The record writes tools.calls and lines_added as 0 whether they were
+        # measured at 0 or never reported (a streamed run carries no `stats`
+        # block on the wire). token_source was projected here from the start;
+        # stats_source was not, so every persisted record kept the unlabelled
+        # zero -- and THIS is the copy read back later, when nobody remembers
+        # which runs were streamed. An unlabelled zero is a zero that gets
+        # averaged.
+        r = self.rec()
+        self.assertIn("stats_source", r)
+        streamed = dict(STATS, stats_source="none", tools=0, lines_added=0)
+        rs = runlog.leverage_record("q", self.cwd, "ok", "v", streamed, 0)
+        measured = dict(STATS, stats_source="stats", tools=0, lines_added=0)
+        rm = runlog.leverage_record("q", self.cwd, "ok", "v", measured, 0)
+        # Same numbers on both records -- only the label separates them.
+        self.assertEqual((rs["tools"]["calls"], rs["lines_added"]),
+                         (rm["tools"]["calls"], rm["lines_added"]))
+        self.assertEqual(rs["stats_source"], "none")
+        self.assertEqual(rm["stats_source"], "stats")
+
+    def test_stats_source_defaults_to_none_string(self):
+        # Mirrors token_source's default exactly: a record assembled from no
+        # stats at all claims no measurement.
+        r = runlog.leverage_record("q", self.cwd, "ok", "v", {}, 0)
+        self.assertEqual(r["stats_source"], "none")
+
+    def test_the_accumulator_seed_never_reaches_disk(self):
+        # cum_zero() seeds "unset" -- "no attempt has reported yet" -- which is
+        # a live-accumulator state, not a fact about a finished run.
+        # accum_stats refuses it on the way IN; this is the other end of the
+        # same seam. Without it the two sides disagree, and a record could
+        # carry a fourth provenance value nothing else in the system emits.
+        r = runlog.leverage_record("q", self.cwd, "ok", "v",
+                                   invoke.cum_zero(), 0)
+        self.assertEqual(r["stats_source"], "none")
+
+    def test_a_partly_unmeasured_run_keeps_its_label_to_disk(self):
+        # accum_stats reports "partial" when one attempt of several reported no
+        # stats, which makes the summed counts an UNDERCOUNT. The record must
+        # carry that through verbatim rather than flattening it to a two-value
+        # measured/not -- the run log is where an undercount would otherwise be
+        # read as a measurement forever.
+        r = runlog.leverage_record("q", self.cwd, "ok", "v",
+                                   dict(STATS, stats_source="partial"), 0)
+        self.assertEqual(r["stats_source"], "partial")
 
     def test_c5_executor_and_cost_always_present(self):
         r = self.rec()
@@ -325,6 +374,171 @@ class RunIds(unittest.TestCase):
 
     def test_ids_are_not_a_counter(self):
         self.assertGreater(len({runlog.new_run_id() for _ in range(50)}), 1)
+
+
+class ExecutorCallSpec(unittest.TestCase):
+    """One executor invocation, with the arithmetic that belongs to it.
+
+    It was a dict. The fields were the same; what a dict could not carry is the
+    arithmetic every reader had to redo -- summing its tokens, pricing it,
+    reading `prompt` as spend on an endpoint that caches most of it.
+    """
+
+    PROFILE = {"price_in_per_mtok": 10.0, "price_out_per_mtok": 30.0}
+
+    def test_it_builds_from_run_executor_meta(self):
+        c = runlog.ExecutorCall.from_meta(
+            "challenge",
+            {"stats": {"tokens": {"prompt": 900, "completion": 20,
+                                  "cached": 400}, "ms": 1200, "turns": 2}},
+            session="s-1")
+        self.assertEqual((c.kind, c.session), ("challenge", "s-1"))
+        self.assertEqual((c.prompt, c.completion, c.cached), (900, 20, 400))
+        self.assertEqual((c.ms, c.turns), (1200, 2))
+
+    def test_partial_or_missing_meta_never_raises(self):
+        for meta in (None, {}, {"stats": None}, {"stats": {"tokens": None}}):
+            c = runlog.ExecutorCall.from_meta("attempt", meta)
+            self.assertEqual((c.prompt, c.completion, c.ms), (0, 0, 0))
+
+    def test_tokens_is_both_directions(self):
+        self.assertEqual(runlog.ExecutorCall("a", prompt=10, completion=3).tokens, 13)
+
+    def test_fresh_prompt_excludes_the_cached_remainder(self):
+        # Reading `prompt` as spend overstates it on a caching endpoint -- the
+        # cached part is not re-billed.
+        c = runlog.ExecutorCall("a", prompt=1000, cached=750)
+        self.assertEqual(c.fresh_prompt, 250)
+
+    def test_fresh_prompt_never_goes_negative(self):
+        self.assertEqual(runlog.ExecutorCall("a", prompt=10, cached=99).fresh_prompt, 0)
+
+    def test_cost_prices_this_call_alone(self):
+        c = runlog.ExecutorCall("challenge", prompt=1_000_000, completion=1_000_000)
+        self.assertAlmostEqual(c.cost(self.PROFILE), 40.0)
+
+    def test_cost_on_a_broken_profile_is_zero_not_an_exception(self):
+        # It is a log. A missing price must never take down the record.
+        self.assertEqual(runlog.ExecutorCall("a", prompt=5).cost({}), 0.0)
+
+    def test_as_dict_round_trips_through_json(self):
+        c = runlog.ExecutorCall.from_meta("attempt", {"stats": {"ms": 5}},
+                                          session="s", err="timed out")
+        json.dumps(c.as_dict())
+        self.assertEqual(c.as_dict()["err"], "timed out")
+
+
+class CallLogSpec(unittest.TestCase):
+    """Per-executor-call telemetry (the flat `cum` sum cannot answer "what did
+    the challenge cost", because a run is no longer one kind of call)."""
+
+    def test_it_starts_empty_and_writes_nothing(self):
+        # An empty log must not put `"calls": []` into every record -- a field
+        # that is always there and always empty is noise in every future query.
+        self.assertEqual(runlog.CallLog().as_record(), {})
+
+    def test_one_call_carries_its_kind_tokens_and_session(self):
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 900,
+                                                      "completion": 20},
+                                           "ms": 1200, "turns": 2}},
+                   session="s-1")
+        rec = log.as_record()["calls"][0]
+        self.assertEqual(rec["kind"], "challenge")
+        self.assertEqual((rec["prompt"], rec["completion"]), (900, 20))
+        self.assertEqual(rec["ms"], 1200)
+        self.assertEqual(rec["session"], "s-1")
+        # ...and the live object is an ExecutorCall, not the dict it renders to
+        self.assertIsInstance(log.calls[0], runlog.ExecutorCall)
+
+    def test_missing_or_partial_meta_never_raises(self):
+        log = runlog.CallLog()
+        for meta in (None, {}, {"stats": None}, {"stats": {"tokens": None}}):
+            log.record("attempt", meta)
+        self.assertEqual(len(log.as_record()["calls"]), 4)
+        self.assertEqual(log.by_kind()["attempt"]["prompt"], 0)
+
+    def test_by_kind_is_what_makes_the_question_answerable(self):
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 900}, "ms": 5}})
+        log.record("attempt", {"stats": {"tokens": {"prompt": 100}, "ms": 50}})
+        log.record("attempt", {"stats": {"tokens": {"prompt": 200}, "ms": 70}})
+        by = log.by_kind()
+        self.assertEqual(by["challenge"], {"calls": 1, "prompt": 900,
+                                           "completion": 0, "ms": 5})
+        self.assertEqual(by["attempt"]["calls"], 2)
+        self.assertEqual(by["attempt"]["prompt"], 300)
+
+    def test_an_errored_call_is_still_a_call(self):
+        # It spent tokens and wall-clock. A log that only records successes
+        # under-reports exactly the runs worth investigating.
+        log = runlog.CallLog()
+        log.record("attempt", {"stats": {"tokens": {"prompt": 50}}},
+                   err="timed out after 900s")
+        self.assertEqual(log.as_record()["calls"][0]["err"],
+                         "timed out after 900s")
+        self.assertEqual(log.by_kind()["attempt"]["prompt"], 50)
+
+    def test_by_kind_prices_each_kind_when_given_a_profile(self):
+        # The question is asked in money: "are challenge passes worth it".
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 1_000_000}}})
+        log.record("attempt", {"stats": {"tokens": {"prompt": 1_000_000}}})
+        by = log.by_kind({"price_in_per_mtok": 10.0, "price_out_per_mtok": 30.0})
+        self.assertAlmostEqual(by["challenge"]["cost_usd"], 10.0)
+        self.assertAlmostEqual(by["attempt"]["cost_usd"], 10.0)
+
+    def test_without_a_profile_no_money_is_invented(self):
+        log = runlog.CallLog()
+        log.record("attempt", {"stats": {"tokens": {"prompt": 5}}})
+        self.assertNotIn("cost_usd", log.by_kind()["attempt"])
+
+    def test_it_is_iterable_and_sized_like_the_collection_it_is(self):
+        log = runlog.CallLog()
+        log.record("challenge", {})
+        log.record("attempt", {})
+        self.assertEqual(len(log), 2)
+        self.assertEqual([c.kind for c in log], ["challenge", "attempt"])
+        self.assertEqual(len(log.of_kind("attempt")), 1)
+
+    def test_the_record_is_json_serialisable(self):
+        # It goes into runs.jsonl; anything that cannot serialise silently
+        # loses the whole line (write_runlog is best-effort by contract).
+        log = runlog.CallLog()
+        log.record("challenge", {"stats": {"tokens": {"prompt": 1}}}, session="s")
+        json.dumps(log.as_record())
+
+
+class QueryCallTelemetry(unittest.TestCase):
+    """A query is one executor call, and the log must say so in the same
+    vocabulary as everything else.
+
+    Step 8's cheap half (DESIGN §8.1). The run log became heterogeneous when a
+    delegation learned to distinguish its challenge pass from its build
+    attempts; a query sat outside that vocabulary entirely, so "what did we
+    spend on queries" could not be asked in the same shape as every other
+    question about the log. Totals were recorded; the CALL was not.
+    """
+
+    def test_a_query_call_is_recorded_by_kind(self):
+        log = runlog.CallLog()
+        log.record("query", {"stats": {"tokens": {"prompt": 900,
+                                                  "completion": 120}}},
+                   session="q-1")
+        rec = log.as_record(None)
+        self.assertEqual(len(rec["calls"]), 1)
+        self.assertIn("query", rec["calls_by_kind"],
+                      f"the call was counted but not by KIND: {rec}")
+
+    def test_an_errored_query_still_counts_as_spend(self):
+        # A timed-out or unparseable query still burned the tokens. Records are
+        # written by survivors (PRINCIPLES §IV); a log that drops the failures
+        # reports a floor and reads as a total.
+        log = runlog.CallLog()
+        log.record("query", {"stats": {"tokens": {"prompt": 500,
+                                                  "completion": 0}}},
+                   session="q-2", err="timeout")
+        self.assertEqual(len(log), 1)
 
 
 if __name__ == "__main__":

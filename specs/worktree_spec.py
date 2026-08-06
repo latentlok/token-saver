@@ -34,6 +34,7 @@ Run:  python3 specs/worktree_spec.py
 """
 
 import os
+import time
 import re
 import subprocess
 import sys
@@ -203,6 +204,70 @@ class MergeProtocol(Fixture):
                             "--porcelain").stdout.strip(), "")
         self.assertFalse(os.path.exists(
             os.path.join(self.repo, ".git", "MERGE_HEAD")))
+
+
+class StaleContainers(unittest.TestCase):
+    """The reaper's eyes. A chain holds ONE worktree across all its links, so a
+    chain that dies mid-flight orphans it -- the one shape a lone run cannot
+    produce, because a lone run disposes of its container inside itself."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        self.base = tempfile.mkdtemp()
+        os.environ["QWEN_DELEGATE_WORKTREES"] = self.base
+        self.repo = tempfile.mkdtemp()
+        for a in (["init", "-q"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", self.repo] + a, capture_output=True)
+        with open(os.path.join(self.repo, "f.txt"), "w") as f:
+            f.write("x\n")
+        subprocess.run(["git", "-C", self.repo, "add", "-A"], capture_output=True)
+        subprocess.run(["git", "-C", self.repo, "commit", "-qm", "i"],
+                       capture_output=True)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def test_a_fresh_container_is_not_stale(self):
+        worktrees.acquire(self.repo)
+        self.assertEqual(worktrees.stale(self.repo), [])
+
+    def test_an_old_container_is_reported_with_its_branch(self):
+        wt = worktrees.acquire(self.repo)
+        old = time.time() - 8 * 3600
+        os.utime(wt["path"], (old, old))
+        found = worktrees.stale(self.repo)
+        self.assertEqual([f["branch"] for f in found], [wt["branch"]])
+        self.assertGreaterEqual(found[0]["age_s"], 6 * 3600)
+
+    def test_the_threshold_is_the_callers(self):
+        wt = worktrees.acquire(self.repo)
+        old = time.time() - 120
+        os.utime(wt["path"], (old, old))
+        self.assertEqual(worktrees.stale(self.repo), [])
+        self.assertEqual(len(worktrees.stale(self.repo, older_than_s=60)), 1)
+
+    def test_a_developers_own_worktree_is_none_of_our_business(self):
+        # Only trees under OUR base dir. Someone else's `git worktree add` in
+        # the same repo is not an orphan of ours to report, let alone remove.
+        outside = os.path.join(tempfile.mkdtemp(), "mine")
+        subprocess.run(["git", "-C", self.repo, "worktree", "add", outside,
+                        "-b", "mine"], capture_output=True)
+        old = time.time() - 8 * 3600
+        os.utime(outside, (old, old))
+        self.assertEqual(worktrees.stale(self.repo), [])
+
+    def test_it_reports_and_never_removes(self):
+        wt = worktrees.acquire(self.repo)
+        old = time.time() - 8 * 3600
+        os.utime(wt["path"], (old, old))
+        worktrees.stale(self.repo)
+        self.assertTrue(os.path.isdir(wt["path"]),
+                        "stale() deleted a container holding gated work")
+
+    def test_a_broken_repo_answers_empty_rather_than_raising(self):
+        self.assertEqual(worktrees.stale("/nonexistent/path"), [])
 
 
 if __name__ == "__main__":

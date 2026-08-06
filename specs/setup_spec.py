@@ -22,6 +22,7 @@ so the failure modes are not "wrong answer" but "wrecked the session":
 Run:  python3 specs/setup_spec.py
 """
 
+import inspect
 import json
 import os
 import sys
@@ -29,7 +30,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from qd import setup  # noqa: E402
+from qd import schemas, server, setup  # noqa: E402
 
 
 CLEAN = {
@@ -269,13 +270,56 @@ class ManagedBlock(Fixture):
         setup.run()
         self.assertIn(f"<!-- v: {setup.plugin_version()} -->", self.read())
 
-    def test_the_block_names_the_capabilities_it_is_the_only_surface_for(self):
-        # The U2.7 rule: a capability surfaces here as one line or as a receipt
-        # affordance -- never only in long-form docs.
+    def test_every_capability_is_discoverable_without_long_form_docs(self):
+        # U2.7 RESTATED for v0.6. The rule is unchanged -- a capability must
+        # never live only in long-form docs -- but the surface that satisfies
+        # it is the TOOL SCHEMA, which is in context whenever the tools are,
+        # and the submit response, which the caller reads on every run.
+        #
+        # It used to be this block, which is resident in EVERY session whether
+        # or not that session delegates. Cataloguing capabilities in both
+        # places cost ~520 resident tokens to repeat what the schema already
+        # said, and then the `delegation` skill loaded and said it a third
+        # time. Discovery does not require residency.
+        surface = (json.dumps(schemas.TOOL) + json.dumps(schemas.QUERY_TOOL)
+                   + inspect.getsource(server._submit_text))
+        for capability in ("wait", "retry_of", "result_schema",
+                           "brief_file", "touch_scope", "WATCH"):
+            self.assertIn(capability, surface)
+
+    def test_result_schema_description_says_an_out_of_subset_keyword_refuses(self):
+        # House pattern: a refusal is documented in the FIELD's own
+        # description, not left for the caller to discover by triggering it
+        # -- see trust :102, verify_timeout_sec :143, preflight_expect :147.
+        # result_schema now refuses a keyword qd.jsonschema.schema_refusal()
+        # cannot enforce (U5.1 accept-time check), on BOTH tools -- qwen_query
+        # never enters engine.py, so its own field needs its own sentence,
+        # not a cross-reference the caller cannot see from the schema alone.
+        for tool in (schemas.TOOL, schemas.QUERY_TOOL):
+            desc = tool["inputSchema"]["properties"]["result_schema"]["description"]
+            self.assertIn("refus", desc.lower())
+
+    def test_the_block_carries_the_trigger_and_the_pre_skill_rules(self):
+        # What the block is FOR, now that it is not a catalogue: fire before
+        # Claude has decided to look at the tools, name the skill that has
+        # the rest, and carry the two rules that must hold BEFORE that skill
+        # loads (an uncommitted tree has no rollback; a hand-re-run green gate
+        # spends the context this plugin exists to save).
         block = setup.template_block("9.9.9")
-        for capability in ("wait", "retry_of", "result_schema", "WATCH",
-                           "brief_file", "touch_scope"):
-            self.assertIn(capability, block)
+        for required in ("qwen_delegate", "qwen_query", "delegation",
+                         "Commit first", "STATUS"):
+            self.assertIn(required, block)
+
+    def test_the_block_stays_small(self):
+        # A budget on something resident in every session. The block reached
+        # ~520 tokens by absorbing the skill one useful line at a time, and
+        # nothing failed while it did. This fails.
+        block = setup.template_block("9.9.9")
+        self.assertLess(
+            len(block), 1200,
+            f"managed block is {len(block)} chars (~{len(block)//4} tokens) "
+            f"and resident in every session -- if a new capability needs "
+            f"explaining, the skill or the tool schema is where it goes")
 
 
 class HookWiring(unittest.TestCase):

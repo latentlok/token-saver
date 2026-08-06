@@ -109,7 +109,12 @@ class Findings(unittest.TestCase):
                   "context-window-unverified")
         self.assertEqual(f["severity"], "high")
         self.assertIn("196,608", f["text"])
-        self.assertIn("ollama ps", f["text"])
+        # The finding has to tell the reader HOW to check the number, not just
+        # that it is unchecked -- an unactionable "high" is noise. Asserted as
+        # "names the recording command", not as a vendor's shell incantation:
+        # the old assertion pinned `ollama ps`, so retiring Ollama broke a spec
+        # that was never about Ollama.
+        self.assertIn("--verified", f["text"])
 
     def test_a_verified_window_stops_being_a_high_finding(self):
         cfg = os.path.join(tempfile.mkdtemp(), "config.json")
@@ -262,6 +267,38 @@ class Summary(unittest.TestCase):
 
     def test_unreadable_settings_are_silent_never_an_exception(self):
         self.assertIsNone(doctor.summary_line("/nonexistent/settings.json"))
+
+
+class StaleServerHint(unittest.TestCase):
+    """A finding that names the problem and leaves the reader to reconstruct
+    the query is a finding they postpone. `_server_count` already ran the
+    pgrep; the message should carry its answer."""
+
+    def test_it_names_the_pids_to_kill(self):
+        out = doctor._kill_hint([111, 222, 333])
+        self.assertIn("kill", out)
+        self.assertIn("111", out)
+        self.assertIn("222", out)
+
+    def test_it_never_names_this_process(self):
+        # The newest server is the one the caller is talking to. Telling them to
+        # kill it would end the session that asked.
+        me = os.getpid()
+        self.assertNotIn(str(me), doctor._kill_hint([me]))
+
+    def test_it_keeps_the_newest_of_several(self):
+        # pgrep lists oldest first, so the LAST is the newest -- kill the rest.
+        out = doctor._kill_hint([111, 222, 333])
+        self.assertNotIn("333", out)
+
+    def test_unknown_pids_still_give_an_instruction(self):
+        for pids in ([], None):
+            self.assertIn("Kill the stale ones", doctor._kill_hint(pids))
+
+    def test_a_single_stale_server_is_still_named(self):
+        # With one other server, "all but the newest" would be empty -- the
+        # caller would get an instruction with nothing to act on.
+        self.assertIn("111", doctor._kill_hint([111]))
 
 
 if __name__ == "__main__":

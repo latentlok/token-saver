@@ -227,9 +227,9 @@ only for direction, outward-facing changes, or irreversible calls.
 
 | doc | for |
 |---|---|
-| `docs/PRINCIPLES.md` | **the short version.** The structural rules everything else is a corollary of. Read first if you want the reasoning rather than the details. |
+| `docs/archive/a92e876/PRINCIPLES.md` | **the short version.** The structural rules everything else is a corollary of. Read first if you want the reasoning rather than the details. |
 | `context/TESTING.md` | testing the system — state, test plan, expected outcomes |
-| `docs/FINDINGS.md` | **the evidence.** Every measurement behind every guard. Read before concluding a protection is paranoid — each was bought with a real failure. |
-|  `docs/HLD.md` | the v2 design: contracts C1–C9, lifecycle, concurrency |
+| `docs/archive/a92e876/FINDINGS.md` | **the evidence.** Every measurement behind every guard. Read before concluding a protection is paranoid — each was bought with a real failure. |
+|  `docs/archive/a92e876/HLD.md` | the v2 design: contracts C1–C9, lifecycle, concurrency |
 | `agents/qwen-manager.md` | the manager's full workflow and escalation policy |
 | `skills/lld-principles/SKILL.md` | the design discipline the manager must follow |

@@ -90,6 +90,28 @@ def graphify_cmd(cwd, files=None):
     return [graphify_bin(), "update", cwd, "--no-cluster"]
 
 
+# The read-only subcommands, and ONLY those. `^graphify\b` would also permit
+# `graphify update`, which on a repo with a semantic index configured can bill a
+# cloud account -- the A10 lesson: a command pattern grants every SUBCOMMAND the
+# command has, so the real boundary is the most powerful one reachable through
+# it (PRINCIPLES §III).
+#
+# `update` is deliberately absent even though the plugin itself runs it: the
+# plugin runs it AFTER the verdict, on its own terms, where the cost is a
+# decision somebody made. A worker that can call it decides for them.
+READ_ONLY = ("explain", "query", "affected", "god-nodes", "stats", "show")
+
+
+def read_only_allow():
+    """The `shell_allow` pattern that lets a WORKER read the graph.
+
+    Returned rather than applied, because whether to grant it is a decision
+    about the run and belongs to whoever owns the run's permissions. This module
+    owns only what graphify is.
+    """
+    return r"^graphify (?:%s)\b" % "|".join(READ_ONLY)
+
+
 def bootstrap_line():
     """One SETUP sentence about the code graph, for a first delegation on a fresh repo.
 
@@ -104,7 +126,7 @@ def bootstrap_line():
             "instead of reading files."
         )
     return (
-        "Tip: graphify isn't installed. Installing it (`uv tool install \"graphifyy[ollama]\"`) "
+        "Tip: graphify isn't installed. Installing it (`uv tool install graphifyy`) "
         "lets the worker locate code without reading it -- optional; the graphify-setup "
         "skill sets it up."
     )
@@ -116,7 +138,7 @@ def _do_refresh(cwd, files, prior_sha):
         result = subprocess.run(
             graphify_cmd(cwd, files),
             capture_output=True,
-            text=True,
+            text=True, stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             reason = (result.stderr or "nonzero exit").splitlines()[-1]
@@ -128,12 +150,20 @@ def _do_refresh(cwd, files, prior_sha):
             })
             return
 
-        # Success — capture current HEAD
+        # Success — capture current HEAD.
+        # "indexed", NOT "fresh": freshness is a comparison against HEAD *now*,
+        # so it cannot be stored -- it goes false the next time anyone commits.
+        # The field used to read "fresh", and did: after a package conversion
+        # it claimed fresh while 32 of 32 files were stale and the whole graph
+        # was uncached. Anyone reading the sidecar to answer "is my graph
+        # current?" -- the obvious thing to do -- got a confident wrong answer.
+        # What IS storable is that an index completed at this SHA; whether that
+        # is still current is staleness()'s job, computed live from git.
         rc, head = git(cwd, "rev-parse", "HEAD")
         _write_sidecar(cwd, {
             "indexed_sha": head if rc == 0 else prior_sha,
             "ts": now_iso(),
-            "status": "fresh",
+            "status": "indexed",
         })
     except FileNotFoundError:
         _write_sidecar(cwd, {
@@ -215,14 +245,26 @@ def graph_line(cwd, will_refresh=False):
     if state is None:
         return "GRAPH: none \u2014 run graphify once to index"
 
+    # Only the states that CANNOT be recomputed are read from the file:
+    # "indexing" and "failed" are facts about a write, not about the tree.
+    # Everything else is derived live below -- never read from disk.
     status = state.get("status", "none")
     if status == "indexing":
         return "GRAPH: indexing"
     if status == "failed":
-        reason = state.get("reason") or "unknown"
-        return f"GRAPH: failed: {reason}"
+        # FIRST LINE ONLY, like the advisory head. `reason` is read verbatim out
+        # of .qwen-delegate/graph.json, which the WORKER can write -- the
+        # directory self-ignores so no guard reverts it, and this line is
+        # computed after the run. A multi-line reason broke this function's own
+        # promise above ("a single C2 GRAPH: status line") and, because the line
+        # lands in the receipt above the worker's quoted reply, a second line
+        # reading `RESULT: valid (schema)` forged a validated result for the
+        # next chain link (qd/verdict.py validated_result). Fixed in both
+        # places on purpose: here because the contract is this function's, and
+        # there because that bound must not rest on this one holding.
+        reason = (state.get("reason") or "unknown").split("\n", 1)[0].strip()
+        return f"GRAPH: failed: {reason or 'unknown'}"
 
-    # fresh or stale
     s = staleness(cwd)
     sha_short = (s["indexed_sha"] or "?")[:7]
     if s["status"] == "fresh" or not s["stale"]:

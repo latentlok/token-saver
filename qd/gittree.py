@@ -17,7 +17,7 @@ PROJECT_CONFIG = ".qwen-delegate.json"
 def git(cwd, *a):
     try:
         p = subprocess.run(
-            ["git", *a], cwd=cwd, capture_output=True, text=True, timeout=30
+            ["git", *a], cwd=cwd, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL
         )
         # rstrip newlines only -- NEVER .strip(). `status --porcelain` encodes state in
         # leading columns (" M path"), so stripping the whole output eats the first
@@ -31,10 +31,110 @@ def git_bytes(cwd, *a):
     """git() with raw stdout bytes -- for file CONTENT (`git show`), which must
     round-trip binary exactly and must not have its trailing newlines stripped."""
     try:
-        p = subprocess.run(["git", *a], cwd=cwd, capture_output=True, timeout=30)
+        p = subprocess.run(["git", *a], cwd=cwd, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout or b""
     except Exception:
         return 1, b""
+
+
+_C_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n",
+              "r": "\r", "t": "\t", "v": "\v", '"': '"', "\\": "\\"}
+
+
+def unquote_path(field):
+    """Decode git's C-style path quoting; return `field` unchanged if it has none.
+
+    git does not emit paths verbatim. When a path holds a character it treats
+    as unusual it wraps the whole thing in double quotes and C-escapes the
+    offending bytes, and every plumbing surface here (`status --porcelain`,
+    `diff --name-only`) does it. Measured on git 2.53, both `core.quotePath`
+    settings, because the flag is not the whole story:
+
+        my calc.py   -> "my calc.py"          space
+        dq"uote.py   -> "dq\\"uote.py"          the escape that also delimits
+        back\\slash.py -> "back\\\\slash.py"       backslash
+        tab\\tchar.py  -> "tab\\tchar.py"        any control byte
+        café.py      -> "caf\\303\\251.py"       non-ASCII, OCTAL PER BYTE --
+                                               and this is the ONE case
+                                               core.quotePath=false changes
+                                               (it then emits café.py raw)
+        a'b.py a;b.py a$b.py a&b.py a|b.py a*b.py a>b.py   all BARE
+
+    Callers treat these strings as filenames, so keeping the quotes made the
+    module quietly wrong for exactly those names: the string opens nothing, so
+    file_sha reports None ("unreadable, never accuse it"), a restore cannot
+    find the file, and the C8 prefilter was handed `"my calc_qwen.py"` and
+    graded nothing -- a worker could keep a test file out of its own grading by
+    putting a space in the name. Decoded here, at the seam where git's output
+    stops being a wire format and becomes a path, rather than at each caller.
+
+    `-z` would sidestep the encoding entirely, and is the better answer for a
+    parser written today. It is not used here because porcelain's -z form also
+    splits a RENAME record into two NUL-separated fields, which would change
+    how status_map keys renames -- a separate behaviour with its own callers,
+    and not something to slip into a decoding fix.
+
+    Conservative by construction: a field is decoded only when it opens with a
+    quote AND its matching close is the LAST character. `R  "a b.py" -> "c d.py"`
+    opens and closes with a quote but is two paths in one field, so it is
+    returned untouched instead of being turned into an invented filename.
+    """
+    if len(field) < 2 or not field.startswith('"'):
+        return field
+    out = bytearray()
+    i = 1
+    while i < len(field):
+        ch = field[i]
+        if ch == '"':                      # closing quote
+            # Trailing content (a rename's ` -> ...`) means this field is not a
+            # single quoted path; leave the caller's existing shape alone.
+            return field if i != len(field) - 1 else bytes(out).decode(
+                "utf-8", "surrogateescape")
+        if ch != "\\":
+            out.extend(ch.encode("utf-8", "surrogateescape"))
+            i += 1
+            continue
+        if i + 1 >= len(field):
+            return field                   # trailing backslash: not git's shape
+        nxt = field[i + 1]
+        if nxt in _C_ESCAPES:
+            out.extend(_C_ESCAPES[nxt].encode("utf-8"))
+            i += 2
+            continue
+        if nxt.isdigit() and len(field) >= i + 4:
+            try:                           # \303 -- one BYTE, not one character
+                byte = int(field[i + 1:i + 4], 8)
+            except ValueError:
+                return field
+            if byte > 0xFF:                # git emits \000-\377 and nothing else
+                return field
+            out.append(byte)
+            i += 4
+            continue
+        return field                       # unknown escape: not ours to guess
+    return field                           # never closed: not ours to guess
+
+
+def literal_pathspec(path):
+    """`path` as a pathspec git will read as a NAME, never as a query.
+
+    A pathspec is not a filename: git reads a leading `:` as its magic prefix
+    and reads glob characters as a pattern. So handing a real filename straight
+    back to git as a pathspec -- which is exactly what violated_specs does with
+    spec_files' output -- is a second decoding bug wearing different clothes,
+    and unquoting alone does not touch it.
+
+    Measured, git 2.53, on a repo holding `:(icase)magic_spec.py`: git needs no
+    quoting for that name and `ls-files` emits it bare, but
+    `diff --name-only <base> -- ':(icase)magic_spec.py'` searched for
+    `magic_spec.py` case-insensitively, matched nothing, and returned EMPTY --
+    so a worker could sabotage that spec and the guard would report nothing to
+    revert, on a run whose receipt said it passed. `star*_spec.py` fails the
+    other way: it globs, so an untouched `starXYZ_spec.py` gets accused.
+
+    `:(literal)` is git's own answer and turns both off.
+    """
+    return f":(literal){path}"
 
 
 def is_git_repo(cwd):
@@ -48,14 +148,18 @@ def head_sha(cwd):
 
 
 def status_map(cwd):
-    """{path: porcelain status code} for the working tree."""
+    """{path: porcelain status code} for the working tree.
+
+    Paths arrive DECODED (see unquote_path): every caller of this map treats
+    its keys as filenames, so git's C-quoting has to stop here.
+    """
     rc, out = git(cwd, "status", "--porcelain")
     if rc != 0 or not out:
         return {}
     m = {}
     for line in out.splitlines():
         if len(line) > 3:
-            m[line[3:].strip()] = line[:2].strip()
+            m[unquote_path(line[3:].strip())] = line[:2].strip()
     return m
 
 
@@ -70,7 +174,10 @@ def untracked_files(cwd):
     rc, out = git(cwd, "status", "--porcelain", "-uall")
     if rc != 0 or not out:
         return []
-    return [line[3:].strip() for line in out.splitlines()
+    # Decoded for the same reason status_map's keys are: these feed the
+    # per-file rules (strays, fixture provenance), and a name they cannot
+    # express is a name those rules cannot police.
+    return [unquote_path(line[3:].strip()) for line in out.splitlines()
             if line[:2].strip() == "??" and len(line) > 3]
 
 
@@ -242,14 +349,24 @@ def spec_globs(cwd):
 
 
 def spec_files(cwd):
-    """Tracked protected-spec paths, repo-relative. Language-agnostic."""
+    """Tracked protected-spec paths, repo-relative. Language-agnostic.
+
+    Paths arrive DECODED. `git ls-files` C-quotes exactly as porcelain does
+    (measured, git 2.53: tab, newline, `"`, `\\`, control bytes under both
+    core.quotePath settings; non-ASCII under the default true), and this list is
+    fed straight back to git as a PATHSPEC by violated_specs. Undecoded, the
+    pathspec was the literal 20-char string `"tab\\tchar_spec.py"` -- quotes and
+    all -- which names no file, so the guard's diff came back empty and a
+    sabotaged spec was never even DETECTED, let alone reverted. The `*_spec.*`
+    GLOBS above are patterns and stay raw; only ls-files' OUTPUT is a filename.
+    """
     pats = []
     for g in spec_globs(cwd):
         pats += [g, f"**/{g}"]
     rc, out = git(cwd, "ls-files", *pats)
     if rc != 0 or not out:
         return []
-    return sorted({p for p in out.splitlines() if p.strip()})
+    return sorted({unquote_path(p) for p in out.splitlines() if p.strip()})
 
 
 def violated_specs(cwd, base=None):
@@ -265,23 +382,45 @@ def violated_specs(cwd, base=None):
     specs = spec_files(cwd)
     if not specs:
         return []
-    args = ["diff", "--name-only"] + ([base] if base else []) + ["--"] + specs
+    # :(literal) on the way in, unquote_path on the way out. Both directions are
+    # load-bearing and neither substitutes for the other: without the decode the
+    # pathspec is a quoted string matching nothing, and without :(literal) a name
+    # beginning `:` is read as pathspec magic. Either way the diff came back
+    # EMPTY for a spec the worker had just rewritten -- the guard that exists to
+    # keep the gate out of the builder's hands reported nothing to revert, and
+    # the run passed. Measured for tab / newline / `"` / `\` / control-byte /
+    # non-ASCII / `:(icase)` names; a SPACE was the near-miss that hid this,
+    # since ls-files and diff emit it bare while porcelain quotes it.
+    args = (["diff", "--name-only"] + ([base] if base else []) + ["--"]
+            + [literal_pathspec(p) for p in specs])
     rc, out = git(cwd, *args)
     if rc != 0 or not out:
         return []
-    return [p for p in out.splitlines() if p.strip()]
+    return [unquote_path(p) for p in out.splitlines() if p.strip()]
 
 
 def revert_specs(cwd, paths, base=None, t0=None):
-    """Restore spec files from `base` (default: HEAD).
+    """Restore spec files from `base` (default: HEAD). Returns (restored, unrestored).
 
     Base matters for the same reason: if the worker committed its edit, HEAD now holds
     the WEAKENED spec, so restoring from HEAD would faithfully restore the sabotage.
     Routed through restore_paths so the revert never touches the index -- the old
     `git checkout <sha> --` form also STAGED what it restored.
+
+    It RETURNS what restore_paths reported, and the second half of that pair is
+    the load-bearing one. This function used to call restore_paths for its
+    effect and drop the result, so the one caller -- the spec guard, the most
+    important guard in the system -- had no way to know a revert had failed and
+    said "(auto-reverted)" unconditionally. Three reachable failures, none of
+    them exotic: a spec the worker created and `git add`ed (tracked now, absent
+    at `base`, so `git show <base>:<path>` fails), a spec replaced by a
+    directory, and a spec sabotaged then chmod'ed read-only. In all three the
+    worker's version stayed on disk under a receipt that said it had been put
+    back.
     """
-    if paths:
-        restore_paths(cwd, paths, base=base, t0=t0)
+    if not paths:
+        return [], []
+    return restore_paths(cwd, paths, base=base, t0=t0)
 
 
 def committed_during_run(cwd, pre_sha):
@@ -301,7 +440,11 @@ def committed_during_run(cwd, pre_sha):
     rc, out = git(cwd, "rev-list", "--count", f"{pre_sha}..HEAD")
     count = int(out) if rc == 0 and out.strip().isdigit() else 0
     rc, out = git(cwd, "diff", "--name-only", pre_sha, "HEAD")
-    files = [p for p in (out or "").splitlines() if p.strip()] if rc == 0 else []
+    # Decoded like every other path this module hands out: this list is printed
+    # on the receipt a caller reads to decide whether to trust the run, and
+    # `"caf\303\251_spec.py"` names nothing a human or a later tool can act on.
+    files = [unquote_path(p) for p in (out or "").splitlines()
+             if p.strip()] if rc == 0 else []
     return True, count, files
 
 
@@ -346,10 +489,15 @@ def new_public_symbols(cwd):
     out = {}
     # 1. tracked changes: added publics minus removed publics (cancels renames/moves)
     rc, changed = git(cwd, "diff", "--name-only")
-    for path in (changed.splitlines() if rc == 0 else []):
+    for path in (unquote_path(p) for p in
+                 (changed.splitlines() if rc == 0 else [])):
+        # Decoded before the _TESTY test, not after: `"tab\tchar_spec.py"` does
+        # not contain the substring `_spec.` (the quoting broke it apart), so an
+        # undecoded quoted path slipped past the test-file exclusion and then
+        # produced an empty per-file diff anyway -- wrong twice.
         if not path.strip() or any(t in path for t in _TESTY):
             continue
-        rc2, diff = git(cwd, "diff", "--", path)
+        rc2, diff = git(cwd, "diff", "--", literal_pathspec(path))
         if rc2 != 0:
             continue
         added, removed = [], []
@@ -363,9 +511,13 @@ def new_public_symbols(cwd):
         net = [s for s in dict.fromkeys(added) if added.count(s) > removed.count(s)]
         if net:
             out[path] = net
-    # 2. brand-new untracked source files: every public symbol is new
-    for path, code in status_map(cwd).items():
-        if code != "??" or any(t in path for t in _TESTY):
+    # 2. brand-new untracked source files: every public symbol is new.
+    # Through untracked_files(), NOT status_map(): `git status --porcelain`
+    # collapses a brand-new directory into a single `engine/` entry, so a run
+    # that delivered a whole new module package reported ZERO new public
+    # surface -- the larger the unit, the more completely it was missed.
+    for path in untracked_files(cwd):
+        if any(t in path for t in _TESTY):
             continue
         full = os.path.join(cwd, path)
         try:
@@ -381,14 +533,210 @@ def new_public_symbols(cwd):
     return out
 
 
+# --- Seam detectors (v0.6) -------------------------------------------------
+#
+# The three cheapest findings in the whole friction ledger, and they share one
+# premise: a unit brief describes ONE module, its gate runs with the rest of
+# the system mocked, and `preflight_expect` only proves the gate could fail
+# *for that module*. So the workflow can never assert "and this is wired to
+# that" -- and sixteen field defects landed with ZERO inside a delegated unit.
+# Every one lived in a join.
+#
+# None of these verifies a seam. They make seam RISK visible, statically, from
+# what the run already changed. All three are greps; nothing extra executes.
+
+
+def uncalled_symbols(cwd, pubs, limit=40):
+    """{file: [names]} for new public symbols nothing else references.
+
+    DETERMINISTIC (no model). A symbol defined by this run and mentioned
+    nowhere outside its own file and its own tests is, right now, dead code:
+    built, gated, merged, and called by nothing. **Six** such units shipped
+    green in one field build -- `run_threads`, `run_memos`, `set_job_contract`,
+    `write_counter` and two more -- each passing a gate that could not ask the
+    only question that mattered.
+
+    This is a claim about the tree as it stands, not about intent: a public
+    API meant for an outside caller is legitimately uncalled here, which is
+    why the receipt reports it as something to confirm rather than a failure.
+    """
+    out = {}
+    for path, names in (pubs or {}).items():
+        dead = [n for n in names[:limit]
+                if not _referenced_outside(cwd, n, path)]
+        if dead:
+            out[path] = dead
+    return out
+
+
+def _referenced_outside(cwd, name, defining_path):
+    """True if `name` appears in any file that is not its definition or a test.
+
+    Tests are excluded deliberately: a symbol referenced ONLY by the test the
+    same run delivered is exactly the shape being looked for -- the unit and
+    its gate agree with each other and nothing else knows the symbol exists.
+    """
+    rc, out = git(cwd, "grep", "-l", "-w", "--untracked", "-I", "-e", name)
+    if rc != 0:                      # 1 = no match, >1 = grep failure
+        return False
+    for hit in out.splitlines():
+        hit = hit.strip()
+        if not hit or hit == defining_path:
+            continue
+        if any(t in hit for t in _TESTY):
+            continue
+        return True
+    return False
+
+
+# Mock targets: the dotted string forms (`patch("a.b.c")`,
+# `monkeypatch.setattr("a.b", ...)`) plus `patch.object(mod, ...)`, whose
+# first argument is an imported module name rather than a string.
+_MOCK_STR = re.compile(
+    r"""(?:mock\.)?patch(?:\.object)?\s*\(\s*["']([\w\.]+)["']"""
+    r"""|monkeypatch\.(?:setattr|delattr)\s*\(\s*["']([\w\.]+)["']""")
+_MOCK_OBJ = re.compile(r"""(?:mock\.)?patch\.object\s*\(\s*([A-Za-z_][\w\.]*)""")
+
+
+def mocked_seams(cwd, changed, limit=200):
+    """[(test_file, module)] where a delivered test mocks a module this run
+    also CHANGED.
+
+    DETERMINISTIC (no model). The rule, stated generally: a self-graded gate
+    tests what the worker can observe, so anything it replaces with a mock is
+    by construction the thing its gate does not test -- and the mocked seam is
+    therefore exactly where the work fails, with a green receipt every time.
+    Measured: three live failures in one session, all mocked boundaries, all
+    green (SQL against a column that never existed; a config resolved one way
+    in the guard and another in production; constants invented for a live
+    search the worker could not observe).
+
+    The intersection with CHANGED is what makes it a signal rather than noise.
+    Mocking a stable third-party boundary is ordinary and reported nowhere;
+    mocking the module you are in the middle of rewriting is the finding.
+    """
+    changed = list(changed or [])
+    tests = [p for p in changed if any(t in p for t in _TESTY)]
+    if not tests:
+        return []
+    # Module paths this run touched, as importable dotted prefixes.
+    touched = {}
+    for p in changed:
+        if p.endswith(".py") and not any(t in p for t in _TESTY):
+            touched[p[:-3].replace("/", ".").replace("\\", ".")] = p
+    if not touched:
+        return []
+
+    found, seen = [], set()
+    for tf in tests[:limit]:
+        try:
+            full = os.path.join(cwd, tf)
+            if not os.path.isfile(full) or os.path.getsize(full) > 2_000_000:
+                continue
+            with open(full, errors="replace") as f:
+                body = f.read()
+        except Exception:
+            continue
+        targets = set()
+        for m in _MOCK_STR.finditer(body):
+            targets.add(m.group(1) or m.group(2))
+        targets.update(m.group(1) for m in _MOCK_OBJ.finditer(body))
+        for target in targets:
+            if not target:
+                continue
+            for dotted, path in touched.items():
+                # `patch("qd.engine.run")` targets module `qd.engine`; a bare
+                # `patch.object(engine, ...)` names only the tail.
+                if (target == dotted or target.startswith(dotted + ".")
+                        or dotted.endswith("." + target.split(".")[0])
+                        or dotted == target.split(".")[0]):
+                    key = (tf, path)
+                    if key not in seen:
+                        seen.add(key)
+                        found.append(key)
+                    break
+    return found
+
+
+def never_executed(cwd, changed, verify_cmd):
+    """Delivered test files the gate command does not run.
+
+    DETERMINISTIC (no model). A test file written by the run and not executed
+    by its own gate is a test that has never run -- it cannot have passed, and
+    a green receipt says nothing about it. In the field this was an entire
+    directory (`gate_tests/`, skipped by default) whose files were authored
+    under a green delegation and first executed three weeks later, when one
+    turned out to be unsatisfiable: its assertions needed live observations
+    the worker had no way to make, so its ceiling was zero against a floor of
+    three. `preflight_expect="red"` is blind to that by construction -- an
+    unsatisfiable gate is red before AND after, which is what an honest
+    greenfield gate looks like right up until it runs.
+
+    Conservative on purpose. A gate naming no paths (`make test`, `npm test`)
+    is assumed to run everything, because guessing at a build tool's coverage
+    would produce exactly the false accusations this receipt has spent a phase
+    removing. Only a gate that names paths can convict.
+    """
+    cmd = (verify_cmd or "").strip()
+    tests = [p for p in (changed or []) if any(t in p for t in _TESTY)]
+    if not cmd or not tests:
+        return []
+    # A token is a path iff it EXISTS in the tree. Shape heuristics cannot
+    # tell `unit_tests` (a directory) from `pytest` (a program) -- the
+    # filesystem can, and it is the same tree the gate will run against.
+    named = []
+    for tok in re.split(r"[\s;&|]+", cmd):
+        tok = tok.strip("'\"")
+        if not tok or tok.startswith("-"):
+            continue
+        if os.path.exists(os.path.join(cwd, tok)):
+            named.append(tok)
+    if not named:
+        return []                    # whole-suite runner: assume full coverage
+    out = []
+    for t in tests:
+        covered = False
+        for n in named:
+            n = n.rstrip("/")
+            if not n:
+                continue
+            if t == n or t.startswith(n + "/") or n.endswith(t):
+                covered = True
+                break
+        if not covered:
+            out.append(t)
+    return out
+
+
 # Test-dodge markers. Case-sensitive and anchored on the DECORATOR/attribute
 # forms on purpose: a bare `skip` match also fires on "skipped 3 files" in a
 # docstring, and a receipt line that cries wolf on prose is one nobody reads.
 # The three alternatives cover `@skip`/`@unittest.skip` (attribute after one
 # dot), `pytest.mark.skip|xfail` (two dots, so the first alternative cannot
 # reach it), and unittest's `expectedFailure`, which is a name, not a call.
-_DODGE = re.compile(r"@\w*\.?(?:skip|xfail)|pytest\.mark\.(?:skip|xfail)"
+_DODGE = re.compile(r"@\w*\.?(?:skip|xfail)(?!if)\b"
+                    r"|pytest\.mark\.(?:skip|xfail)(?!if)\b"
                     r"|expectedFailure")
+
+# `skipif` is the REPAIR, not the dodge -- converting a hard skip into a
+# conditional one is what a correct fix looks like -- so the alternatives
+# above exclude it explicitly. Without the lookahead every `pytest.mark.skipif`
+# read as an added `skip`: measured 4 false positives in a single run whose
+# whole purpose was skip -> skipif, on the one line the skill says always to
+# read on a green receipt. A detector that cries wolf on the signal you are
+# told to trust is worse than no detector.
+#
+# String and comment tokens are stripped before matching for the same reason:
+# the fourth false positive was a test's own guard assertion,
+# `text.count("@pytest.mark.skip(")`, which exists to PROVE no skip was added.
+_STRINGS = re.compile(r"'''.*?'''|\"\"\".*?\"\"\"|'[^'\n]*'|\"[^\"\n]*\"",
+                      re.S)
+
+
+def _code_only(line):
+    """`line` with string literals and trailing comments blanked out."""
+    line = _STRINGS.sub("", line)
+    return line.split("#", 1)[0]
 
 
 def dodge_markers(cwd, pre_sha, pre_status=None):
@@ -408,17 +756,21 @@ def dodge_markers(cwd, pre_sha, pre_status=None):
     out = {}
     base = [pre_sha] if pre_sha else []
     rc, changed = git(cwd, "diff", "--name-only", *base)
-    for path in (changed.splitlines() if rc == 0 else []):
+    for path in (unquote_path(p) for p in
+                 (changed.splitlines() if rc == 0 else [])):
+        # Same decode-before-_TESTY reason as new_public_symbols, and here it is
+        # a detector rather than a report: a `@pytest.mark.skip` added to
+        # `tab\tchar_spec.py` was reported as NO dodge at all (measured: {}).
         if not path.strip() or not any(t in path for t in _TESTY):
             continue
-        rc2, diff = git(cwd, "diff", *base, "--", path)
+        rc2, diff = git(cwd, "diff", *base, "--", literal_pathspec(path))
         if rc2 != 0:
             continue
         found = []
         for line in diff.splitlines():
             if not line.startswith("+") or line.startswith("+++"):
                 continue
-            for m in _DODGE.finditer(line[1:]):
+            for m in _DODGE.finditer(_code_only(line[1:])):
                 if m.group(0) not in found:
                     found.append(m.group(0))
         if found:
@@ -440,7 +792,7 @@ def dodge_markers(cwd, pre_sha, pre_status=None):
             found = []
             with open(full, errors="replace") as f:
                 for line in f:
-                    for m in _DODGE.finditer(line):
+                    for m in _DODGE.finditer(_code_only(line)):
                         if m.group(0) not in found:
                             found.append(m.group(0))
             if found:
@@ -451,14 +803,21 @@ def dodge_markers(cwd, pre_sha, pre_status=None):
 
 
 def numstat_map(cwd):
-    """{path: (added, removed)} from `git diff --numstat`."""
+    """{path: (added, removed)} from `git diff --numstat`.
+
+    Keys DECODED, because blast_radius joins this map to snapshot()'s -- whose
+    keys come through the porcelain seam and have been decoded since f75572a.
+    Undecoded, the two maps could never agree for any name git quotes, so
+    CHANGED silently dropped the +/- counts on exactly the files most worth
+    looking at and printed the bare status code instead.
+    """
     rc, numstat = git(cwd, "diff", "--numstat")
     lines = {}
     if rc == 0 and numstat:
         for row in numstat.splitlines():
             parts = row.split("\t")
             if len(parts) == 3:
-                lines[parts[2]] = (parts[0], parts[1])
+                lines[unquote_path(parts[2])] = (parts[0], parts[1])
     return lines
 
 

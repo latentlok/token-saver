@@ -1,5 +1,9 @@
 # Pending — the v4 queue
 
+> **The live queue is [ROADMAP.md](ROADMAP.md)** — everything open, in build order.
+> This file remains the longer-horizon v4 list; the roadmap references it rather than
+> absorbing it.
+
 v3 (the architect model at L5) is complete — executed, measured, shipped; its records
 live in [archive/](archive/). This is the ONLY forward-looking doc: what v4 draws
 from. Three buckets: work items, further context trims ("leaner files"), and worker

@@ -293,7 +293,7 @@ qd/
   verdict.py             receipt rendering (every deterministic line)
   worktrees.py           isolated worktree acquire/release, merge classification
   profiles.py            executor profiles + dispatch policy resolution
-  queries.py             qwen_query / qwen_investigate (read-only path)
+  queries.py             qwen_query (read-only path; format='answer'|'map')
   playbook.py            brief documents: front matter, slots, chain compile
   jsonschema.py          result_schema validation (subset, path-wise feedback)
   limits.py, limits_qwen.py   burn budget, stall/decode limits

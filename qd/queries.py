@@ -10,6 +10,7 @@ import qd.invoke
 import qd.jsonschema
 import qd.profiles
 import qd.runlog
+import qd.verdict
 
 DEFAULT_TIMEOUT = 900
 MAX_TIMEOUT = 7200
@@ -99,6 +100,18 @@ def run_query(args):
     if not isinstance(result_schema, dict):
         result_schema = None
 
+    # U5.1 accept-time check, same function _preconditions calls in
+    # qd/engine.py (that module never gets entered from here, so a keyword
+    # list kept twice would drift on the first edit). This surface has no
+    # retry loop to spend on a violation and no gate to bounce it off, so a
+    # constraint the checker cannot enforce has to stop the call before the
+    # executor runs -- otherwise "RESULT: valid (schema)" over an unchecked
+    # `minimum` is a fuel gauge reading full because it is disconnected.
+    if result_schema is not None:
+        schema_text = qd.jsonschema.schema_refusal(result_schema)
+        if schema_text:
+            return f"STATUS: refused\n\n{schema_text}"
+
     suffix = INVESTIGATE_SUFFIX if fmt == "map" else ANSWER_SUFFIX
     if result_schema is not None:
         suffix += qd.jsonschema.schema_suffix(result_schema)
@@ -110,6 +123,18 @@ def run_query(args):
     text, denials, sid, err, meta = qd.invoke.run_executor(
         profile, prompt, cwd, "plan", timeout, session_id, suffix=suffix
     )
+
+    # Step 8, cheap half: a query is ONE executor call, and until now the run
+    # log recorded its totals without recording it as a CALL. That mattered
+    # once the log became heterogeneous -- a delegation's record distinguishes
+    # its challenge pass from its build attempts, and a query sat outside that
+    # vocabulary entirely, so "what did we spend on queries" could not be asked
+    # in the same shape as every other question about the log.
+    #
+    # NOT the full fold of query into the run pipeline (DESIGN §8.1): this is
+    # the whole user-visible benefit of that step at a fraction of its risk.
+    calls = qd.runlog.CallLog()
+    calls.record("query", meta, session=sid, err=err)
 
     def _log_query(status, verdict):
         stats = meta.get("stats") or {}
@@ -130,6 +155,7 @@ def run_query(args):
                 "question": qd.runlog.digest(question),
                 "focus": focus or None,
                 "resumed": bool(session_id),
+                **calls.as_record(profile),
             },
         ))
 
@@ -176,8 +202,14 @@ def run_query(args):
     if result_schema is not None:
         value, _, err = qd.jsonschema.last_json_block(text)
         errors = [err] if err else qd.jsonschema.validate(value, result_schema)
+        # The same constant the delegate receipt stamps and qd/server.py's
+        # chain reads back. A third hand-written copy of the string is how the
+        # constant stops being one: a query receipt is not carried between
+        # links today, but the wording is now load-bearing somewhere, and
+        # "somewhere else still says it a third way" is the drift the constant
+        # exists to make impossible.
         lines.append(f"RESULT: schema INVALID — {errors[0]}" if errors
-                     else "RESULT: valid (schema)")
+                     else qd.verdict.RESULT_VALID_LINE)
 
     label = "map" if fmt == "map" else "answer"
     lines.append(f"--- {label} ---\n{qd.invoke.truncate(text, RESULT_CAP)}")
@@ -186,8 +218,12 @@ def run_query(args):
     return verdict
 
 
-def run_investigate(args):
-    """Back-compat alias: the codebase map is now qwen_query(format='map')."""
-    a = dict(args)
-    a["format"] = "map"
-    return run_query(a)
+# `run_investigate` was here: a four-line back-compat alias that set
+# format="map" and called run_query. Deleted at v0.6 because it was never
+# reachable -- `qwen_investigate` was in the dispatch table and in
+# `_guards_for` but in NO schema, and `_default_schemas()` is what answers
+# `tools/list`, so no conformant MCP client could discover it or would call it.
+# The capability it aliased is declared on the tool that IS advertised
+# (`qwen_query`, `format` enum ["answer", "map"]), so nothing was taken away.
+# specs/dispatch_spec.py now pins the two lists against each other, which is
+# the drift that let an unreachable tool sit in the dispatch table.

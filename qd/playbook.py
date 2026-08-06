@@ -17,6 +17,17 @@ import re
 # than skipped: a typo'd gate key silently ignored is a gate that never runs.
 # trust / executor / worktree are deliberately absent -- who is trusted and
 # where the run happens are the CALLER's decisions, never the document's.
+#
+# Be honest about what that line does NOT cover: `verify` is on this list, and
+# `verify` is a COMMAND this machine runs -- the pre-flight runs it at
+# qd/engine.py before the worker starts at all, so no approval mode,
+# touch_scope or trust level stands between the document and it. Same for
+# `advisory_gates[].cmd`. By the standard the paragraph above sets, that is a
+# larger grant than the three keys it excludes, and a reader deserves to see
+# the two statements next to each other rather than infer the gap. Documented
+# for callers in AGENT.md ("`verify` IS a front-matter key"). Whether the
+# allowlist should keep admitting it is a design decision for the humans who
+# own this contract, not something to quietly change under a bugfix.
 FRONT_KEYS = ("verify", "touch_scope", "shell_allow", "approval_mode",
               "timeout_sec", "verify_timeout_sec", "preflight_expect",
               "advisory_gates", "max_iterations", "chain")

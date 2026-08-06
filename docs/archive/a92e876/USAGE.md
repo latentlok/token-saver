@@ -133,7 +133,7 @@ both — the config is what a call *falls back to*, never what overrides it.
 
 | key | default | what it does |
 |---|---|---|
-| `test_command` | detected | The exact command that runs your tests. Beats every detector — use it when your layout isn't one the detectors guess (they key off `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`, a venv `pytest`, `pyproject.toml`/`setup.py`). |
+| `test_command` | detected | The exact command that runs your tests. Beats every detector — use it when your layout isn't one the detectors guess (they key off `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`, a venv `pytest`, `pyproject.toml`/`setup.py`). Like `verify` in a playbook, this is a command **this machine runs**: a repo you did not write can declare it. |
 | `test_dir` | `tests`/`test`/`spec`/`specs` if present | The folder holding your tests, for the discovery fallback. |
 | `trust` | `self` | `self` = the worker writes and grades its own suite; `verified` = your `verify` command is the gate; `auto` = refuse a bare call so the orchestrator picks per task. |
 | `min_tests` | 5 | Floor for the non-vacuous guard under `trust="self"`. Ratchets automatically against an existing green suite. |
@@ -451,6 +451,20 @@ The rules, each of which is enforced rather than hoped for:
 - **`trust`, `executor`, and `worktree` are deliberately NOT front-matter keys.** Who
   is trusted and where the run happens are the caller's decisions; a document that
   could grant itself full trust would be privilege escalation in markdown.
+- **`verify` IS a front-matter key, and it is a command this machine runs.** Said
+  plainly, because the bullet above sets an expectation this one does not meet: a
+  playbook — a *file in the repository* — can name the gate command, and the gate
+  runs on your machine, in your environment, with your credentials. The pre-flight
+  runs it **before the worker starts at all**, so `report_dont_fix`, `plan` mode and
+  a tight `touch_scope` do not stand between the document and the command; nor does
+  `trust`, which governs how work is graded and not what the gate may be. The same
+  is true of every `advisory_gates[].cmd`. Delegating against a repository you did
+  not write, or one whose playbooks you have not read, therefore means running its
+  authors' commands. Read `playbooks/*.md` the way you would read a `Makefile` you
+  were about to invoke: this is the same act. (The engine now quotes every path it
+  interpolates into a shell, so a *filename* cannot become a command — but a
+  declared gate command is a command by design, and no amount of quoting changes
+  that.)
 - **`{{slots}}` fill from `vars`** — across the whole file, front matter included
   (`verify: pytest {{mod}}_test.py` works). An unfilled slot and a `vars` key
   matching no slot are both refused by name; `{{` is reserved, no escape.
@@ -656,12 +670,76 @@ Green receipt ≈ 8 lines. What to actually look at:
   `SHELL APPROVAL NEEDED` (judge the command alone), `gate_suspect` (fix the gate,
   never iterate), `PREFLIGHT` (the gate proved nothing — tighten it), `TEST DODGE`
   (a skip added beside the delivery), `STRAYS` (files the task never asked for).
+- **`stuck_no_progress` + `NO PROGRESS:`** — the run ended with two attempts
+  producing byte-identical gate output. Distinct from `verify_failed` because the
+  two want opposite responses: a run that failed once and moved may be worth
+  another attempt, a run that has stopped moving will return the same receipt.
+  Change the brief or the gate. The worker was already told mid-run (it is
+  switched to diagnose-before-editing on the first repeat); this is the caller
+  being told.
+- **`parallel_max`** — measured on this endpoint: **2 is the knee.** 1 → 2 buys
+  +52% throughput for +18% per-run latency; 2 → 3 buys +4% for another +60%.
+  Past 2, a caller watching one delegation waits nearly twice as long for
+  throughput they do not get. See FINDINGS for the method.
+- **The worker and the code graph.** If `graphify` has indexed the repo, a
+  `scoped` run now grants the worker the READ-ONLY subcommands automatically —
+  you no longer have to wire `shell_allow` yourself. `update` is never granted:
+  it can bill a cloud account, and the plugin runs it after the verdict on its
+  own terms. Under `auto-edit` there is no shell at all, so nothing is granted
+  and the worker falls back to reading files.
+- **`contract`** — path to a criteria document with numbered clauses (`C1:`,
+  `- **C2**:`, `### C3 --`). Turns on three things at once: every clause must
+  have a delivered test naming it or the attempt fails with `UNCOVERED: C2`;
+  the receipt pins `CONTRACT: path @ digest` so a reviewer weeks later can tell
+  whether the file they are reading is the file that ran; and a later chain link
+  refuses if the contract moved since the gate was written against it. Add the
+  path to `spec_globs` too, so the worker cannot edit it.
+- **`review_brief`** (default off) — after the run, asks the worker whether the
+  diff delivers the brief. Advisory only: it never touches STATUS and never
+  reaches the worker. Costs one executor pass on a finished run.
+- **`SUPPRESSED:`** names any of the above that did NOT report — either the
+  size cap shed it to fit, or the check itself failed. Read it as *this
+  receipt is not telling you those checks were clean*, because a missing
+  warning and a passed check look identical otherwise. It never fires for
+  `RESUME`/`LEDGER` being shed: those cost you nothing you cannot ask for
+  again, and a line that fired on every long receipt would be ignored.
 - Never re-verify a green gate and never read the diff — that's the token cost this
   system exists to remove.
 
 ## Quality control without reading code
 
 When something matters enough to check but not enough for `verified`:
+
+### `advisory_gates` — measure whether self-grading caught anything
+
+**The question `trust="self"` cannot answer about itself:** the worker wrote the
+suite, so a green receipt tells you the worker's tests pass. It cannot tell you
+whether a gate *you* would have written would also have passed.
+
+`advisory_gates` answers it, and it is the only instrument here that does:
+
+```json
+{"advisory_gates": [{"name": "owner-spec", "cmd": "python3 specs/thing_spec.py"}]}
+```
+
+Attach a spec **you** hold, run the delegation at `trust="self"`, and read the
+two results against each other:
+
+| STATUS | advisory | what you learned |
+|---|---|---|
+| green | green | the worker's suite and yours agree — the strongest signal available |
+| green | **red** | **a measured self-grading blindspot.** The worker's tests pass and yours do not. This is the case you cannot get any other way |
+| red | — | the gate already stopped it; the advisory is noise |
+
+Advisory gates **never touch `STATUS` and never reach the worker**. They cannot
+turn a red run green or a green run red, and the worker cannot write code aimed
+at passing them — it does not know they exist. That is what makes the second row
+a measurement rather than another gate.
+
+Cheapest useful shape: keep one small owner-written spec per risky module and
+attach it whenever you delegate into that module at `trust="self"`. It costs one
+extra command run and it is the difference between trusting self-grading and
+having checked it.
 
 - `grade/stage1.py` (token-saver-eval) — deterministic scorecard: interface match
   vs a manifest, unpromised surface, complexity, suite runs.

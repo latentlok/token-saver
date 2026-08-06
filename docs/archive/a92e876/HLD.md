@@ -195,12 +195,29 @@ engine's.
 *Amended by v0.5 (2026-07-27): the engine hands over FACTS, not a tree to re-read, and
 the status it hands over is FINAL.* Added keys:
 
-    work_cwd: str                  # the tree the run actually used (worktree or main)
+    work_cwd: str                  # the tree the run actually used (worktree or main).
+                                   # v0.6 step 5: owned by qd/core/scope.py RunScope,
+                                   # together with T0 (pre_status/pre_sha) and the
+                                   # container's disposal -- green commits, red
+                                   # releases, a BORROWED container is committed but
+                                   # never released or merge-classified by its link
     tree_facts: {post_status, changed, numstat, head_moved, head_now, pubs} | None
                                    # captured from work_cwd BEFORE any worktree
                                    # commit/release. None => verdict recomputes from
                                    # ctx["cwd"] -- the pinned v1 fallback the
-                                   # differential oracle depends on
+                                   # differential oracle depends on.
+                                   # v0.6 step 2: READ-ONLY. Observations only --
+                                   # a write raises. Judgements about the tree are
+                                   # `detections`, and the split is load-bearing
+                                   # (DESIGN-modular-architecture.md §4)
+    detections: [Finding(kind, data)]      # what the detectors observed. kinds:
+                                   # uncalled, mocked_seams, never_executed (seam
+                                   # risk), dodge (added skip/xfail in test-ish
+                                   # files), strays (created, attributed, unnamed
+                                   # in the task). A kind absent = that detector
+                                   # ran and found nothing
+    detections_failed: [kind]      # detectors that RAISED. Distinct from absent:
+                                   # absent means clean, here means unmeasured
     meta: {blocked, writes, allowed, ...}   # all three ACCUMULATE across attempts
                                    # (order-preserving dedupe); each QGATE log is
                                    # fresh per attempt, so binding the last one alone
@@ -210,9 +227,8 @@ the status it hands over is FINAL.* Added keys:
     scope_unattributed: [path]     # changed, no logged worker write -> reported
     spec_unattributed: [path]      # spec changed, unattributed -> never reverted
     unrestorable: [path]           # over the snapshot cap, not auto-reverted
-    strays: [path]                 # created, attributed, unnamed in the task
-    dodge: {path: [marker]}        # added skip/xfail/expectedFailure in test-ish files
-    findings: str | None           # extracted pre-truncation
+    findings: str | None           # extracted pre-truncation. The WORKER'S OWN
+                                   # reported findings -- not `detections` below
     advisory: [{name, ok, ms, head}] | absent      # absent unless gates were supplied
     advisory_skipped: int          # malformed gate entries, counted not raised on
     gate_ms: int, gate_slow: bool, verify_timeout_sec: int, preflight_expect: str
@@ -239,7 +255,9 @@ verdict_spec oracle) — and skips it entirely under `preflight_expect="green"`.
 the LEDGER line from it, and `runs_in_flight()` answers "did my run die with the
 session".* The `extra` map gains, always: `blocked_commands: [str] (≤50)` (the full list
 the grouped receipt line elides), `graph_used: int`, `writes_attributed: int`,
-`caller_changed: int`, `strays: int`. Conditionally: `run_id: str` (a submitted run),
+`caller_changed: int`, `strays: int`, `detections_suppressed: [kind]` and
+`detections_failed: [kind]` (G1 — the receipt is capped, the log is not, so a
+finding that did not fit still survives here). Conditionally: `run_id: str` (a submitted run),
 `retry_of: str`, `verify_timeout_sec` / `preflight_expect` **only when non-default**
 (a key that reads 300/"any" in every record hides the runs where somebody turned a
 knob), `advisory: {red: int, of: int}` when gates were supplied, `report: bool` +

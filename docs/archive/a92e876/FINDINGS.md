@@ -8,6 +8,100 @@ Model under test: `qwen3.6:27b-agent` via Qwen Code 0.19.11 against a local Olla
 
 ---
 
+## G5 (RETRACTED, then settled): the +50k was the counter, not the wire
+
+**The original G5 finding was wrong.** It read:
+
+> *resuming re-sends the whole previous prompt, verbatim ... cold is 40% cheaper*
+
+on this arithmetic, one call each, trivial task:
+
+    first delegation      49,605 in
+    WARM second call     125,140 in
+    COLD second call      75,533 in
+
+    125,140 - 75,533  =  49,607   ~= the first call's 49,605
+
+The subtraction is real. The conclusion drawn from it was not. **Nothing is
+sent twice.** The extra ~50k was never on the wire; it was in the number we
+printed.
+
+### How it was settled
+
+Token counters are inference. So the delegations were re-run with a logging
+reverse proxy between the CLI and the vLLM endpoint, recording every request
+body and every response `usage`. Three independent instruments, one answer:
+
+1. **The request bodies.** On the warm second call the first task appeared
+   **exactly once**, and the conversation grew `2 -> 4 -> 6 -> 8 -> 10` messages
+   like any other. No duplicate prompt, no duplicated prefix.
+2. **The server's own counts.** Per request: cold first call `24,734 + 24,892 =
+   49,626`; warm second call `25,059 + 25,304 + 25,393 + 25,914 = 101,670`.
+   Meanwhile the run's `result.usage.input_tokens` said **152,075**.
+3. **The CLI source.** `qwen -r <id>` replays the stored session, and
+   `SessionReplay.replayUsageMetadata()` feeds every stored assistant turn's
+   `usageMetadata` back through `emitUsageMetadata()`, which does
+   `cumulative.promptTokens += ...`. A resumed process therefore **starts its
+   token counter at the previous run's total.**
+
+`result.usage` is a **session** counter, not a **run** counter. On a cold run
+the two coincide, which is why this was invisible for so long: measured cold,
+per-turn sum vs `result.usage` came out equal to the token every time --
+49,626/49,626, 49,611/49,611, 74,862/74,862.
+
+### What it actually costs to resume
+
+Same instrument, both arms, second call only:
+
+    WARM   76,444 on the wire
+    COLD   76,448 on the wire        -0.0%
+
+**Resuming is free.** A four-token difference, both arms three turns. The
+earlier "cold is 40% cheaper" spread was two effects mistaken for one: the
+counter inflation, plus ordinary variance in **turn count** -- and turns are
+what input tokens are actually made of here. Each turn re-sends the whole
+conversation, and on this stack the conversation is ~105 KB of fixed prefix
+(system prompt ~47 KB, tool definitions ~45 KB, preamble ~14 KB) against a
+57-character task. So one extra turn costs ~25k whether the session is warm or
+cold, and *nothing else moves the number much*. A run that took 4 turns instead
+of 3 looks like a 33% regression and is just a run that took another turn.
+
+### What changed
+
+`parse_stats` now prefers the sum over the run's OWN assistant turns
+(`invoke.turn_tokens`) and keeps `result.usage` only as the floor for a run that
+ended before any turn reported. Cold runs are unaffected by construction --
+proven above, equal to the token. Warm runs stop over-reporting by a whole prior
+session. Residual: sub-agent calls (qwen's auto-memory-extractor, ~780 tokens)
+are not assistant turns, so total endpoint traffic is now understated by ~1%
+where it was previously overstated by ~65% on a resumed run.
+
+The retry loop was **not** changed. It resumes, and on this evidence resuming
+costs nothing, so the doctrine "go cold for repairs" now rests only on its
+original argument -- a failed session argues with the correction -- and not on
+a cost claim.
+
+### The same bug had already decided `challenge_warm`
+
+`challenge_warm` was measured at **+50% input, +16% wall** and defaulted to cold
+on that number. Its warm arm is the resumed one, so it was measured with exactly
+the bug above. Re-measured, n=3 interleaved, same brief and repo:
+
+    cold  97,049 on the wire   20.3s
+    warm  98,954 on the wire   19.9s     +2.0% input, wall-clock a wash
+
+The default is still cold, on a different and honest argument: cost no longer
+decides it either way, and nothing has measured that the continuity warm buys
+actually helps. *"Measured harmless"* is not a reason to turn something on.
+
+*(The first correction came from the operator questioning the write-up: a
+two-turn conversation cannot BE 50k tokens of history. It was not history. It
+was not tokens either.)*
+
+**The lesson worth keeping: a number produced by the thing under test is not a
+measurement.** Every conclusion here that survived came from outside the CLI --
+the wire, or its source.
+
 ## Qwen fabricates. Its self-report is never evidence.
 
 First real delegation: write `fib()` plus pytest tests. The code was **correct**. The
@@ -765,3 +859,222 @@ heading wrong.
 **Stateless by default is load-bearing.** A fresh session re-reads QWEN.md — which is
 what makes the rules bind at all — and stops one task's reasoning contaminating the next.
 Use `session_id` only for tight follow-ups on the same task.
+
+## Mutation sweep of the safety surface (v0.6 restructure)
+
+Three safety mechanisms were found unpinned *by accident* while restructuring —
+each one touched for an unrelated reason, each one passing a fully green suite
+while broken. That is not a run of bad luck; it is a shape. So the remaining
+guards were swept deliberately: break one, run the whole suite, record whether
+anything notices.
+
+**12 guards swept. 10 pinned, 2 unpinned.** Both holes were *wiring*, not logic
+— in each case the mechanism itself had a passing test and the thing that
+connected it did not.
+
+| Guard | Result |
+|---|---|
+| spec revert does nothing | pinned |
+| **engine passes `base=None` to the spec revert** | **UNPINNED** |
+| `reset_worktree` uses `-fdx` (eats a gitignored venv) | pinned |
+| `violated_specs` never finds anything | pinned |
+| child inherits the server's stdin (×2 sites) | pinned |
+| touch-scope edits are not reverted | pinned |
+| the burn budget never stops a run | pinned |
+| **a real `*_spec.py` edit is not classified** | **UNPINNED** |
+| a scope violation no longer sets its status | pinned |
+| `gate_suspect` never fires | pinned |
+| the brief file is not restored after a worker edit | pinned |
+
+**Hole 1 — the revert's base.** `gittree.revert_specs` handles a *committed*
+sabotage correctly and has its own test, which passes `base=pre_sha`
+explicitly. Nothing checked that the engine supplies it. With `base=None`, a
+worker that commits its spec edit has HEAD holding the weakened spec, so the
+revert restores the sabotage faithfully — the guard runs, reports success, and
+hands back a spec the worker wrote. That is the single thing the spec guard
+exists to prevent, because a gate from a different hand is what makes a green
+receipt mean anything (§I).
+
+**Hole 2 — the classification.** Both pre-existing `spec_violation` assertions
+were *playbook* edits, which take their own branch in the status cascade. A
+genuine `*_spec.py` edit had no status assertion anywhere, so the cascade could
+stop classifying it and the run would report `verify_failed` — a gate that did
+not pass, rather than a worker that touched the gate.
+
+**The transferable part.** Every hole found today — these two plus the
+`DISPATCH` line, the receipt's drop order, and the gate refusal — shares one
+property: *the failure looks like success*. A suite built by asking "does this
+work?" never covers them, because they all answer yes right up until the moment
+the answer stops mattering. The question that finds them is "what would still
+be green if this stopped working?", and the only way to ask it is to break the
+thing and look.
+
+It also argues for where to spend the next sweep. The logic in this repo is
+well covered; both holes were in the wiring between a tested mechanism and its
+call site. §1 of the modularity design says the same thing from the other
+direction — *the logic is not tangled, the wiring is*.
+
+## Live verification of the v0.6 restructure (steps 2-5)
+
+Steps 2-5 were built against a hermetic suite and a golden receipt harness. Both
+prove a MOVE was faithful; neither proves the thing works against a real model on
+real hardware. One tiny delegation against `snowy` (Qwen3.6-27B, vLLM), on a
+throwaway repo, with `worktree="auto"` so every new component sat on the critical
+path.
+
+**Result: success in 17s, gate green, 512 output tokens.** Every piece of new
+machinery appeared in the receipt:
+
+    UNCALLED: 1 new public symbol(s)... add (mathlib.py)     steps 2+3
+    WORKTREE: ... / MERGE: git merge --no-edit qwen/r08c1ec  step 5
+    CHALLENGE: brief reviewed against the code, no objection step 4
+
+**Then the receipt was mutation-checked live**, because a live test that passes
+with and without the change is testing nothing (the rule this repo learned the
+hard way on A11):
+
+| Live mutation | Effect on the real receipt |
+|---|---|
+| `uncalled` unregistered from `DETECTORS` | UNCALLED line gone; `NEW PUBLIC SURFACE` (an older, separate mechanism) still present — so the line genuinely comes from the step-2 registry |
+| `RunScope._GREEN = ()` — a green run treated as red | `WORKTREE:` and `MERGE:` gone, the delivered code released |
+
+The second is worth recording in full, because it is what the ownership rule
+exists to prevent and it is far more alarming seen than described. The receipt
+read:
+
+    STATUS: success
+    CHANGED: 2 file(s)
+
+...with no `WORKTREE:` line, because the work had just been deleted. **A green
+receipt for code that no longer exists.** Nothing in the status, the changed-file
+list or the gate output contradicts it — the only signal is the ABSENCE of a
+line. Same shape as every other hole found in this round: the failure looks like
+success.
+
+## Falsy-precedence sweep (v0.6, step 6)
+
+`shell_allow=[]` being silently widened to the project's list was found while
+building step 6. The question that follows is whether it was one bug or a
+pattern, so all 15 remaining `or`-chained precedence sites were triaged by one
+test: **is a falsy value a meaningful answer here?**
+
+| Site | Verdict |
+|---|---|
+| `shell_allow`, `mcp_allow` | **BUG** — `[]` means *no extra capability*; fixed in `c15d242` |
+| `fixture_globs` | **BUG** — `[]` means *no path segment marks a fixture*; fixed here |
+| `burn_budget` | already correct — uses `.get(k, default)`, so a configured `0` survives |
+| `touch_scope` | already correct — no fallback layer to fall through to |
+| `timeout_sec`, `verify_timeout_sec` | **`or` is right.** Both are clamped to a floor (30s / 10s), so `0` cannot express a valid answer. Treating it as one would silently clamp to a value the caller never asked for -- worse than falling through to the default. |
+| the other 9 (`retry_of`, `cwd`, `session_id`, `approval_mode`, `on_compaction`, `worktree`, `shell_feedback`, `retry_message`, `_brief`) | no meaningful falsy value -- an empty session id or cwd is not an answer |
+
+**Three real instances out of fifteen.** The pattern is narrower than it first
+looked, and the discipline that finds it is not "never use `or`" but a question
+asked per setting. Two of the three touch capability or policy the caller
+declared explicitly; the third (`fixture_globs`) fails in the STRICTER
+direction, which is why it survived unnoticed -- nothing breaks, a check just
+runs that a project asked to switch off.
+
+The transferable rule, now enforced structurally by `qd/core/plan.py`:
+
+> `None` means *this layer did not answer*. Every other value -- including
+> `false`, `0` and `[]` -- is an answer. Saying nothing and saying no are
+> different, and exactly one of them defers.
+
+## An e2e test whose observable depends on the model cannot discriminate
+
+Attempting to verify the `shell_allow=[]` fix end to end: a scratch project
+permitting `^echo`, a call passing `shell_allow=[]`, and a task instructing the
+worker to run `echo PERMISSION_PROBE`. If the fix held, the worker would be
+denied; if the old fall-through survived, permitted.
+
+**Both arms returned identical results.** Zero blocked commands either way --
+because the worker never ran a shell command at all. It wrote the file directly
+and the allowlist was never consulted. The test was measuring the model's choice
+of tool, not the resolver.
+
+This is the A11 lesson in a new costume, and worth naming separately because the
+first version looked like a textbook A/B: two arms, one variable, a clear
+observable. What it lacked was any guarantee that the observable would be
+PRODUCED. A live test only discriminates if the code path under test is on the
+critical path of a task the worker cannot complete another way -- and a worker
+free to choose its tools will route around the thing you are trying to measure.
+
+**The rule:** for anything DETERMINISTIC -- config resolution, precedence,
+env-var construction -- test at the seam, where the answer does not depend on
+what a model felt like doing. Spend live runs on what only a live run can show:
+that the pipeline works against a real model at all, and that a mutation to it
+changes the receipt (the two live mutations that DID discriminate are recorded
+above -- both altered the receipt because both sat on a path every run takes).
+
+The fix itself was then verified at the seam: with a project permitting
+`^echo`, a caller passing `[]` resolves to `[]` and a silent caller resolves to
+`["^echo"]`.
+
+## Concurrency on snowy: 2 workers, not 1 and not 4
+
+Re-measured after the first attempt was retracted for running on a contended
+GPU. Every flaw the retraction listed is fixed: levels **interleaved**
+(1,2,3,1,2,3) rather than sequential, two rounds, a longer generation than the
+first probe's ~500 tokens, and the K=1 arm run again at the very end as a drift
+control. 14 real delegations.
+
+    K   wall (median)   per-run (median)   throughput
+    1        11.0s            11.0s          5.4/min
+    2        14.7s            13.0s          8.2/min   +52%
+    3        21.1s            20.8s          8.5/min   +57%
+
+**Drift control: K=1 was 11.0s first and 11.0s last.** Nothing moved under the
+measurement, which is what makes the rest of the table worth reading.
+
+**The first reading was wrong in the other direction.** It reported flat
+throughput and concluded the endpoint serialises. It does not -- vLLM batches
+this workload perfectly well, and contention alone produced that result. Both
+the original claim and its retraction are kept above/below this entry, because
+the sequence is the lesson: an uncontrolled measurement did not merely fail to
+answer, it answered CONFIDENTLY AND BACKWARDS.
+
+**The actionable shape: 2.** Going 1 → 2 buys **+52% throughput** for +18%
+per-run latency. Going 2 → 3 buys **+4%** for another +60% latency. The knee is
+at 2, and `parallel_max: 4` is past it -- a caller watching one delegation waits
+nearly twice as long for throughput they do not get.
+
+Caveat, stated because it is the one thing still not verified: the GPU was idle
+per the operator, not per a reading. It is remote, so `nvidia-smi` was not
+available. The drift control is the evidence that nothing changed DURING the
+run; it cannot prove the machine was quiet before it.
+
+## Concurrency on snowy — MEASUREMENT RETRACTED, another process held the GPU
+
+An earlier version of this entry reported that snowy "serialises" and that
+`parallel_max > 1` buys latency without throughput, from this data:
+
+| concurrency | wall | per-run | throughput |
+|---|---|---|---|
+| K=1 | 14.7s | 14.7s | 4.1 runs/min |
+| K=3 | 42.4s | 28.6–42.4s | 4.2 runs/min |
+
+**The conclusion does not survive.** Another process was using the GPU during
+the run, and there is no record of how much or when. Contention alone explains
+the tripled per-run latency, so the numbers cannot distinguish *"vLLM declines
+to batch this workload"* from *"something else was holding the card"*. Those
+have opposite implications for `parallel_max`, and this data picks neither.
+
+Kept rather than deleted, because the mistake is the useful part. The original
+entry **did** name the shared GPU in its caveats — and then stated a causal
+conclusion anyway, in the summary line and in the title. *A caveat that does not
+change the claim it qualifies is decoration.* §IV says a claim you have never
+counted is an anecdote; a claim counted once under uncontrolled conditions is an
+anecdote with a table.
+
+**What a real measurement needs**, for whoever repeats it:
+
+- the GPU otherwise idle, **verified** before and after (`nvidia-smi`), not assumed
+- more than one sample per level, with the levels **interleaved** rather than run
+  in sequence, so drift and contention hit both arms alike
+- a task whose generation is long enough for batching to matter — the probe used
+  ~500 output tokens, where prefill dominates and continuous batching has least
+  to offer
+- the K=1 arm re-run **after** the K=3 arm, as a control against drift
+
+Until then the honest position is **unknown**. `parallel_max: 4` stands because
+nothing measured argues against it.
