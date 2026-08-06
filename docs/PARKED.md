@@ -39,10 +39,10 @@ elsewhere:
 
 | Item | Why it is free |
 |---|---|
-| **A7** the two playbooks | markdown documents |
+| ~~**A7** the two playbooks~~ | **DONE** — `playbooks/write-gate.md`, `playbooks/implement.md`, pinned by `specs/playbooks_spec.py` |
 | **A8** contract lifecycle check | a doctor check; doctor is not being restructured |
 | **C** the skill pass | prose. *Best done after* the restructure so it is rewritten once, not twice — a scheduling choice, not a dependency |
-| **D** server lifecycle (A0d), remaining half | server startup; untouched by this work. The reporting half shipped in `29b62e6` |
+| ~~**D** server lifecycle (A0d)~~ | **DONE** — `qd/core/lifecycle.py`. Scope corrected during the build: it records and REPORTS, it does not kill. See below |
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |
 | **F** decisions owed | version bump, `reset_worktree()`, the `challenge_brief` false-positive rate |
 | **G5** cold-vs-resumed retry | a measurement on telemetry that already exists |
@@ -108,10 +108,17 @@ Three content bugs to fix while in there:
 
 ## D. Smaller open items
 
-**Server lifecycle (A0d, partial).** Doctor now names the pids and the exact
-`kill` command. Still open: a server that writes pid+version at startup and
-terminates a stale predecessor — a behaviour change to process management that
-wants live testing rather than a spec.
+~~**Server lifecycle (A0d).**~~ **DONE**, with its scope corrected by a spec.
+
+The server now writes pid+version at startup and clears a STALE record. An
+earlier draft also SIGTERMed a *live* predecessor — and `specs/serialize_spec.py`
+caught it: two servers on one machine is a **supported configuration**, and that
+spec exists to prove the repo lock and endpoint slot hold ACROSS processes.
+Killing one would have broken a real guarantee to tidy up an accident.
+
+So it records and reports. `doctor` already prints the exact `kill` for a human
+who wants it, and the recorded VERSION is what lets anyone see that an old build
+is the one serving — which was most of the harm.
 
 **Measurement (A5).** A `PAID:` receipt line. *(A7 is closed —
 `advisory_gates` is documented in USAGE.md. It pairs with the `*_qwen` marker

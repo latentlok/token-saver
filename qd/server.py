@@ -50,6 +50,8 @@ from qd import profiles
 from qd import runlog
 
 PROTOCOL_VERSION = "2024-11-05"
+from qd.core import lifecycle
+
 SERVER_INFO = {"name": "qwen-delegate", "version": "0.6.0"}
 DRAIN_SECONDS = 10.0
 SLOT_POLL_SECONDS = 0.5
@@ -909,10 +911,41 @@ def _default_schemas():
     return [schemas.TOOL, schemas.QUERY_TOOL]
 
 
+def _claim_machine():
+    """A0d: retire a stale predecessor and record this process as the live one.
+
+    Claude Code respawns this server on reload and the old process does not
+    always die. Two servers then share one machine's endpoint semaphore, repo
+    locks and run log -- and those locks are per-PROCESS, so they do not queue
+    behind each other. They double the endpoint's real concurrency while each
+    believes it is honouring `parallel_max`, and whichever won the socket
+    decides which BUILD the caller is talking to, which is how a fixed bug
+    appears to come back.
+
+    Records and REPORTS; never kills. Two servers on one machine is a supported
+    configuration (specs/serialize_spec.py proves the repo lock and endpoint
+    slot hold across processes), so the value here is that the version is
+    written down -- which is what lets anyone see an OLD BUILD is the one
+    serving. Never fatal: failing to start is worse than the duplication.
+    """
+    try:
+        base = os.path.join(os.path.expanduser("~"), ".qwen-delegate")
+        outcome = lifecycle.supersede(base, os.getpid(),
+                                      SERVER_INFO.get("version", "?"))
+        if outcome == "live":
+            log("another token-saver server is already running -- "
+                "run `doctor` to see its pid and version")
+        elif outcome == "stale":
+            log("cleared a stale server record")
+    except Exception as e:
+        log(f"lifecycle check skipped: {type(e).__name__}")
+
+
 def main(tools=None, schemas=None):
     tools = tools or _default_tools()
     schemas = schemas if schemas is not None else _default_schemas()
     workers = []
+    _claim_machine()
     log("dispatch starting (threaded)")
 
     for line in sys.stdin:
