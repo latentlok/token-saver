@@ -131,18 +131,14 @@ CHALLENGE_CLEARED = (
 def _warm_challenge(args, cfg):
     """Whether the build resumes the challenge's session. Default FALSE.
 
-    Default cold, on measurement rather than taste. Resuming looked like the
-    saving -- "one prefill instead of two" -- and is the opposite: a resumed
-    session re-sends its whole history every turn, so the build re-pays the
-    ~46k challenge conversation on each of its own turns. Same brief, same
-    repo, live:
+    Default cold, and the reason has been re-measured (see _challenge_brief).
+    The old reason -- "warm costs +50% input" -- was a broken counter, not a
+    cost; corrected, warm is +2% on the wire and the same wall-clock.
 
-        cold  148,267 in  19.3s  (2 sessions, 4 build turns)
-        warm  222,407 in  22.4s  (1 session,  5 build turns)
-
-    +50% input, +16% wall, and MORE turns -- so not cheaper and not sharper
-    either. `challenge_warm: true` buys context continuity for anyone who wants
-    it; it is not the default because nothing measured says it should be.
+    So the honest position is that cost does not decide this either way.
+    `challenge_warm: true` buys context continuity for anyone who wants it; it
+    is not the default because nothing measured says continuity HELPS, and
+    "measured harmless" is not a reason to turn something on.
 
     Explicit None checks, not `or`: `false` is a real answer and `or` chaining
     would fall through it to the next layer -- the same trap the challenge flag
@@ -270,16 +266,24 @@ def _challenge_brief(profile, task, work_cwd, timeout, session_id=None):
     (`challenge_warm`). The builder then starts having already read the code it
     is about to change.
 
-    MEASURED, and not what the design predicted. The reasoning was "one prefill
-    instead of two"; that is wrong. A resumed session re-sends its whole history
-    on EVERY turn, so the build re-pays the ~46k challenge conversation on each
-    of its own turns. Same brief, same repo, live:
+    MEASURED TWICE, and the first measurement was wrong. It read "cold 148,267
+    in / warm 222,407 in -- +50% input, +16% wall", and attributed the gap to a
+    resumed session re-sending its history. Both halves were mistaken: the
+    counter was double-counting (G5 in docs/FINDINGS.md -- `result.usage` is a
+    SESSION total, and a resumed process starts it at the previous run's), and
+    re-sending history is what EVERY turn of every session does, warm or cold.
 
-        cold  148,267 in  19.3s   (2 sessions)
-        warm  222,407 in  22.4s   (1 session, 5 build turns vs 4)
+    Re-measured through a logging proxy, n=3 interleaved, same brief and repo:
 
-    +50% input, +16% wall. Warm buys context continuity, not economy -- price it
-    as a quality lever, never as a saving.
+        cold  97,049 on the wire   20.3s
+        warm  98,954 on the wire   19.9s
+
+    +2% input, wall-clock a wash. Warm is neither the saving the design
+    predicted nor the penalty the first measurement claimed -- on cost it is
+    very nearly free, and it buys context continuity. It stays OFF by default
+    because n=3 on one task shape says nothing about whether continuity helps,
+    and a default should turn on something measured to be better, not something
+    measured to be harmless.
 
     `meta` comes back so the caller can fold this pass into the run's totals.
     It is a real executor call: discarding its telemetry would put its tokens
@@ -1408,9 +1412,10 @@ def _delegate(args, t0_dir):
         ctx["challenge"] = {"ran": True, "warm": False,
                             "unverified": (ch_meta or {}).get("challenge_unverified")}
         # --- Carry the challenge session into the build (opt-in) ---
-        # OFF by default: measured at +50% input tokens and +16% wall against a
-        # cold build (see _challenge_brief). `challenge_warm: true` for callers
-        # who want the builder to inherit the reading the review just did.
+        # OFF by default, but NOT on cost: re-measured at +2% input and the same
+        # wall-clock against a cold build (see _challenge_brief; the old "+50%"
+        # was a double-counted telemetry number). `challenge_warm: true` for
+        # callers who want the builder to inherit the reading the review did.
         #
         # The hand-off line is DETERMINISTIC, written here, never asked of the
         # model. The challenge prompt ends with "Do NOT build anything yet",

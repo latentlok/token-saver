@@ -195,10 +195,13 @@ caller that has never misbehaved.
    exist, **E** the adapter carryovers (several are *"has never run live"* —
    probes, not features).
 
-   **Also open, and it is a decision not a build:** G5 measured that resuming a
-   session re-sends the entire previous prompt verbatim — 40% more input tokens,
-   compounding O(N²). The retry loop still resumes. Both cost and the skill's own
-   *"go cold for repairs"* point one way; it was not changed on n=3.
+   **CLOSED, and the old answer was wrong:** G5 claimed resuming re-sends the
+   previous prompt verbatim (40% more input, O(N²)). Re-measured through a
+   logging proxy: **resuming is free** — warm 76,444 vs cold 76,448 on the wire.
+   The gap was `result.usage`, a SESSION counter that a resumed process starts
+   at the previous run's total; fixed in `invoke.turn_tokens`. The retry loop
+   still resumes and there is no cost argument to change it. *"Go cold for
+   repairs"* still holds — on its own argument, not on cost.
 
 4. **Release:** 0.6.0 is bumped and the changelog written. PR → CI →
    squash-merge → tag is the user's, per [docs/RELEASING.md](docs/RELEASING.md).

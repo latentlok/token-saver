@@ -97,9 +97,11 @@ acts. Live tracker: `docs/PLAN-v06-ledger.md`; evidence: `docs/archive/plugin-im
   attempts, and one sum could not tell them apart. Lands in `runs.jsonl`,
   deliberately not in the receipt.
 - It paid for itself immediately: `challenge_warm` was designed as "one prefill
-  instead of two" and measured at **+50% input tokens, +16% wall** — a resumed
-  session re-sends its history every turn. Default is cold; the A/B was only
-  possible because the two calls are logged apart.
+  instead of two" and measured against a cold build. Default is cold; the A/B
+  was only possible because the two calls are logged apart. *(The **+50% input,
+  +16% wall** figure first recorded here was wrong — the counter it came from
+  double-counts a resumed session. Corrected to +2% input and no wall-clock
+  difference; see G5 in docs/FINDINGS.md.)*
 
 **Stops counting non-evidence**
 - The `trust="self"` vacuous-pass guard no longer counts SKIPPED tests. Five

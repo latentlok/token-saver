@@ -138,7 +138,7 @@ TOOL = json.loads(r'''
       },
       "challenge_warm": {
         "type": "boolean",
-        "description": "Default FALSE. When true the build RESUMES the challenge pass's session, so the builder starts having already read the code it is about to change, and a deterministic hand-off line revokes the review's do-not-build instruction. Measured at +50% input tokens and +16% wall against a cold build -- a resumed session re-sends its history every turn -- so this is a continuity lever, not a saving, and it is off unless you ask for it."
+        "description": "Default FALSE. When true the build RESUMES the challenge pass's session, so the builder starts having already read the code it is about to change, and a deterministic hand-off line revokes the review's do-not-build instruction. Re-measured at +2% input tokens and the same wall-clock against a cold build (an earlier +50% figure was a telemetry bug, not a cost), so this is a continuity lever that is very nearly free -- but nothing has measured that the continuity HELPS, so it is off unless you ask for it."
       },
       "verify_timeout_sec": {
         "type": "integer",

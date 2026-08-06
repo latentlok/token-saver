@@ -42,7 +42,7 @@ elsewhere:
 | ~~**D** server lifecycle (A0d)~~ | **DONE** — `qd/core/lifecycle.py`. Scope corrected during the build: it records and REPORTS, it does not kill. See below |
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |
 | **F** decisions owed | version bump, `reset_worktree()`, the `challenge_brief` false-positive rate |
-| ~~**G5** cold-vs-resumed retry~~ | **MEASURED.** Cold is 40% cheaper: a resumed call carries a FULL COPY of the previous prompt (verbatim, not a delta), so the cost is the ~50k PREFIX paid twice and it compounds O(N²). Not changed on n=3 — see FINDINGS |
+| ~~**G5** cold-vs-resumed retry~~ | **RE-MEASURED, first answer RETRACTED.** Resuming is free: warm 76,444 vs cold 76,448 on the wire. The "40% cheaper / full verbatim copy" claim was `result.usage` double-counting a resumed session, fixed in `invoke.turn_tokens`. Retry loop unchanged — see FINDINGS |
 
 **The useful read:** most of the pipeline work waits on steps 1–4, and *nothing*
 waits past step 6. Roughly half the list is not blocked at all.
@@ -211,12 +211,13 @@ by being filed in `features/gates/`.
 Defaults toward MATCHES: an unparseable answer is not evidence of a defect, and
 a red line that is usually wrong is one nobody reads.
 
-**G5 — cold restart vs resumed session on retry.** `challenge_warm` measured a
-resumed session at **+50% input tokens**, because it re-sends its history every
-turn; the retry loop resumes. Whether a cold attempt 3 carrying the stored brief
-beats a resumed one is an open A/B, answerable from per-call telemetry exactly
-the way `challenge_warm` was. Not blocked by the restructure — it is a
-measurement, and the result decides whether there is any work here at all.
+**G5 — cold restart vs resumed session on retry. CLOSED, and the first answer
+was wrong.** Measured through a logging proxy rather than the CLI's own counter:
+resuming costs **nothing** (warm 76,444 vs cold 76,448 on the wire). Both the
+`challenge_warm` "+50%" and G5's own "cold is 40% cheaper" came from
+`result.usage`, which is a SESSION counter — a resumed process starts it at the
+previous run's total. Fixed in `invoke.turn_tokens`; see FINDINGS. The retry
+loop still resumes, and there is no longer a cost argument to change it.
 
 ---
 

@@ -8,14 +8,13 @@ Model under test: `qwen3.6:27b-agent` via Qwen Code 0.19.11 against a local Olla
 
 ---
 
-## G5: resuming re-sends the whole previous prompt, verbatim
+## G5 (RETRACTED, then settled): the +50k was the counter, not the wire
 
-The retry loop resumes the worker's session. `challenge_warm` had measured a
-resumed session at +50% input tokens and attributed it to "history re-sent every
-turn". **That attribution was wrong**, and the correction matters more than the
-number.
+**The original G5 finding was wrong.** It read:
 
-Measured, one call each, trivial task:
+> *resuming re-sends the whole previous prompt, verbatim ... cold is 40% cheaper*
+
+on this arithmetic, one call each, trivial task:
 
     first delegation      49,605 in
     WARM second call     125,140 in
@@ -23,32 +22,85 @@ Measured, one call each, trivial task:
 
     125,140 - 75,533  =  49,607   ~= the first call's 49,605
 
-**The resumed call carries a full copy of the previous prompt.** Not a delta,
-not a summary, not an accumulating transcript -- the entire prior prompt again,
-ahead of the new one. Two consequences "history is re-sent" does not predict:
+The subtraction is real. The conclusion drawn from it was not. **Nothing is
+sent twice.** The extra ~50k was never on the wire; it was in the number we
+printed.
 
-1. **The cost is the PREFIX, not the conversation.** A trivial first call is
-   already ~50k input: rules file, tool definitions, task. Almost none of it is
-   anything the worker said. Resuming pays for that prefix twice, and a terse
-   worker does not help.
-2. **It compounds.** Each resumed turn carries the last full prompt, so an
-   N-turn resumed session is O(N²) in input, not O(N). A three-attempt retry is
-   not 1.5× a cold one.
+### How it was settled
 
-**Cold is 40% cheaper and far more predictable.** Across three interleaved
-rounds, warm ran 125,246 / 125,150 / 151,126 while cold ran 74,801 / 74,876 /
-74,892 -- a 26k spread against 91 tokens. Same success rate, same wall-clock
-(~10.5s either way), so the saving is not bought with quality or latency.
+Token counters are inference. So the delegations were re-run with a logging
+reverse proxy between the CLI and the vLLM endpoint, recording every request
+body and every response `usage`. Three independent instruments, one answer:
 
-**Both cost and doctrine now point one way for retries.** The skill already says
-*go cold for repairs* -- a failed session carries its confusion forward and
-argues with the correction. The retry loop still resumes. Not changed on this
-evidence: n=3, one task shape, one executor. The duplication is a property of
-how that CLI builds a resumed request, so another executor may differ -- which
-is exactly why the per-call telemetry that made it visible is worth keeping.
+1. **The request bodies.** On the warm second call the first task appeared
+   **exactly once**, and the conversation grew `2 -> 4 -> 6 -> 8 -> 10` messages
+   like any other. No duplicate prompt, no duplicated prefix.
+2. **The server's own counts.** Per request: cold first call `24,734 + 24,892 =
+   49,626`; warm second call `25,059 + 25,304 + 25,393 + 25,914 = 101,670`.
+   Meanwhile the run's `result.usage.input_tokens` said **152,075**.
+3. **The CLI source.** `qwen -r <id>` replays the stored session, and
+   `SessionReplay.replayUsageMetadata()` feeds every stored assistant turn's
+   `usageMetadata` back through `emitUsageMetadata()`, which does
+   `cumulative.promptTokens += ...`. A resumed process therefore **starts its
+   token counter at the previous run's total.**
 
-*(Found by the operator questioning the write-up: a two-turn conversation cannot
-BE 50k tokens of history. It was not history.)*
+`result.usage` is a **session** counter, not a **run** counter. On a cold run
+the two coincide, which is why this was invisible for so long: measured cold,
+per-turn sum vs `result.usage` came out equal to the token every time --
+49,626/49,626, 49,611/49,611, 74,862/74,862.
+
+### What it actually costs to resume
+
+Same instrument, both arms, second call only:
+
+    WARM   76,444 on the wire
+    COLD   76,448 on the wire        -0.0%
+
+**Resuming is free.** A four-token difference, both arms three turns. The
+earlier "cold is 40% cheaper" spread was two effects mistaken for one: the
+counter inflation, plus ordinary variance in **turn count** -- and turns are
+what input tokens are actually made of here. Each turn re-sends the whole
+conversation, and on this stack the conversation is ~105 KB of fixed prefix
+(system prompt ~47 KB, tool definitions ~45 KB, preamble ~14 KB) against a
+57-character task. So one extra turn costs ~25k whether the session is warm or
+cold, and *nothing else moves the number much*. A run that took 4 turns instead
+of 3 looks like a 33% regression and is just a run that took another turn.
+
+### What changed
+
+`parse_stats` now prefers the sum over the run's OWN assistant turns
+(`invoke.turn_tokens`) and keeps `result.usage` only as the floor for a run that
+ended before any turn reported. Cold runs are unaffected by construction --
+proven above, equal to the token. Warm runs stop over-reporting by a whole prior
+session. Residual: sub-agent calls (qwen's auto-memory-extractor, ~780 tokens)
+are not assistant turns, so total endpoint traffic is now understated by ~1%
+where it was previously overstated by ~65% on a resumed run.
+
+The retry loop was **not** changed. It resumes, and on this evidence resuming
+costs nothing, so the doctrine "go cold for repairs" now rests only on its
+original argument -- a failed session argues with the correction -- and not on
+a cost claim.
+
+### The same bug had already decided `challenge_warm`
+
+`challenge_warm` was measured at **+50% input, +16% wall** and defaulted to cold
+on that number. Its warm arm is the resumed one, so it was measured with exactly
+the bug above. Re-measured, n=3 interleaved, same brief and repo:
+
+    cold  97,049 on the wire   20.3s
+    warm  98,954 on the wire   19.9s     +2.0% input, wall-clock a wash
+
+The default is still cold, on a different and honest argument: cost no longer
+decides it either way, and nothing has measured that the continuity warm buys
+actually helps. *"Measured harmless"* is not a reason to turn something on.
+
+*(The first correction came from the operator questioning the write-up: a
+two-turn conversation cannot BE 50k tokens of history. It was not history. It
+was not tokens either.)*
+
+**The lesson worth keeping: a number produced by the thing under test is not a
+measurement.** Every conclusion here that survived came from outside the CLI --
+the wire, or its source.
 
 ## Qwen fabricates. Its self-report is never evidence.
 
