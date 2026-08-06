@@ -978,12 +978,30 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
 
     unrestorable = ctx.get("unrestorable") or []
     if unrestorable:
+        # NO CAUSE NAMED, because this list does not carry one.
+        # `scope.note_unrestorable` is fed by everything `restore_paths` could
+        # not put back, and the snapshot cap is only one of those ways -- a
+        # path replaced by a DIRECTORY and one chmod'ed READ-ONLY arrive here
+        # by the same door, both measured through the real touch_scope guard.
+        # The line used to assert "the pre-run content was too large to
+        # snapshot" for all of them, which is worse than saying nothing: it is
+        # specific and checkable, so a caller acts on it, looks at a 40-byte
+        # file and concludes the RECEIPT is broken rather than that their file
+        # is read-only.
+        #
+        # The warning about restoring from a commit STAYS, because it is the
+        # one thing the old sentence had right and it is the mistake a reader
+        # of "not reverted" is most likely to make: `git checkout <sha> -- p`
+        # puts the COMMITTED content over pre-run edits (qd/gittree.py,
+        # SNAPSHOT_FILE_CAP), which is why these are left alone in the first
+        # place.
         body.append(
             "SCOPE: out-of-scope change in "
             + ", ".join(unrestorable[:10])
             + (" ..." if len(unrestorable) > 10 else "")
-            + " NOT auto-reverted -- the pre-run content was too large to "
-            "snapshot, and restoring from a commit would destroy pre-run "
+            + " NOT auto-reverted -- the pre-run content could not be restored "
+            "(over the snapshot cap, unreadable, or no longer a writable file). "
+            "Do not blanket-restore from a commit: that would overwrite pre-run "
             "edits. Review and revert manually."
         )
 

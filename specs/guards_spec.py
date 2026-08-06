@@ -71,8 +71,12 @@ class FakeScope:
         self.scope_unattributed.extend(paths)
 
     def restore(self, paths, base):
-        self.restored.extend(paths)
-        return []
+        # Returns what could NOT be put back, exactly as `RunScope.restore`
+        # does. `unrestored` defaults to () so every existing test keeps the
+        # all-succeeded shape it was written against.
+        failed = [p for p in paths if p in getattr(self, "unrestored", ())]
+        self.restored.extend([p for p in paths if p not in failed])
+        return failed
 
 
 def plan(**over):
@@ -567,6 +571,138 @@ class AFilenameIsNotAllowedToWriteLINES(unittest.TestCase):
             v.trail,
             "attempt 1: TOUCH SCOPE VIOLATION -- edited other.py outside "
             "scope (auto-reverted)")
+
+
+class AScopeRevertThatFailedMustNotReadAsASuccessfulOne(unittest.TestCase):
+    """The THIRD guard with the discarded-return bug, and the last of them.
+
+    e35ecbb fixed `revert_specs` throwing away `restore_paths`' `unrestored`
+    list; 04ba452 fixed the brief guard throwing away the whole pair. This one
+    calls `scope.restore`, which RETURNS the failures and records them, and
+    ignores the return value -- then says `(auto-reverted)` unconditionally.
+
+    IT HAS A SECOND LAYER, AND THE SECOND LAYER IS WRONG. Unlike the brief
+    guard, `scope.restore` files the failures on `ctx["unrestorable"]`, which
+    `render` reports. But that line reads:
+
+        SCOPE: out-of-scope change in X NOT auto-reverted -- the pre-run
+        content was too large to snapshot, and restoring from a commit would
+        destroy pre-run edits. Review and revert manually.
+
+    It states ONE cause for a list fed by several. `scope.note_unrestorable`
+    takes everything `restore_paths` could not put back, and only one of those
+    ways is the snapshot cap. So the caller is not merely under-informed; they
+    are told a specific, checkable, false reason -- and the natural response to
+    "too large to snapshot" (look at the file size, shrug) is the wrong one for
+    a file that is read-only or has been replaced by a directory.
+
+    THE FOUR ROUTES, driven through the REAL `touch_scope.check` on a REAL tree
+    (three apply, one does not):
+
+      1. OVER THE SNAPSHOT CAP -- `t0` holds ("toobig", None). APPLIES.
+         Measured: unrestorable=['offlimits.py'], 'SABOTAGED' on disk, trail
+         said auto-reverted. The ONLY route for which "too large to snapshot"
+         is a true sentence.
+
+      2. WORKER CREATES A FILE AND `git add`s IT -- the spec guard's first
+         route. DOES NOT APPLY HERE, and the reason is this guard's own first
+         rule: `if path not in scope.pre_tracked: continue` -- new files are
+         always allowed. `spec_files()` is a live `git ls-files`, so a worker
+         CAN add a path into the protected set there; `pre_tracked` is
+         `git ls-files` frozen at T0, so it cannot here. Measured:
+         touch_scope.check returned None, no violation at all.
+
+         The near variant -- tracked at T0 but absent at `base`, i.e. a file
+         the CALLER staged and never committed -- also does not reach the
+         message, because staged-new is DIRTY at T0, so `snapshot_contents`
+         saved its bytes and the restore succeeds from T0 rather than from the
+         commit. Measured: T0 status ('A', ...) -> snapshot ('file', <path>).
+         It only fails if it is ALSO over the cap, which is route 1.
+
+      3. REPLACED BY A DIRECTORY of the same name. APPLIES. `open(full, "wb")`
+         raises IsADirectoryError. Measured: unrestorable=['offlimits.py'],
+         path still a directory, trail said auto-reverted, second layer said
+         "too large to snapshot" -- FALSE.
+
+      4. SABOTAGED THEN chmod 444. APPLIES. Same raise, PermissionError.
+         Measured: unrestorable=['offlimits.py'], 'SABOTAGED' on disk, trail
+         said auto-reverted, second layer said "too large to snapshot" --
+         FALSE.
+
+    So of the three routes that reach a caller, TWO are told a wrong reason and
+    all three are told a revert happened. Both layers are fixed: this guard
+    says what it observed, and `render` stops naming a cause it cannot know.
+    """
+
+    def arrange(self, unrestored, changed=("offlimits.py",)):
+        sc = FakeScope(pre_tracked=["offlimits.py", "other.py"])
+        sc.unrestored = list(unrestored)
+        self.scope = sc
+        return guards.first(sc, plan(touch_scope=["allowed.py"]),
+                            Attempt(n=1, of=3, changed=list(changed),
+                                    writes=list(changed)))
+
+    def test_a_revert_that_failed_is_not_reported_as_auto_reverted(self):
+        # The decisive assertion, the same one both siblings make: the words
+        # must not appear about a file still sitting there holding the worker's
+        # edit -- outside the blast radius the caller declared.
+        v = self.arrange(["offlimits.py"])
+        self.assertIn("TOUCH SCOPE VIOLATION", v.trail)
+        self.assertNotIn("auto-reverted", v.trail,
+                         f"the trail claims a revert that did not happen: "
+                         f"{v.trail!r}")
+
+    def test_the_trail_says_the_file_is_still_on_disk(self):
+        # Naming it is not enough -- the pre-fix line named it too. "reverted"
+        # and "still outside the declared scope" are opposite instructions.
+        v = self.arrange(["offlimits.py"])
+        self.assertIn("NOT REVERTED", v.trail.upper())
+        self.assertIn("still on disk", v.trail)
+        self.assertIn("offlimits.py", v.trail)
+
+    def test_a_partial_revert_names_both_halves_separately(self):
+        # On a partial revert either verdict word is false about half the set,
+        # and the reader's next action is opposite in the two cases -- so the
+        # halves are named apart rather than summarised under one word. Same
+        # shape the spec guard settled on.
+        v = self.arrange(["offlimits.py"], changed=["offlimits.py", "other.py"])
+        self.assertIn("other.py", v.trail)
+        self.assertIn("NOT REVERTED", v.trail.upper())
+        self.assertIn("offlimits.py", v.trail.split("NOT REVERTED")[1])
+        self.assertIn("other.py", v.trail.split("NOT REVERTED")[0])
+
+    def test_the_correction_does_not_tell_the_worker_it_was_reverted(self):
+        # `prompt` goes straight to the model (qd/engine.py, `prompt =
+        # _v.prompt`). Telling a worker its edit was undone when it was not
+        # invites the next attempt to build on a file it thinks is pristine.
+        v = self.arrange(["offlimits.py"])
+        self.assertNotIn("have been reverted", v.prompt)
+        self.assertIn("offlimits.py", v.prompt)
+        # The rule must not soften -- only the claim about state.
+        self.assertIn("off-limits", v.prompt)
+        self.assertIn("You may create new files freely", v.prompt)
+
+    def test_the_revert_is_still_asked_for_the_real_whole_path(self):
+        # MESSAGE ONLY, the constraint 6eae53a put on the truncation and both
+        # siblings kept: a guard that stopped ACTING on the whole path in order
+        # to fix its wording would turn a false sentence into a real unreverted
+        # file.
+        self.arrange([])
+        self.assertEqual(self.scope.restored, ["offlimits.py"])
+
+    def test_a_successful_revert_still_says_auto_reverted(self):
+        # The control that keeps this from being "hedge every message". The
+        # ordinary path is overwhelmingly the common one and a receipt that
+        # always sounds unsure is one nobody can read a fact off. Pinned as the
+        # WHOLE line, so a fix that appended a caveat everywhere is red here --
+        # and `test_an_ordinary_filename_is_left_byte_identical` above pins the
+        # same sentence from the other direction.
+        v = self.arrange([])
+        self.assertEqual(
+            v.trail, "attempt 1: TOUCH SCOPE VIOLATION -- edited offlimits.py "
+                     "outside scope (auto-reverted)")
+        self.assertNotIn("NOT REVERTED", v.trail.upper())
+        self.assertIn("have been reverted", v.prompt)
 
 
 class ABriefRevertThatFailedMustNotReadAsASuccessfulOne(unittest.TestCase):

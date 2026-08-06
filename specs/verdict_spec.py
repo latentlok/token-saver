@@ -1211,6 +1211,36 @@ class TreeFactsRendering(Fixture):
         self.assertIn("huge.bin", out)
         self.assertIn("NOT auto-reverted", out)
 
+    def test_the_unrestorable_line_does_not_name_a_cause_it_cannot_know(self):
+        # THE SECOND LAYER of the touch_scope guard's discarded-return bug.
+        # `scope.note_unrestorable` is fed by everything `restore_paths` could
+        # not put back, and the snapshot cap is only ONE of those ways. Driven
+        # through the real guard on a real tree, two of the three reachable
+        # routes are not the cap at all: a path replaced by a DIRECTORY
+        # (IsADirectoryError) and one chmod'ed 444 (PermissionError). Both were
+        # reported as "the pre-run content was too large to snapshot".
+        #
+        # Worse than vague. "Too large to snapshot" is specific and checkable,
+        # so a caller acts on it -- looks at the file size, finds a 40-byte
+        # file, and concludes the receipt is broken rather than that their
+        # source file is read-only or is now a directory.
+        out = self.v2(unrestorable=["small.py"])
+        self.assertNotIn("too large to snapshot", out)
+        # What must survive: the FACT (not reverted), the NAME, and the
+        # instruction. Only the invented cause goes.
+        self.assertIn("NOT auto-reverted", out)
+        self.assertIn("small.py", out)
+        self.assertIn("revert manually", out)
+
+    def test_the_unrestorable_line_still_warns_about_restoring_from_a_commit(self):
+        # The one thing the old sentence got right and must not be lost with
+        # it: `git checkout <sha> -- p` restores the COMMITTED content over
+        # pre-run edits, which is why these are left alone rather than
+        # force-reverted (qd/gittree.py SNAPSHOT_FILE_CAP). A caller who reads
+        # "not reverted" and reaches for checkout destroys their own work.
+        out = self.v2(unrestorable=["small.py"])
+        self.assertIn("pre-run edits", out)
+
     def test_scope_violation_paragraph(self):
         out = verdict.render(
             "scope_violation", "s-1",
