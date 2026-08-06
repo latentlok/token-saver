@@ -155,7 +155,7 @@ TOOL = json.loads(r'''
       },
       "result_schema": {
         "type": "object",
-        "description": "The SHAPE you need back. The worker is told to end its reply with a fenced ```json block conforming to this (subset: type, required, properties, items, enum); the server validates it, feeds every violation back by path like a failed gate, and ends the run 'result_invalid' if the attempts run out. The receipt carries the block verbatim -- you parse a value instead of prose."
+        "description": "The SHAPE you need back. The worker is told to end its reply with a fenced ```json block conforming to this (subset: type, required, properties, items, enum); the server validates it, feeds every violation back by path like a failed gate, and ends the run 'result_invalid' if the attempts run out. The receipt carries the block verbatim -- you parse a value instead of prose. A keyword outside that subset (minimum, pattern, oneOf, a boolean subschema, tuple-form items, ...) is refused before anything is built, by name and path -- this server would never check it, so a call cannot rely on it silently passing."
       },
       "brief_file": {
         "type": "string",
@@ -234,7 +234,7 @@ QUERY_TOOL = json.loads(r'''
       },
       "result_schema": {
         "type": "object",
-        "description": "The SHAPE you need back: the worker is asked to end its answer with a fenced ```json block conforming to this (subset: type, required, properties, items, enum). A query has no retry loop, so the check is REPORTED -- one `RESULT:` line above the answer says valid, or names the first violation."
+        "description": "The SHAPE you need back: the worker is asked to end its answer with a fenced ```json block conforming to this (subset: type, required, properties, items, enum). A query has no retry loop, so the check is REPORTED -- one `RESULT:` line above the answer says valid, or names the first violation. A keyword outside that subset is refused (STATUS: refused) before the question is put -- this side has no gate to bounce a false pass off, so it stops the call rather than reporting one."
       }
     },
     "required": [

@@ -135,26 +135,56 @@ _METADATA = frozenset({"title", "description", "default", "examples",
 _SAFE = _ENFORCED | _METADATA
 
 
-def _offenders(schema, found):
-    """Add every keyword outside `_SAFE` found in `schema`, recursively.
+def _offenders(schema, found, path="$"):
+    """Add every keyword outside `_SAFE` found in `schema` to `found`
+    (keyword -> the PATH it was first found at), recursing exactly where
+    validate() (:107-119) itself recurses -- `properties` and `items` --
+    plus two JSON-Schema forms that are just as constraining as `minimum`
+    but that a bare `isinstance(schema, dict)` guard waves through as
+    silently as it waves through genuine nonsense:
 
-    Walks only `properties` and `items` -- the two keywords validate() (:107-
-    119) itself descends through. Everything else a schema can hold (the
-    field names in `required`, the literal payload values in `enum`/
-    `default`/`examples`) is DATA, not a place a keyword can hide: recursing
-    into it would refuse an ordinary result field named `pattern` or `const`
-    (pinned by jsonschema_spec.py::test_a_property_NAMED_like_a_keyword_is_not_one).
+    - a boolean subschema (`true`/`false`). This is real JSON Schema, not a
+      typo -- `false` means "nothing satisfies this", the opposite of
+      unconstrained -- and neither direction is a form validate() implements
+      (it only walks dict schemas), so `{"properties": {"a": false}}` was
+      silently treated as "no constraint on a" instead of "a can never be
+      valid". A STRING or other genuinely unreadable value here still returns
+      with nothing added (pinned by test_an_unreadable_SUBSCHEMA_is_not_a_
+      refusal_either) -- the distinction the caller cares about is real
+      schema vs. garbage, not dict vs. non-dict.
+    - a list-valued `items` (draft-07 tuple validation). validate()'s items
+      branch is gated on `isinstance(schema.get("items"), dict)` (:117), so a
+      list there skips that whole block -- not one element is ever checked,
+      regardless of what the elements themselves say. Flagged as its own
+      entry (not folded into a per-element "minimum"-style finding) because
+      even an all-in-subset tuple is still unenforced in this form; each
+      element is then walked too, so a keyword buried at tuple position N is
+      named by that name, not just "items".
+
+    The path is threaded (not just a bare keyword set) because a refusal
+    naming ONLY the keyword forces the caller back to eyeballing its own
+    schema for every occurrence -- the tiers.py precedent for an actionable
+    refusal is the question AND where to look, not just the question.
     """
+    if isinstance(schema, bool):
+        found.setdefault(json.dumps(schema), path)
+        return
     if not isinstance(schema, dict):
         return
-    found.update(key for key in schema if key not in _SAFE)
+    for key in schema:
+        if key not in _SAFE:
+            found.setdefault(key, f"{path}.{key}")
     props = schema.get("properties")
     if isinstance(props, dict):
-        for sub in props.values():
-            _offenders(sub, found)
+        for key, sub in props.items():
+            _offenders(sub, found, f"{path}.{key}")
     items = schema.get("items")
     if isinstance(items, dict):
-        _offenders(items, found)
+        _offenders(items, found, f"{path}[]")
+    elif isinstance(items, list):
+        found.setdefault("items (tuple validation)", f"{path}.items")
+        for i, sub in enumerate(items):
+            _offenders(sub, found, f"{path}[{i}]")
 
 
 def schema_refusal(schema):
@@ -171,16 +201,22 @@ def schema_refusal(schema):
     None means "nothing here this server cannot check", not "this schema is
     good" -- a schema this module cannot even READ (not a dict) constrains
     nothing and stays non-fatal, same as validate() itself: only a DICT
-    carrying a keyword outside the enforced five can stop a call, because
-    that is the one case where a check was promised and would never run.
+    carrying a keyword outside the enforced five (or, nested, a boolean
+    subschema or a tuple-form `items` -- see _offenders) can stop a call,
+    because that is the one case where a check was promised and would never
+    run.
     """
     if not isinstance(schema, dict):
         return None
-    found = set()
+    found = {}
     _offenders(schema, found)
     if not found:
         return None
-    offending = ", ".join(sorted(found))
+    # Sorted BY KEYWORD, not by path: two identical calls must produce
+    # byte-identical refusals regardless of PYTHONHASHSEED (pinned by
+    # test_the_keywords_are_named_in_a_stable_order), and sorting by the
+    # (longer, more variable) path string would not preserve that ordering.
+    offending = ", ".join(f"{kw} at {found[kw]}" for kw in sorted(found))
     supported = ", ".join(sorted(_ENFORCED))
     return (
         f"result_schema uses keyword(s) this server does not enforce: "

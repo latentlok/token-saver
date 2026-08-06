@@ -287,6 +287,18 @@ class ManagedBlock(Fixture):
                            "brief_file", "touch_scope", "WATCH"):
             self.assertIn(capability, surface)
 
+    def test_result_schema_description_says_an_out_of_subset_keyword_refuses(self):
+        # House pattern: a refusal is documented in the FIELD's own
+        # description, not left for the caller to discover by triggering it
+        # -- see trust :102, verify_timeout_sec :143, preflight_expect :147.
+        # result_schema now refuses a keyword qd.jsonschema.schema_refusal()
+        # cannot enforce (U5.1 accept-time check), on BOTH tools -- qwen_query
+        # never enters engine.py, so its own field needs its own sentence,
+        # not a cross-reference the caller cannot see from the schema alone.
+        for tool in (schemas.TOOL, schemas.QUERY_TOOL):
+            desc = tool["inputSchema"]["properties"]["result_schema"]["description"]
+            self.assertIn("refus", desc.lower())
+
     def test_the_block_carries_the_trigger_and_the_pre_skill_rules(self):
         # What the block is FOR, now that it is not a catalogue: fire before
         # Claude has decided to look at the tools, name the skill that has

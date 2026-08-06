@@ -283,6 +283,55 @@ class TheAcceptCheck(unittest.TestCase):
         self.assertIsNotNone(text)
         self.assertIn("pattern", text)
 
+    def test_a_tuple_form_items_is_refused_and_its_elements_are_descended(self):
+        # draft-07 tuple validation. validate()'s items branch is gated on
+        # isinstance(schema.get("items"), dict) (:117), so a LIST there skips
+        # that whole block -- not one element is ever checked, no matter what
+        # the elements say. Reviewer-verified repro before this fix:
+        # schema_refusal(this) was None and validate([1, 2, 3], this) was []
+        # -- the exact defect this module exists to close, narrower trigger.
+        text = jsonschema.schema_refusal(
+            {"type": "array",
+             "items": [{"type": "string"}, {"type": "integer", "minimum": 5}]})
+        self.assertIsNotNone(text)
+        self.assertIn("items", text)
+        # The keyword buried at tuple position 1 is named by ITS OWN name,
+        # not folded away into a single generic "items" finding.
+        self.assertIn("minimum", text)
+
+    def test_an_all_in_subset_tuple_is_still_refused(self):
+        # The tuple FORM is unenforced regardless of what is inside it --
+        # validate() never even reaches element 0 to check it -- so this
+        # must refuse even though every element, read alone, is in-subset.
+        text = jsonschema.schema_refusal(
+            {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]})
+        self.assertIsNotNone(text)
+        self.assertIn("items", text)
+
+    def test_a_boolean_subschema_is_refused_not_silently_permissive(self):
+        # `true`/`false` are real JSON Schema, not typos -- `false` means
+        # "nothing satisfies this", the opposite of unconstrained -- but
+        # validate() only walks DICT schemas, so both were silently treated
+        # as "no constraint here" like genuine nonsense
+        # (test_an_unreadable_SUBSCHEMA_is_not_a_refusal_either, below) even
+        # though a boolean is a meaningful answer and "nonsense" is not.
+        for literal in (False, True):
+            with self.subTest(literal=literal):
+                text = jsonschema.schema_refusal(
+                    {"type": "object", "properties": {"a": literal}})
+                self.assertIsNotNone(text, repr(literal))
+                self.assertIn(json.dumps(literal), text)
+
+    def test_the_refusal_carries_the_path_to_each_offender(self):
+        # Minor but cheap once the recursion already carries a path: a
+        # refusal naming only the keyword sends the caller back to eyeball
+        # its own schema for every occurrence, the same gap tiers.py's
+        # refusal closes by naming the question AND what to paste.
+        text = jsonschema.schema_refusal(
+            {"type": "object",
+             "properties": {"n": {"type": "integer", "minimum": 5}}})
+        self.assertIn("$.n.minimum", text)
+
     def test_a_property_NAMED_like_a_keyword_is_not_one(self):
         # `properties` maps FIELD NAMES to subschemas. A result object with a
         # field called `pattern` or `const` is ordinary, and refusing it would
