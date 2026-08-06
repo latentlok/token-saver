@@ -25,7 +25,7 @@ import re
 # `advisory_gates[].cmd`. By the standard the paragraph above sets, that is a
 # larger grant than the three keys it excludes, and a reader deserves to see
 # the two statements next to each other rather than infer the gap. Documented
-# for callers in docs/archive/a92e876/USAGE.md ("`verify` IS a front-matter key"). Whether the
+# for callers in AGENT.md ("`verify` IS a front-matter key"). Whether the
 # allowlist should keep admitting it is a design decision for the humans who
 # own this contract, not something to quietly change under a bugfix.
 FRONT_KEYS = ("verify", "touch_scope", "shell_allow", "approval_mode",
