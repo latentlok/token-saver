@@ -1,8 +1,8 @@
 # Handover — after the restructure round
 
-**State: clean. Branch `v0.6`, 57 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,120 tests** (was 1,013).
-**Steps 1–6 are done. 7 and 8 are reassessed — read §"Steps 7 and 8" before building them.**
+**State: clean. Branch `v0.6`, 65 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
+`bash ci/run-specs.sh` → exit 0, **1,146 tests** (was 1,013).
+**Steps 1–7 done; 8's user-visible half done. The one real gap is `core/pipeline.py` — see below.**
 Verified live against `snowy` several times, including two mutation-checked live runs.
 
 The restructure has delivered its headline: **adding or removing a feature is a
@@ -90,23 +90,29 @@ tangled, the wiring is.* **Pin things where they run, not where they are defined
     qd/features/gates/      2 gates (challenge, red)
 
 **Steps done:** 2 (findings), 3 (receipt-as-list, core), 4 (gates), 5 (container
-+ T0), 6 (settings resolver).
++ T0 + attribution), 6 (resolver **and** the frozen `RunPlan`), 7 (Composite).
+8's cheap half (query telemetry) done; the full fold left, deliberately.
 
 **Parked items built:** G1 (`SUPPRESSED:`), G3 (`stuck_no_progress`), A1 (the red
 gate), A6 (unmarked worker tests), step 8's cheap half (query call telemetry).
 
-**The scaffolding shrank as promised.** `DetectorInputs` was introduced in step 2
-as an explicitly temporary carrier, with the risk named out loud — a general bag
-handed to every feature is `ctx` with a nicer name. It began at **seven fields
-and is now four**, three of them marked for the work that would take them.
+**The scaffolding is GONE, not smaller.** `DetectorInputs` was introduced in
+step 2 as an explicitly temporary carrier, with its risk named out loud — a
+general bag handed to every feature is `ctx` with a nicer name. 7 fields → 4
+(step 5 took `work_cwd`/`pre_status`/`pre_sha`) → **deleted** (step 6's
+`RunPlan` took `task`/`verify`/`touch_scope`; `created` went to `RunScope`).
+Detectors are now `detect(facts, scope, plan)`. There is no bag to grow back.
 
 ---
 
 ## Honest measurements
 
-**`_delegate` GREW: 1,106 → 1,135 lines.** The logic left; the named inputs that
-replaced it cost more lines than the terse calls did. Steps 2–6 bought
-*enumerability*, not size. Do not report this as a size win.
+**`_delegate`: 1,106 → 1,135 → 1,088 lines.** It GREW through steps 2–6 and only
+began shrinking when `core/status.py` landed. The diagnosis is the important
+part: **every step until then extracted a NOUN** — facts, findings, scope, plan,
+blocks, gates, runnable — **and none extracted the VERB.** The nouns left; the
+sequence that orders them stayed. That is the whole reason for the growth, and
+it is what `core/pipeline.py` is for.
 
 **Concurrency on snowy: measurement RETRACTED.** An earlier reading (throughput
 flat, latency tripling from 1 → 3 concurrent) was taken while another process
@@ -120,42 +126,55 @@ live tests at ≤3. Raw HTTP probes need `VLLM_TOKEN` in env; delegations do not
 
 ---
 
-## Steps 7 and 8
+## The patterns — 4 of 5 built, and the audit that found the gap
 
-Reassessed in **DESIGN §8.1** after 1–6 shipped. Argued there in full:
+§7 adopts five patterns. Built: **Registry+Pipeline** (detectors, gates),
+**Strategy** (gates), **Builder** (`RunPlan`), **Composite** (`runnable.py`).
+Not built: **Decorator** for the prompt — `task_suffix` + `HANDOFF` + `FINDINGS`
++ `CHALLENGE` + the chain preamble are still string concatenation across three
+files. That is the last unbuilt pattern and a genuine remaining seam.
 
-- **Step 7 (Composite): recommended NOT as specified.** Its stated benefit —
-  making "nesting is one level" a property rather than a refusal — contradicts a
-  deliberate decision documented in `_batch_item` itself. Composite treats leaf
-  and composite uniformly; here they are non-uniform *on purpose* (a batch is
-  unordered and parallel, a chain is ordered and shares a worktree). It would
-  replace a four-line type check. **What actually needs something is G2**, which
-  needs a chain to be an addressable value — one small record, built as part of
-  G2, not a hierarchy built in advance of it.
-- **Step 8: cheap half DONE.** Query now logs its call. The remaining fold buys
-  structural uniformity a caller cannot see, on the best-behaved caller in the
-  system. Leave it until something needs it.
+**I was wrong about Composite and the correction is on record.** DESIGN §8.1
+argued against it, on the grounds that a batch and a chain are deliberately not
+uniform. Half of that was wrong: Composite does not require nesting to be
+ALLOWED, only that both kinds answer the same question — so the nesting refusal
+moved to CONSTRUCTION (`runnable.NestingRefused`), which is what the design asked
+for. The surviving half is why there is no shared `.execute()`: execution stays
+with `run_chain`, which owns the worktree sharing and the between-link commits.
+
+**Step 8's fold is still not worth it.** The user-visible payoff was query
+telemetry, and that is done. The rest buys uniformity nobody can see, on the one
+caller that has never misbehaved.
 
 ---
 
 ## What is left, best first
 
-1. **Finish step 3's tail — the SLOT mechanism.** *Adding a detector is one file
+1. **`core/pipeline.py` — the rest of the phase sequence. THE structural gap.**
+   `core/status.py` is the first piece and the proof the seam is clean (a pure
+   function, 47 lines out of `_delegate`, golden byte-identical). The same
+   treatment is owed to the preflight, the attempt loop, and the post-run
+   region. This is what makes `_delegate` a coordinator instead of the run.
+   *Also nominally missing from §5: `surface/schema.py` and `surface/runlog.py`
+   — but those are MOVES of `qd/schemas.py` and `qd/runlog.py`. Cosmetic; left
+   undone on purpose rather than churned for a tick in a table.*
+2. **Finish step 3's tail — the SLOT mechanism.** *Adding a detector is one file
    plus one line* is **still false**: the renderer names each detector's
    placement, so a new detector needs a line there too, and one with the
    registry entry but not the render line computes a finding nobody sees. A6's
    spec pins the gap; closing it needs an explicit `SLOT` per detector so
    placement is derived. **Placement is the size cap's tie-break, so this is a
    behaviour change — golden-diff it.**
-2. **A4 / A2 (clause coverage + contract pinning).** The red gate's fourth check
+3. **A4 / A2 (clause coverage + contract pinning).** The red gate's fourth check
    is unbuilt because it needs the contract format. With it, "failed for a
    legible reason" becomes exact rather than an exception-type heuristic.
-3. **G2 (whole-chain contradiction).** Needs the small chain record above.
-4. **G4 (brief-vs-diff advisory).** Unblocked. Must stay advisory — a witness
+4. **G2 (whole-chain contradiction).** *Unblocked* — `runnable.of()` now
+   returns a chain whose links a gate can read before any of them runs.
+5. **G4 (brief-vs-diff advisory).** Unblocked. Must stay advisory — a witness
    that can refuse breaks §I.
-5. **The free ones:** the two playbooks, a doctor check, the skill pass, server
+6. **The free ones:** the two playbooks, a doctor check, the skill pass, server
    lifecycle, G5 (cold-vs-warm retry, answerable from existing telemetry).
-6. **Release:** 0.6.0 is bumped and the changelog written. PR → CI →
+7. **Release:** 0.6.0 is bumped and the changelog written. PR → CI →
    squash-merge → tag is the user's, per [docs/RELEASING.md](docs/RELEASING.md).
 
 ---
