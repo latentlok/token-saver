@@ -13,6 +13,10 @@ rules FILENAME is profile-driven (C1 rules_file), defaulting to QWEN.md.
 Load-bearing:
   1. detect_test_cmd's table must match the crane exactly -- a wrong detected
      command becomes a wrong standing rule in every future session.
+  1b. ...and the command it returns must actually RUN, and must actually
+     COLLECT (class DetectedCommandActuallyRuns). Asserting the TEXT of a
+     command-builder and never executing the command is how the last-resort
+     branch shipped a gate command that crashes on this repo's own layout.
   2. render_worker_rules must never emit a placeholder ("TEMPLATE" banner or
      the un-substituted testing line) -- measured rule: never write a
      placeholder.
@@ -60,6 +64,22 @@ def put(d, rel, content=""):
     with open(p, "w") as f:
         f.write(content)
     return p
+
+
+def spec_src(tag, passing=True):
+    """A test file that PRINTS when it runs.
+
+    The sentinel is what makes a green exit code mean something: a discovery
+    that matches NO file also exits 0 ("Ran 0 tests ... OK"), so returncode
+    alone cannot tell a suite that passed from a suite that was never
+    collected -- the vacuous-pass class this repo exists to catch.
+    """
+    body = "self.assertTrue(True)" if passing else "self.fail('deliberate')"
+    return ("import unittest\n"
+            "class Case(unittest.TestCase):\n"
+            "    def test_case(self):\n"
+            f"        print('RAN:{tag}')\n"
+            f"        {body}\n")
 
 
 class DetectTable(unittest.TestCase):
@@ -267,6 +287,146 @@ class TestLocation(unittest.TestCase):
             f.write("{not json")
         os.makedirs(os.path.join(self.d, "tests"))
         self.assertIn("tests", bootstrap.detect_test_cmd(self.d))
+
+
+class DetectedCommandActuallyRuns(unittest.TestCase):
+    """The command detect_test_cmd RETURNS must RUN, and must COLLECT.
+
+    Every other test of the detector in this file asserts the TEXT of the
+    returned command and not one of them executes it. That is precisely how the
+    last-resort branch (qd/bootstrap.py:99-101) shipped a command that CRASHES
+    on this repo's own layout. Reproduced 2026-08-06, python3.14, in a fixture
+    tree shaped like this repo (specs/*_spec.py, no __init__.py):
+
+        $ python3 -m unittest discover -s specs -t . -v
+        ImportError: Start directory is not importable: '<tree>/specs'
+
+    `-t .` makes unittest require the START DIRECTORY to be an importable
+    package. specs/ is a plain folder, so discovery dies before the pattern
+    mismatch (*_spec.py against unittest's default test*.py) even matters --
+    two independent reasons the same command can never grade this project, and
+    the returned string satisfied every assertion we had.
+
+    It is not an idle string either: it is embedded in the trust="self" gate
+    script (qd/engine.py:244-245) and reused for the C8 *_qwen.* prefilter
+    (qd/engine.py:1819, line re-derived 2026-08-06). A gate command that
+    crashes is a gate that can never go green.
+
+    WHY THIS IS PINNED AS A DETECTOR FIX, not as a per-project declaration.
+    The alternative on offer was to declare a tier map in this repo's own
+    .qwen-delegate.json ("tests": {"unit": ...}). It was rejected as the gate:
+    qd/core/tiers.gate_for() has ZERO callers outside its own spec (verified
+    2026-08-06), so declaring a map changes nothing that runs today -- and even
+    once wired, it would fix exactly one repo while detect_test_cmd kept
+    handing the same crashing command to every other stdlib-layout project.
+    tiers.py agrees: its docstring (:16-18) commits to detect_test_cmd
+    remaining the standing fallback, and gate_for returns (None, None, None)
+    for ordinary work. Declaring the map is still worth doing; it is not what
+    closes this hole.
+
+    Each test below builds a throwaway tree, takes whatever the detector
+    returns FOR THAT TREE, and executes it with the tree as cwd -- exactly what
+    the self-gate script does.
+    """
+
+    def detected_run(self, d):
+        cmd = bootstrap.detect_test_cmd(d)
+        self.assertTrue(cmd, f"no command detected for {os.listdir(d)}")
+        p = subprocess.run(cmd, shell=True, cwd=d, capture_output=True,
+                           text=True, timeout=60, stdin=subprocess.DEVNULL)
+        return cmd, p, ((p.stdout or "") + (p.stderr or "")).strip()
+
+    def assertRan(self, cmd, p, out, *tags):
+        self.assertNotIn(
+            "Start directory is not importable", out,
+            f"{cmd!r} crashed on discovery -- the gate built from it can never "
+            f"go green:\n{out[-600:]}")
+        self.assertEqual(p.returncode, 0,
+                         f"{cmd!r} exited {p.returncode}:\n{out[-600:]}")
+        for tag in tags:
+            self.assertIn(f"RAN:{tag}", out,
+                          f"{cmd!r} exited 0 without collecting {tag} -- a "
+                          f"suite that matches nothing passes vacuously:"
+                          f"\n{out[-600:]}")
+
+    def test_the_command_for_a_spec_folder_runs_instead_of_crashing(self):
+        # This repo's own shape: *_spec.py, no __init__.py, no packaging
+        # metadata at all -- the case the last-resort branch exists for.
+        d = tempfile.mkdtemp()
+        put(d, "specs/alpha_spec.py", spec_src("alpha"))
+        self.assertRan(*self.detected_run(d), "alpha")
+
+    def test_the_command_goes_RED_when_a_test_fails(self):
+        # The other half of "it runs": a command that collects nothing also
+        # exits 0. Only a suite that can FAIL is a gate. Without this, an
+        # implementation that "fixed" the crash by discovering nothing would
+        # look identical to a working one.
+        d = tempfile.mkdtemp()
+        put(d, "specs/alpha_spec.py", spec_src("alpha", passing=False))
+        cmd, p, out = self.detected_run(d)
+        self.assertIn("RAN:alpha", out, f"{cmd!r} never collected the failing "
+                                        f"test:\n{out[-600:]}")
+        self.assertNotEqual(p.returncode, 0,
+                            f"{cmd!r} reported success over a failing test:"
+                            f"\n{out[-600:]}")
+
+    def test_it_collects_every_filename_convention_the_pytest_branch_does(self):
+        # Parity with the branch directly above it in the source: the pytest
+        # detectors force `python_files=test_*.py *_test.py *_spec.py`
+        # (qd/bootstrap.py:85-95) precisely "so a gate can't be silently
+        # skipped". The unittest fallback never got that parity and keeps
+        # unittest's default test*.py -- so in a mixed folder it grades a
+        # SUBSET and reports OK, which is the same silent skip the comment
+        # three lines earlier says must not happen.
+        d = tempfile.mkdtemp()
+        put(d, "specs/alpha_spec.py", spec_src("alpha"))
+        put(d, "specs/beta_test.py", spec_src("beta"))
+        put(d, "specs/test_gamma.py", spec_src("gamma"))
+        self.assertRan(*self.detected_run(d), "alpha", "beta", "gamma")
+
+    def test_the_plain_tests_folder_case_still_runs(self):
+        # Regression guard on the shape that works today: whatever fixes the
+        # spec folder must not cost the conventional tests/test_*.py layout,
+        # which is the majority of projects this branch is reached for.
+        d = tempfile.mkdtemp()
+        put(d, "tests/test_thing.py", spec_src("thing"))
+        self.assertRan(*self.detected_run(d), "thing")
+
+    def test_a_folder_that_is_a_package_still_runs(self):
+        # The one shape where `-t .` was survivable: an __init__.py makes the
+        # start directory importable. It must keep working, so the fix cannot
+        # simply be "assume it is never a package".
+        d = tempfile.mkdtemp()
+        put(d, "tests/__init__.py", "")
+        put(d, "tests/test_thing.py", spec_src("thing"))
+        self.assertRan(*self.detected_run(d), "thing")
+
+    def test_a_configured_test_dir_produces_a_runnable_command_too(self):
+        # test_a_named_test_dir_is_used_for_discovery (above) asserts `-s t `
+        # appears in the string. Same gap, same fix: the configured branch has
+        # to run as well, or a project that took our advice and declared
+        # test_dir gets a gate that crashes.
+        d = tempfile.mkdtemp()
+        put(d, ".qwen-delegate.json", json.dumps({"test_dir": "t"}))
+        put(d, "t/alpha_spec.py", spec_src("alpha"))
+        self.assertRan(*self.detected_run(d), "alpha")
+
+    def test_the_fixtures_above_are_shaped_like_this_repo(self):
+        # Keeps the fixtures honest. If this repo's own layout drifts away
+        # from what the fixtures model, these tests stop being evidence about
+        # the command engine.py builds HERE -- so the resemblance is asserted,
+        # not assumed. (This repo's suite is never invoked from inside a test;
+        # that would be a minutes-long recursive run.)
+        self.assertEqual(bootstrap.test_dir(ROOT), "specs")
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "specs",
+                                                     "__init__.py")),
+                         "specs/ became a package -- the ImportError this "
+                         "class pins would no longer reproduce")
+        names = os.listdir(os.path.join(ROOT, "specs"))
+        self.assertTrue([n for n in names if n.endswith("_spec.py")])
+        self.assertFalse([n for n in names if n.startswith("test")],
+                         "unittest's default test*.py pattern would now match "
+                         "something here; the fixtures assume it matches none")
 
 
 if __name__ == "__main__":

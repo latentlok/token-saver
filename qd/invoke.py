@@ -614,6 +614,29 @@ def accum_stats(cum, st, attempt=True):
     cum["token_source"] = ("usage" if "usage" in seen
                            else "blended" if "blended" in seen
                            else "bySource" if "bySource" in seen else "none")
+    # Same rule for the ACTIVITY counts, which the loop above SUMS: one attempt
+    # that reported no `stats` block makes the total an undercount, and an
+    # undercount labelled "measured" is exactly the streamed-zero lie one level
+    # up -- now on a number a receipt prints (qd/verdict.py:509).
+    #
+    # The token ladder above cannot be copied here. It is memoryless over its
+    # value set, and with only "stats"/"none" neither ordering works: let "none"
+    # absorb and a fresh cum + one measured attempt reads unmeasured; let
+    # "stats" win and measured-then-streamed reads fully measured. So the SEED
+    # is a third value -- "unset" is "no attempt has reported yet", which is not
+    # the same claim as "an attempt reported nothing", and the merge needs that
+    # difference to start clean.
+    #
+    # A missing key is neutral rather than "none": accum_stats is called with no
+    # stats at all for a pass that produced no telemetry (the challenge pass,
+    # qd/engine.py:1579), and such a call adds 0 to every sum. Nothing was
+    # undercounted, so nothing may be downgraded. Every real attempt goes
+    # through parse_stats, which always sets the key.
+    now = st.get("stats_source")
+    if now:
+        was = cum.get("stats_source", "unset")
+        cum["stats_source"] = (now if was == "unset"
+                               else was if was == now else "partial")
     if attempt:
         cum["attempts"] = (cum.get("attempts") or 0) + 1
     return cum
@@ -623,7 +646,12 @@ def cum_zero():
     return {"tokens": tok_zero(), "tokens_main": tok_zero(),
             "tokens_overhead": tok_zero(), "ms": 0, "turns": 0, "tools": 0,
             "tool_fail": 0, "api_errors": 0, "lines_added": 0, "lines_removed": 0,
-            "tool_names": [], "models": [], "attempts": 0, "token_source": "none"}
+            "tool_names": [], "models": [], "attempts": 0, "token_source": "none",
+            # NOT "none": see accum_stats. "none" is a claim an attempt made;
+            # this is the absence of any attempt, and merging the two spellings
+            # makes the first measured attempt indistinguishable from an
+            # unmeasured one.
+            "stats_source": "unset"}
 
 
 def norm_tokens(t):
@@ -661,13 +689,24 @@ def parse_stats(stdout):
     out = {"tools": 0, "tool_fail": 0, "tool_names": [], "ms": 0, "turns": 0,
            "api_errors": 0, "lines_added": 0, "lines_removed": 0,
            "tokens": tok_zero(), "tokens_main": tok_zero(),
-           "tokens_overhead": tok_zero(), "models": [], "token_source": "none"}
+           "tokens_overhead": tok_zero(), "models": [], "token_source": "none",
+           # tools/lines_added get the provenance marker tokens already had.
+           # They are reported as 0 whether the executor called nothing or the
+           # wire carried nothing, and until this key existed the two were the
+           # same reading -- the unmeasured-zero class this module exists to
+           # catch, sitting in the module that catches it. Stays "none" when no
+           # result record parses at all, mirroring token_source.
+           "stats_source": "none"}
     for m in reversed(records(stdout)):
         if not isinstance(m, dict) or m.get("type") != "result":
             continue
         out["ms"] = m.get("duration_ms") or 0
         out["turns"] = m.get("num_turns") or 0
         st = m.get("stats") or {}
+        # Presence of the block, not whether its numbers are non-zero: a run
+        # that genuinely called no tools is MEASURED at zero and must keep the
+        # "stats" label, or the marker just restates `tools == 0`.
+        out["stats_source"] = "stats" if st else "none"
         t = st.get("tools") or {}
         out["tools"] = t.get("totalCalls") or 0
         out["tool_fail"] = t.get("totalFail") or 0

@@ -98,7 +98,30 @@ def detect_test_cmd(cwd):
     # a directory that may not exist -- is the wrong default.
     d = test_dir(cwd)
     if d:
-        return f"python3 -m unittest discover -s {d} -t . -v"
+        # `-t .` makes unittest REQUIRE the start directory to be an importable
+        # package, and this branch is reached precisely when there is no
+        # packaging metadata -- so it crashed before collecting anything:
+        #   ImportError: Start directory is not importable: '.../specs'
+        # Measured 2026-08-06 (py3.14) on four shapes; the plain `tests/` +
+        # `test_*.py` layout -- the majority case this branch exists for --
+        # crashed identically to this repo's `specs/`. The default top level is
+        # the start directory itself, which is legal for any folder.
+        #
+        # Keep `-t .` for the ONE shape where it is both legal and load-bearing:
+        # inside a package it is what makes intra-suite relative imports
+        # resolve. Same measurement -- dropping it on a tests/ dir holding an
+        # __init__.py turns `from .helpers import VALUE` into
+        # "ImportError: attempted relative import with no known parent package".
+        top = " -t ." if os.path.isfile(j(d, "__init__.py")) else ""
+        # `*.py`, not unittest's default `test*.py`, for the same reason the
+        # pytest branches above override python_files: the gate convention here
+        # is `*_spec.py`, which `test*.py` matches NONE of. No single glob spans
+        # test_*.py / *_test.py / *_spec.py, and a pattern matching only a
+        # SUBSET exits 0 having graded part of the suite -- the silent skip the
+        # comment above says must not happen, wearing a green receipt. Quoted so
+        # the shell (these run under shell=True) cannot expand it against the
+        # project root before unittest ever sees it.
+        return f'python3 -m unittest discover -s {d}{top} -p "*.py" -v'
     return ""
 
 

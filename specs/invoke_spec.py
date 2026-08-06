@@ -18,6 +18,11 @@ Port gate for v1's invoke_qwen/parse machinery plus the v2 seams. Load-bearing:
      ("bySource"/"blended"/"none") -- a zero that means "unmeasured" must never
      read as a real zero. accum_stats sums across attempts, worst-case
      provenance wins.
+  3b. The SAME rule for the activity counts: `stats_source` ("stats"/"none")
+     says whether tools/lines_added were measured at all. A streamed run has no
+     `stats` block on the wire, so it reports 0 tools and 0 lines added --
+     identical to a run that used none. Tokens got their marker; these never
+     did.
   4. peak_context is the MAX over assistant turns, never the summed
      result.usage (measured 50% overstatement).
   5. Timeout and missing-binary produce structured errors, not exceptions.
@@ -391,8 +396,72 @@ class Streaming(Fixture):
         self.assertEqual(st["tokens"]["completion"], 3_400)
         self.assertEqual(st["ms"], 48995)
         self.assertEqual(st["turns"], 7)
-        # Provenance is recorded, so "no tools" is never mistaken for measured.
+        # Provenance is recorded for the TOKENS -- which is all this line
+        # checks. The comment here used to read "so 'no tools' is never
+        # mistaken for measured", a claim no assertion in this test ever made:
+        # `tools` is not read here at all, and until stats_source existed
+        # nothing anywhere distinguished a streamed 0 from a measured 0. A
+        # comment that overstates its own test is worse than no comment -- it
+        # is the reason nobody went looking. The tools claim now has its own
+        # test: test_a_measured_zero_is_told_apart_from_an_unmeasured_zero.
         self.assertEqual(st["token_source"], "usage")
+
+    def test_a_streamed_run_marks_its_tool_and_line_counts_unmeasured(self):
+        # The counts are GENUINELY ABSENT from the wire and that is not the
+        # defect: a -o stream-json result record carries duration_ms /
+        # num_turns / usage / permission_denials / result and no `stats` block
+        # at all. Live-confirmed twice -- docs/archive/handoff-v05/
+        # PROBES-P1-P8.md P5 (2026-07-29) and VLLM-ROUND.md A4 (2026-07-31).
+        # Nothing may invent a number here.
+        #
+        # The defect is that the absence is UNLABELLED. Note this very record
+        # is measured for tokens and unmeasured for tools, so one flag for the
+        # whole record cannot say it: the two provenances differ within a
+        # single run.
+        streamed = json.dumps({
+            "type": "result", "result": "done", "session_id": "s-1",
+            "duration_ms": 48995, "num_turns": 7,
+            "usage": {"input_tokens": 1_200_000, "output_tokens": 3_400},
+        })
+        st = invoke.parse_stats(streamed)
+        self.assertEqual(st["stats_source"], "none")
+        self.assertEqual(st["token_source"], "usage")
+        # The numbers themselves stay 0, deliberately, exactly as the tokens do
+        # under token_source="none": the marker carries the truth, and a None
+        # leaking into `f"TOOLS: {st['tools']} call(s)"` (qd/verdict.py:465)
+        # would print "None call(s)" the first time a caller drops its
+        # truthiness guard.
+        self.assertEqual(st["tools"], 0)
+        self.assertEqual(st["lines_added"], 0)
+
+    def test_a_measured_zero_is_told_apart_from_an_unmeasured_zero(self):
+        # THE test, and the one the overstating comment above pretended to be.
+        # Two runs, both reporting 0 tools and 0 lines: one because the
+        # executor called no tools, one because nothing was ever reported. The
+        # numbers are identical and must stay identical -- only the provenance
+        # can separate them.
+        streamed = json.dumps({
+            "type": "result", "result": "done", "duration_ms": 1, "num_turns": 1,
+            "usage": {"input_tokens": 10, "output_tokens": 1},
+        })
+        measured = json.dumps({
+            "type": "result", "result": "done", "duration_ms": 1, "num_turns": 1,
+            "stats": {"tools": {"totalCalls": 0, "totalFail": 0, "byName": {}},
+                      "files": {"totalLinesAdded": 0, "totalLinesRemoved": 0},
+                      "models": {}},
+        })
+        s, m = invoke.parse_stats(streamed), invoke.parse_stats(measured)
+        self.assertEqual((s["tools"], s["lines_added"]),
+                         (m["tools"], m["lines_added"]))
+        self.assertNotEqual(s["stats_source"], m["stats_source"],
+                            "a streamed run and a genuinely idle run are still "
+                            "indistinguishable")
+        self.assertEqual(m["stats_source"], "stats")
+        self.assertEqual(s["stats_source"], "none")
+        # And a run with real activity keeps the same measured label -- the
+        # marker tracks whether `stats` was present, not whether it was zero.
+        self.assertEqual(invoke.parse_stats(RESULT_JSON)["stats_source"],
+                         "stats")
 
     def test_the_stats_split_still_wins_when_present(self):
         # Batch runs keep the richer bySource split; the fallback must not
@@ -684,6 +753,42 @@ class PureFunctions(unittest.TestCase):
         # Coarsest wins: a usage attempt poisons even a bySource run's split.
         invoke.accum_stats(cum, {"token_source": "bySource"})
         self.assertEqual(cum["token_source"], "usage")
+
+    def test_one_unmeasured_attempt_costs_the_run_its_measured_label(self):
+        # accum_stats SUMS tools and lines_added across attempts, so an attempt
+        # that reported nothing makes the total an UNDERCOUNT -- and an
+        # undercount presented as a measurement is the streamed-zero lie one
+        # level up, on the number a receipt actually prints.
+        #
+        # Deliberately NOT pinning the mixed-run label's spelling ("partial",
+        # "mixed", "none" are all fine), only that it may not say "stats".
+        # What IS pinned is that all four rows below hold at once -- and they
+        # cannot be satisfied by copying the token ladder (qd/invoke.py:
+        # 608-616), because that ladder is memoryless over two values:
+        #     "none" absorbs      -> fresh + stats = none      (row 2 breaks)
+        #     "stats" wins        -> stats then none = stats   (row 4 breaks)
+        # so the seed cum_zero() starts from must be DISTINGUISHABLE from an
+        # attempt that reported nothing. Verified by construction, 2026-08-06.
+        fresh = invoke.cum_zero()
+        self.assertIn("stats_source", fresh)          # row 1: the key exists...
+        self.assertNotEqual(fresh["stats_source"], "stats")  # ...and claims
+        #                                            nothing on an empty run
+
+        cum = invoke.cum_zero()                       # row 2: measured only
+        invoke.accum_stats(cum, {"stats_source": "stats", "tools": 5,
+                                 "lines_added": 7})
+        self.assertEqual(cum["stats_source"], "stats")
+
+        streamed_only = invoke.cum_zero()             # row 3: unmeasured only
+        invoke.accum_stats(streamed_only, {"stats_source": "none"})
+        self.assertEqual(streamed_only["stats_source"], "none")
+
+        invoke.accum_stats(cum, {"stats_source": "none"})   # row 4: mixed
+        self.assertNotEqual(cum["stats_source"], "stats",
+                            "a run with an unmeasured attempt reports its "
+                            "undercounted sum as measured")
+        self.assertEqual(cum["tools"], 5)      # the sum survives...
+        self.assertEqual(cum["attempts"], 2)   # ...over 2 attempts, one unseen
 
     def test_peak_context_is_max_not_sum(self):
         self.assertEqual(invoke.peak_context(RESULT_JSON), 20285)
