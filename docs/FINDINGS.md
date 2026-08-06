@@ -916,36 +916,38 @@ The fix itself was then verified at the seam: with a project permitting
 `^echo`, a caller passing `[]` resolves to `[]` and a silent caller resolves to
 `["^echo"]`.
 
-## Concurrency on snowy: parallel_max buys latency, not throughput
+## Concurrency on snowy — MEASUREMENT RETRACTED, another process held the GPU
 
-vLLM does continuous batching, so the natural assumption is that N concurrent
-delegations cost less than N serial ones. Measured through the PRODUCT (real
-delegations, not raw HTTP, so the plugin's own per-run work is included),
-capped at 3 because the endpoint's ceiling is 4 and another build shares it:
+An earlier version of this entry reported that snowy "serialises" and that
+`parallel_max > 1` buys latency without throughput, from this data:
 
 | concurrency | wall | per-run | throughput |
 |---|---|---|---|
 | K=1 | 14.7s | 14.7s | 4.1 runs/min |
 | K=3 | 42.4s | 28.6–42.4s | 4.2 runs/min |
 
-**Throughput is flat; per-run latency nearly tripled.** Three concurrent runs
-took 42.4s, against ~44s for three serial ones. The endpoint is effectively
-serialising: a 27B model already saturates the GPU with one request, so a second
-and third queue behind it rather than batching alongside it.
+**The conclusion does not survive.** Another process was using the GPU during
+the run, and there is no record of how much or when. Contention alone explains
+the tripled per-run latency, so the numbers cannot distinguish *"vLLM declines
+to batch this workload"* from *"something else was holding the card"*. Those
+have opposite implications for `parallel_max`, and this data picks neither.
 
-What this does NOT contradict: the plugin genuinely achieves concurrency
-(measured earlier at peak 4 workers on `parallel_max: 4`). Both are true --
-the dispatcher fans out correctly, and the endpoint declines to reward it.
+Kept rather than deleted, because the mistake is the useful part. The original
+entry **did** name the shared GPU in its caveats — and then stated a causal
+conclusion anyway, in the summary line and in the title. *A caveat that does not
+change the claim it qualifies is decoration.* §IV says a claim you have never
+counted is an anecdote; a claim counted once under uncontrolled conditions is an
+anecdote with a table.
 
-**The consequence for a caller** is the part worth acting on. `parallel_max > 1`
-does not make a batch finish sooner here; it makes every individual run in that
-batch wait ~3× longer while the total finishes at the same moment. For a caller
-watching one delegation, that is strictly worse. Fan-out on this endpoint is
-worth it only when the alternative is N separate submits with their own
-overhead -- not for throughput.
+**What a real measurement needs**, for whoever repeats it:
 
-**Caveats, because one measurement is an anecdote (§IV).** N=1 per level; tiny
-tasks (~500 output tokens each, where prefill dominates and batching has least
-to offer); another build intermittently sharing the GPU. A longer generation
-might batch better. The flat throughput is the robust part of the reading --
-contention would have made it DROP, not hold steady.
+- the GPU otherwise idle, **verified** before and after (`nvidia-smi`), not assumed
+- more than one sample per level, with the levels **interleaved** rather than run
+  in sequence, so drift and contention hit both arms alike
+- a task whose generation is long enough for batching to matter — the probe used
+  ~500 output tokens, where prefill dominates and continuous batching has least
+  to offer
+- the K=1 arm re-run **after** the K=3 arm, as a control against drift
+
+Until then the honest position is **unknown**. `parallel_max: 4` stands because
+nothing measured argues against it.
