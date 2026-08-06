@@ -25,7 +25,7 @@ from qd.invoke import (
     truncate, stall_seconds as invoke_stall_seconds, context_window,
 )
 from qd.gittree import (
-    git, is_git_repo, file_sha,
+    git, is_git_repo, file_sha, unquote_path,
     snapshot, violated_specs, revert_specs, untracked_files,
     snapshot_contents, restore_paths, spec_files,
     # committed_during_run / head_sha / new_public_symbols / numstat_map moved
@@ -1325,9 +1325,23 @@ def _delegate(args, t0_dir):
     # "tracked NOW": a worker that creates a file and `git add`s it would turn
     # its own new file into a pre-existing-file violation whose revert-from-sha
     # then silently no-ops.
+    #
+    # DECODED, because this set is compared for MEMBERSHIP against paths that
+    # arrive from `snapshot()` -- decoded at the porcelain seam since f75572a.
+    # `ls-tree` C-quotes exactly as porcelain does, so the two sides stopped
+    # agreeing the moment only one of them was decoded: `pre_tracked` held
+    # `"caf\303\251.py"` while `changed` held `café.py`, and touch_scope read
+    # the mismatch as "not pre-existing" -- its ONE silent branch, since new
+    # files are always allowed. A file the caller declared off-limits was
+    # edited, kept, and the run passed with an empty trail. Measured on git
+    # 2.53 over 16 name classes x both core.quotePath settings: 11 of 32 pairs
+    # disagreed, including plain `café.py` under the stock default.
+    # `_created` reads the same set for the opposite question, and got the
+    # opposite error: an EDITED pre-existing file read as one this run created.
     rc_t, out_t = git(work_cwd, "ls-tree", "-r", "--name-only",
                       pre_sha_full or "HEAD")
-    pre_tracked = set(out_t.splitlines()) if rc_t == 0 and out_t else set()
+    pre_tracked = {unquote_path(p) for p in out_t.splitlines()} \
+        if rc_t == 0 and out_t else set()
 
     # U6: the brief document is protected by CONTENT, not by the spec guard's
     # base diff -- the amendment dirties it before the run, and a diff against

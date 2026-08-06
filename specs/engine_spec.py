@@ -965,6 +965,122 @@ class TouchScope(Fixture):
             os.path.join(self.cwd, "brand_new_helper.py")))
 
 
+class TouchScopeHostileNames(Fixture):
+    """The classifier's two inputs have to be the SAME kind of string.
+
+    `touch_scope` decides "pre-existing, therefore off-limits" against
+    `scope.pre_tracked`, and decides "changed" against `attempt.changed`. Both
+    are repo-relative paths -- but they came from two different git commands
+    parsed by two different rules:
+
+        attempt.changed  <- snapshot() -> status_map(), DECODED since f75572a
+        scope.pre_tracked <- `git ls-tree -r --name-only`, parsed RAW in
+                             qd/engine.py with a bare .splitlines()
+
+    `ls-tree` C-quotes exactly as porcelain does. So for any name git quotes,
+    `pre_tracked` held `"caf\\303\\251.py"` while `changed` held `café.py`, the
+    membership test `path not in scope.pre_tracked` was True, and the guard took
+    the ONE branch that is silent: *new files are always allowed*. A file the
+    caller declared off-limits was edited, kept, and the run passed with an
+    empty trail. Not "detected but unrevertable" -- UNENFORCED.
+
+    Measured on git 2.53, 16 name classes x both `core.quotePath` settings:
+    **11 of 32 pairs disagreed** -- tab, newline, `"`, `\\` and control bytes
+    under BOTH settings, and non-ASCII under the default `quotePath=true`. That
+    last one is the whole point: `café.py` needs no exotic filename and no
+    unusual config, just one accented character on a stock git.
+
+    Bare / never affected, and kept below as controls because a fix must not
+    start convicting them either: space (`ls-tree` emits it bare where
+    porcelain quotes it -- the near-miss that hid this at the sibling seam),
+    `*`, `:`, `;`, `$`, `'`, `&`, `|`, `>`.
+
+    The end-to-end run is the gate rather than a parser unit test because the
+    parse and the consumer are in different modules and it is precisely their
+    DISAGREEMENT that is the bug -- either side alone looks correct.
+    """
+
+    # Every class git quotes at this seam, plus the bare ones as controls.
+    QUOTED = ("tab\tchar.py",          # control byte: quoted under both settings
+              "nl\nchar.py",           # newline: the worst wire-format case
+              "café.py",               # non-ASCII: quoted under the DEFAULT
+              'dq"uote.py',            # the escape that also delimits
+              "back\\slash.py",        # backslash
+              "bel\x07char.py")        # another control byte
+    BARE = ("plain.py",                # control: must keep working
+            "my calc.py",              # space: ls-tree bare, porcelain quotes
+            "star*.py",                # glob char
+            ":(icase)magic.py",        # pathspec magic in a real filename
+            "semi;colon.py")           # shell metacharacter, bare
+
+    def _commit(self, names):
+        for n in names:
+            with open(os.path.join(self.cwd, n), "w") as f:
+                f.write("ORIGINAL = 1\n")
+        subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "off-limits"],
+                       check=True)
+
+    def _drive(self, names, quote_path):
+        subprocess.run(["git", "-C", self.cwd, "config", "core.quotePath",
+                        quote_path], check=True)
+        self._commit(names)
+        self.steps([{"write": dict({n: "TAMPERED = 1\n" for n in names},
+                                   **{"out.py": "MARKER\n"})}])
+        return self.delegate(touch_scope=["out.py"], max_iterations=1)
+
+    def _assert_enforced(self, r, names):
+        # Content first: it is the security fact. A trail assertion alone would
+        # pass on a build that named the file and then failed to put it back.
+        for n in names:
+            with open(os.path.join(self.cwd, n)) as f:
+                self.assertEqual(
+                    f.read(), "ORIGINAL = 1\n",
+                    f"{n!r} was declared off-limits, was edited, and the edit "
+                    f"is still on disk; trail was {r['trail']!r}")
+        self.assertTrue(r["trail"], "the guard produced no trail line at all")
+        self.assertEqual(r["status"], "scope_violation")
+
+    # One test per `core.quotePath` setting rather than a subTest loop: each
+    # needs its OWN repo (the fixture commits the off-limits files), and the
+    # setting is the only thing that separates a `café.py` git quotes from one
+    # it emits raw. Both must be enforced, which is the assertion -- the
+    # classification is not.
+    def test_a_quoted_name_cannot_slip_past_the_guard_quotepath_true(self):
+        names = list(self.QUOTED)
+        self._assert_enforced(self._drive(names, "true"), names)
+
+    def test_a_quoted_name_cannot_slip_past_the_guard_quotepath_false(self):
+        names = list(self.QUOTED)
+        self._assert_enforced(self._drive(names, "false"), names)
+
+    def test_the_bare_names_were_never_broken_and_stay_that_way(self):
+        # The other direction. Decoding must NARROW nothing: these names were
+        # already enforced correctly, and a fix that starts letting one through
+        # (or starts convicting an untouched lookalike) is the same bug wearing
+        # the opposite sign.
+        names = list(self.BARE)
+        r = self._drive(names, "true")
+        self._assert_enforced(r, names)
+
+    def test_a_new_file_with_a_quoted_name_is_still_allowed(self):
+        # The branch the bug was hiding in. `pre_tracked` exists to answer
+        # "pre-existing?", and a genuinely NEW file must still be free to
+        # create -- a fix that made every quoted name look pre-existing would
+        # turn the worker's own new files into scope violations and revert
+        # them, which is the false-accusation failure this project has spent a
+        # phase removing.
+        self.steps([{"write": {"out.py": "MARKER\n",
+                               "café_new.py": "h = 1\n",
+                               "tab\tnew.py": "h = 1\n"}}])
+        r = self.delegate(touch_scope=["out.py"])
+        self.assertEqual(r["status"], "success")
+        self.assertEqual(len(r["trail"]), 1)
+        for n in ("café_new.py", "tab\tnew.py"):
+            self.assertTrue(os.path.exists(os.path.join(self.cwd, n)),
+                            f"a brand-new {n!r} was reverted as pre-existing")
+
+
 class Refusals(Fixture):
     def test_trust_stub_refuses_non_verified(self):
         self.steps([{"write": {"out.py": "MARKER\n"}}])
