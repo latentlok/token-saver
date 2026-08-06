@@ -564,6 +564,145 @@ class HostileSpecName(unittest.TestCase):
                          ['"a b.py" -> "c d.py"'])
 
 
+class HostileNamesAtTheSEAMSTheSpecGuardDoesNotUse(unittest.TestCase):
+    """The three halves the previous gate did not pin, found by mutating all NINE.
+
+    23cb3f4 fixed six decodes and three `:(literal)` conversions -- nine
+    independently reversible halves -- and reported mutating six. The three it
+    did not are here, each verified as a REAL gap (the mutant runs, the suite
+    stays green, and the function returns a measurably wrong answer) rather
+    than an equivalent mutant:
+
+        new_public_symbols  decode        -> survived
+        new_public_symbols  :(literal)    -> survived
+        dodge_markers       :(literal)    -> survived
+
+    Why they were missed is worth more than the tests. `HostileSpecName` is
+    organised around the SPEC GUARD, and the spec guard is the one caller these
+    three seams do not have. `dodge_markers`' decode was covered because a
+    tab-named *spec* file is a natural thing to reach for in a class about
+    specs; its `:(literal)` was not, because no name in that class needed
+    pathspec magic to reach THAT parse. And `new_public_symbols` reads
+    NON-test files by construction -- `_TESTY` excludes everything the spec
+    class writes -- so no test in it could reach either half. The gap was
+    shaped by the class's subject, not by the code's.
+
+    Both halves are still load-bearing here, for the same two reasons as at the
+    guard: without the decode the per-file pathspec is a quoted string matching
+    nothing, and without `:(literal)` a name beginning `:` is read as magic and
+    a name holding `*` globs. One narrows to nothing, the other widens onto
+    innocent files -- a missed finding and a false accusation respectively.
+    """
+
+    def _repo(self, *files):
+        cwd = make_repo()
+        for rel, body in files:
+            put(cwd, rel, body)
+        put(cwd, "impl.py", "x = 1\n")
+        commit_all(cwd, "base")
+        rc, pre = gittree.git(cwd, "rev-parse", "HEAD")
+        return cwd, pre.strip()
+
+    # --- new_public_symbols, decode (survivor 1) ---------------------------
+    def test_new_public_surface_in_a_QUOTED_source_file_is_seen(self):
+        # Scope-creep detection, on the file class this project cares most
+        # about: ordinary source. Undecoded, `git diff --name-only` handed back
+        # `"tab\tchar.py"` -- quotes included -- and the per-file diff for that
+        # 16-character non-name came back EMPTY, so a run that added a public
+        # contract to it reported ZERO new public surface. The receipt line a
+        # caller reads to catch an unrequested API said nothing at all.
+        name = "tab\tchar.py"
+        cwd, pre = self._repo((name, "A = 1\n"))
+        put(cwd, name, "A = 1\n\n\ndef public_thing():\n    return 1\n")
+        self.assertEqual(gittree.new_public_symbols(cwd),
+                         {name: ["public_thing"]})
+
+    def test_the_quoted_name_is_not_merely_skipped_by_the_TESTY_filter(self):
+        # The discriminator for the test above. `"tab\tchar_spec.py"` does not
+        # contain the substring `_spec.` -- git's quoting breaks the token
+        # apart -- so an undecoded path was wrong TWICE, and the two errors
+        # can cancel: a quoted TEST file slips past the exclusion and then
+        # produces an empty diff, which looks like correct exclusion. Using a
+        # non-test name above is what makes the first assertion bite; this
+        # pins the exclusion itself still works on the decoded name.
+        name = "tab\tchar_spec.py"
+        cwd, pre = self._repo((name, "A = 1\n"))
+        put(cwd, name, "A = 1\n\n\ndef public_thing():\n    return 1\n")
+        self.assertEqual(gittree.new_public_symbols(cwd), {},
+                         "a test file's new symbols were reported as new "
+                         "public surface")
+
+    # --- new_public_symbols, :(literal) (survivor 2) -----------------------
+    def test_pathspec_MAGIC_in_a_source_name_does_not_hide_its_new_surface(self):
+        # git needs no quoting for `:(icase)magic.py` and emits it bare, so the
+        # decode cannot help here at all. Without `:(literal)` the per-file
+        # diff searched for `magic.py` case-insensitively, matched nothing, and
+        # returned empty -- the same silent zero by a different route.
+        name = ":(icase)magic.py"
+        cwd, pre = self._repo((name, "A = 1\n"))
+        put(cwd, name, "A = 1\n\n\ndef public_thing():\n    return 1\n")
+        self.assertEqual(gittree.new_public_symbols(cwd),
+                         {name: ["public_thing"]})
+
+    def test_a_GLOB_in_a_source_name_does_not_borrow_a_neighbours_symbols(self):
+        # The other direction, and the one a narrowing-only fix would leave
+        # open: without `:(literal)` the pathspec `star*.py` GLOBS, so the
+        # per-file diff for it also contains `starXYZ.py`'s hunks and the
+        # neighbour's brand-new public symbol is attributed to a file that
+        # never defined it. A false accusation on the scope-creep line, which
+        # is the failure this project has spent a phase removing.
+        cwd, pre = self._repo(("star*.py", "A = 1\n"),
+                              ("starXYZ.py", "B = 1\n"))
+        put(cwd, "star*.py", "A = 1\n\n\ndef mine():\n    return 1\n")
+        put(cwd, "starXYZ.py", "B = 1\n\n\ndef the_neighbours():\n    return 2\n")
+        got = gittree.new_public_symbols(cwd)
+        self.assertEqual(got.get("star*.py"), ["mine"])
+        self.assertEqual(got.get("starXYZ.py"), ["the_neighbours"])
+
+    # --- dodge_markers, :(literal) (survivor 3) ----------------------------
+    def test_pathspec_MAGIC_in_a_test_name_does_not_hide_its_dodge(self):
+        # `dodge_markers`' DECODE is pinned by HostileSpecName (a tab-named
+        # spec); its `:(literal)` was not, because no name there needed
+        # pathspec magic to reach this parse. Bare on the wire, magic on the
+        # way back in: the per-file diff matched nothing and a
+        # `@pytest.mark.skip` delivered in the same run as the work was
+        # reported as no dodge at all.
+        name = ":(icase)magic_spec.py"
+        cwd, pre = self._repo((name, "def test_contract():\n    assert True\n"))
+        put(cwd, name, "import pytest\n\n\n@pytest.mark.skip\n"
+                       "def test_contract():\n    assert True\n")
+        self.assertEqual(gittree.dodge_markers(cwd, pre).get(name),
+                         ["pytest.mark.skip"])
+
+    def test_a_GLOB_in_a_test_name_does_not_borrow_a_neighbours_dodge(self):
+        # And the widening half. `star*_spec.py` gains an ordinary test and NO
+        # marker; its neighbour gains the skip. Without `:(literal)` the glob
+        # pulls the neighbour's added line into this file's per-file diff and
+        # the receipt accuses a file whose author did nothing -- the same
+        # false-accusation shape as above, on the line a caller is told always
+        # to read on a green receipt.
+        #
+        # `star*_spec.py` has to be CHANGED, not merely present: `dodge_markers`
+        # only opens the per-file diff for paths `diff --name-only` already
+        # named, so leaving it clean makes the whole test vacuous -- it passes
+        # under the mutant because the file is never reached at all. Caught by
+        # mutating :(literal) and watching this assertion survive.
+        cwd, pre = self._repo(
+            ("star*_spec.py", "def test_a():\n    assert True\n"),
+            ("starXYZ_spec.py", "def test_b():\n    assert True\n"))
+        put(cwd, "star*_spec.py",
+            "def test_a():\n    assert True\n\n\ndef test_a2():\n"
+            "    assert True\n")
+        put(cwd, "starXYZ_spec.py",
+            "import pytest\n\n\n@pytest.mark.skip\n"
+            "def test_b():\n    assert True\n")
+        got = gittree.dodge_markers(cwd, pre)
+        self.assertEqual(got.get("starXYZ_spec.py"), ["pytest.mark.skip"])
+        self.assertIsNone(got.get("star*_spec.py"),
+                          "a file whose author added no marker was accused of "
+                          "its neighbour's skip")
+
+
 class DodgeMarkers(Fixture):
     """U4.2: skip/xfail markers ADDED to test-ish files during a run.
 
