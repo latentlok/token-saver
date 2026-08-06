@@ -81,6 +81,11 @@ _DEFAULT_BURN_BUDGET = 10_000_000
 # not a caller-facing param -- it is deliberately absent from the schema, so a
 # hand-written call cannot claim to be link 3 of a chain that never ran.
 CHAIN_ARG = "_chain"
+# G2: the WHOLE chain's briefs, composed by run_chain and handed to link 1 only.
+# The challenge pass reads this instead of link 1's task alone, so a link 3 that
+# contradicts link 1 is caught BEFORE link 2 commits into the shared worktree --
+# which is the moment the contradiction becomes expensive rather than free.
+CHAIN_BRIEF_ARG = "_chain_brief"
 
 # The worktree a chain LENDS to each of its links. Reserved for the same reason
 # CHAIN_ARG is: only run_chain may set it, so a hand-written call cannot point a
@@ -1367,6 +1372,11 @@ def _delegate(args, t0_dir):
     # silently re-enable what the caller just switched off.
     challenge = setting("challenge_brief", args, cfg, _global_config(),
                         default=True)
+    # G2: at a chain's head the subject is the CHAIN, not the link. Every
+    # existing rule still applies -- it runs once, it refuses only on evidence
+    # naming a path that exists, and a diagnosis run is exempt -- because it is
+    # the same pass with a wider brief, not a second mechanism.
+    challenge_subject = args.get(CHAIN_BRIEF_ARG) or task
     # A diagnosis is exempt. `report_dont_fix` asks "why does this fail?" -- a
     # brief that makes no claim about the code, so there is nothing for the
     # code to contradict. One attempt is the whole shape of a report run, and
@@ -1374,7 +1384,7 @@ def _delegate(args, t0_dir):
     objection = None
     if challenge and not report:
         objection, ch_meta, ch_session = _challenge_brief(
-            profile, task, work_cwd, timeout, session_id)
+            profile, challenge_subject, work_cwd, timeout, session_id)
         # Folded into the run's totals BEFORE the refusal branch, so a caller
         # who does get a receipt sees what the pass cost. accum_stats does not
         # touch `attempts`, so the attempt count still means attempts.

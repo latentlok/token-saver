@@ -568,6 +568,37 @@ class GatesAreNotHostageToTheChallenge(Fixture):
         self.assertNotEqual(r["status"], "refused")
 
 
+class ChainBriefReachesTheChallenge(Fixture):
+    """G2's wiring: the engine must actually USE the wider subject.
+
+    chain_spec proves run_chain COMPOSES the whole-chain brief and hands it to
+    link 1. Nothing proved the engine reads it -- and mutating the engine to
+    challenge link 1's task alone left every chain and challenge test green.
+
+    Tested logic, untested wiring: the fifth time this exact shape has appeared
+    in this round, which is why the rule is now "pin it where it RUNS".
+    """
+
+    def test_the_challenge_pass_sees_the_whole_chain(self):
+        from qd.engine import CHAIN_BRIEF_ARG
+        self.steps([{"result": "no objection\n"},
+                    {"write": {"out.py": "MARKER\n"}}])
+        self.delegate(challenge_brief=True, **{CHAIN_BRIEF_ARG: (
+            "STEP 1: add a status column\n\nSTEP 2: drop the status column\n")})
+        sent = self.task_seen(1)          # executor call 1 IS the challenge
+        self.assertIn("STEP 1: add a status column", sent)
+        self.assertIn("STEP 2: drop the status column", sent)
+
+    def test_without_a_chain_the_subject_is_still_the_task(self):
+        # The control. A lone delegation must not start paying for a wider
+        # subject that does not exist.
+        self.steps([{"result": "no objection\n"},
+                    {"write": {"out.py": "MARKER\n"}}])
+        self.delegate(challenge_brief=True, task="build the thing")
+        self.assertIn("build the thing", self.task_seen(1))
+        self.assertNotIn("STEP 1:", self.task_seen(1))
+
+
 class SpecGuard(Fixture):
     def test_worker_spec_edit_reverted_and_attempt_fails(self):
         self.steps([{"write": {"guard_spec.py": "WEAKENED = 1\n",

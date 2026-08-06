@@ -33,7 +33,6 @@ thing and this list stays another.
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
 | **D** telemetry beyond the executor | step 5 | `core/scope.py` (the call log's owner) |
-| **G2** whole-chain brief contradiction | steps 4, 7 | `features/gates/`, on the composite |
 | **G4** brief-vs-diff advisory | ~~step 4~~ **unblocked**, but NOT as a gate | `advisory_gates` — see §G4; a witness that can refuse breaks PRINCIPLES §I, and step 4 made "can refuse" a property of the type |
 
 ### Not blocked by anything — can ship whenever
@@ -184,25 +183,16 @@ ORDER itself was unpinned — inverting it, so the receipt shed its most importa
 blocks and kept the accounting, passed all 1,032 tests. Pinned by
 `verdict_spec.SizeCap` before G1 was built on top of it.
 
-**G2 — nothing reads a chain's links against each other.** Per-link challenge
-already exists: `server.py:436` defaults `challenge_brief` off for links 2..N
-because an eight-link chain would otherwise pay eight read-the-codebase passes,
-and *"an item that asks for it explicitly still gets it"* — so
-`challenge_brief: true` on a link re-enables it. What no pass performs is the
-**whole-chain** read: every challenge sees one brief and the code, never the
-other links. A link 3 that contradicts link 1 is found after link 2 has already
-committed into the shared worktree. **Why steps 4 and 7:** it is a gate (step 4
-gives gates one shape) whose subject is the *chain*, which only becomes an
-addressable thing when a chain-of-runs is itself a runnable (step 7).
+~~**G2 — nothing reads a chain's links against each other.**~~ **DONE.** Link 1's
+challenge now reads the WHOLE chain: `run_chain` composes every step's brief,
+numbered and ordered, and hands it to the head link only. Built as the same
+challenge pass with a wider subject rather than a second mechanism, so every
+rule it already had still holds — once per chain, refuse only on evidence naming
+a path that exists, diagnosis runs exempt.
 
-~~**G3 — three identical failures render as one failure.**~~ **DONE.** The loop
-already switched the WORKER to Reflexion on the first repeat; the signal is now
-retained past the loop and the caller gets `stuck_no_progress` plus a
-`NO PROGRESS:` line saying the remedy is the brief or the gate, not another
-attempt. A subtype of `verify_failed` and last in the status cascade, because
-every branch above it is a more specific diagnosis. Controls in the spec pin the
-half that matters: three DIFFERENT failures stay `verify_failed`, and one
-attempt can never be stuck.
+Numbered and ORDERED because the contradictions that matter are ordinal: a later
+step undoing an earlier one is a contradiction, while the same two briefs in the
+other order might be a good refactor.
 
 **G4 — nothing asks "is this what was asked for?" after the build.** The gate
 proves the tests pass. The detectors prove nothing was left behind, nothing is

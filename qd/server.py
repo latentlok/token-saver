@@ -395,6 +395,28 @@ def _receipt_status(text):
     return "unknown"
 
 
+def chain_brief(items):
+    """Every link's brief, numbered, as one document (G2).
+
+    Numbered and ORDERED because the contradictions that matter are ordinal: a
+    later link undoing an earlier one is a contradiction, while the same two
+    briefs in the other order might be a perfectly good refactor. A flat list
+    would lose the only thing that distinguishes them.
+
+    Truncated per link, because the point is to expose contradictions BETWEEN
+    briefs, not to re-read each one in full -- and an eight-link chain of long
+    briefs would otherwise cost more context than the objection is worth.
+    """
+    lines = ["This is a CHAIN of %d steps, run in order, sharing one working "
+             "tree. Judge them TOGETHER: a later step that undoes or "
+             "contradicts an earlier one is the failure this pass exists to "
+             "catch.\n" % len(items)]
+    for i, item in enumerate(items, 1):
+        task = ((item or {}).get("task") or "").strip()
+        lines.append("STEP %d: %s" % (i, task[:600]))
+    return "\n\n".join(lines) + "\n"
+
+
 def run_chain(items, handler, on_partial=None):
     """Run delegation items in submission order, halting on the first red one.
 
@@ -413,7 +435,7 @@ def run_chain(items, handler, on_partial=None):
     finishes: a submitted chain is the longest thing this server runs, and
     waiting for link 8 to read link 1 is what made it feel like a black box.
     """
-    from qd.engine import CHAIN_ARG, WT_ARG
+    from qd.engine import CHAIN_ARG, CHAIN_BRIEF_ARG, WT_ARG
     n = len(items)
     out = []
     halted_at = halted_status = None
@@ -428,6 +450,13 @@ def run_chain(items, handler, on_partial=None):
             continue
         args = dict(item or {})
         args[CHAIN_ARG] = {"pos": k, "of": n}
+        # G2: link 1's challenge reads the WHOLE chain. Each link is challenged
+        # against the code today, but nothing ever read link 3 alongside link 1
+        # -- so a contradiction between them surfaced only after link 2 had
+        # committed into the shared worktree, which is exactly when undoing it
+        # stops being free.
+        if k == 1 and n > 1:
+            args[CHAIN_BRIEF_ARG] = chain_brief(items)
         # The brief review happens ONCE, at the head of the chain. Every link
         # is its own delegate() call, so the default would fire per link -- an
         # eight-link chain paying eight read-the-whole-codebase passes to

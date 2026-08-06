@@ -112,6 +112,64 @@ class Order(Fixture):
         self.assertEqual(server.run_chain([], self.handler()), "")
 
 
+class WholeChainReview(Fixture):
+    """G2: nothing ever read link 3 alongside link 1.
+
+    Each link could be challenged against the CODE, and the head link was by
+    default. What no pass performed was reading the links against EACH OTHER --
+    so a step that undid an earlier one surfaced only after the earlier one had
+    committed into the shared worktree, which is exactly when undoing it stops
+    being free.
+
+    Built as the SAME challenge pass with a wider subject, not a second
+    mechanism: every rule it already had still applies -- once per chain, refuse
+    only on evidence naming a path that exists, diagnosis runs exempt.
+    """
+
+    def test_the_head_link_is_challenged_against_the_whole_chain(self):
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        head = self.seen[0]
+        self.assertIn(CHAIN_BRIEF_ARG, head)
+        brief = head[CHAIN_BRIEF_ARG]
+        for step in ("step 1", "step 2", "step 3"):
+            self.assertIn(step, brief)
+
+    def test_the_steps_are_numbered_and_ordered(self):
+        # The contradictions that matter are ORDINAL: a later step undoing an
+        # earlier one is a contradiction; the same two briefs in the other order
+        # might be a perfectly good refactor. A flat unordered list would lose
+        # the only thing that tells them apart.
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        brief = self.seen[0][CHAIN_BRIEF_ARG]
+        self.assertLess(brief.index("STEP 1"), brief.index("STEP 2"))
+        self.assertLess(brief.index("STEP 2"), brief.index("STEP 3"))
+
+    def test_later_links_are_not_given_the_chain_brief(self):
+        # It is reviewed ONCE. Handing it to every link would pay N
+        # read-the-whole-chain passes to re-answer a settled question.
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(3), self.handler(GREEN, GREEN, GREEN))
+        for later in self.seen[1:]:
+            self.assertNotIn(CHAIN_BRIEF_ARG, later)
+
+    def test_a_single_link_chain_gets_no_chain_brief(self):
+        # One step cannot contradict itself, and the wider subject would cost a
+        # longer prompt for a question with no answer.
+        from qd.engine import CHAIN_BRIEF_ARG
+        server.run_chain(self.items(1), self.handler(GREEN))
+        self.assertNotIn(CHAIN_BRIEF_ARG, self.seen[0])
+
+    def test_it_says_the_steps_share_a_tree_and_run_in_order(self):
+        # Without that, a reviewer cannot tell a contradiction from two
+        # independent tasks that happen to touch the same file.
+        brief = server.chain_brief([{"task": "a"}, {"task": "b"}])
+        low = brief.lower()
+        self.assertIn("in order", low)
+        self.assertIn("one working tree", low)
+
+
 class HaltOnRed(Fixture):
     """The load-bearing claim: a broken link stops the chain."""
 
