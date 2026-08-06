@@ -34,6 +34,7 @@ from qd.gittree import (
     _project_config, _global_config,
 )
 from qd.core.plan import RunPlan, setting
+from qd.core.status import classify as run_status
 from qd.core.scope import RunScope
 from qd.features import detectors, gates
 from qd.bootstrap import (
@@ -1925,60 +1926,13 @@ def _delegate(args, t0_dir):
         progress.finish()
 
     # --- Determine status ---
-    if not trail:
-        status = "error"
-    elif trail[-1].endswith(": VERIFY PASS"):
-        status = "success"
-    elif "RESULT SCHEMA invalid" in trail[-1]:
-        # U5.1: the work may well be fine -- the gate on that line says so --
-        # but the machine-read result the caller asked for is not consumable,
-        # and a green status would hand back a promise this run did not keep.
-        status = "result_invalid"
-    elif "run stopped:" in trail[-1]:
-        status = "stopped"
-    elif "COMPACTION" in trail[-1].upper():
-        status = "compaction_refused"
-    elif "SPEC VIOLATION" in trail[-1].upper():
-        status = "spec_violation"
-    elif "PLAYBOOK EDITED" in trail[-1]:
-        # U6: same offence class as a spec edit -- the worker rewrote the
-        # document that defines its own task -- so C3 gains no new status.
-        status = "spec_violation"
-    elif "TOUCH SCOPE VIOLATION" in trail[-1]:
-        status = "scope_violation"
-    elif "IDENTICAL to preflight" in trail[-1]:
-        status = "gate_suspect"
-    elif "FIXTURE PROVENANCE" in trail[-1]:
-        status = "fixture_unproven"
-    elif "no verify supplied" in trail[-1]:
-        status = "unverified"
-    elif no_progress:
-        # G3. A subtype of verify_failed, and last in the chain because every
-        # branch above is a MORE specific diagnosis -- a stalled run that also
-        # violated scope is a scope violation first.
-        status = "stuck_no_progress"
-    else:
-        status = "verify_failed"
-
-    # U4.2: a report run's status says what it IS, not what the gate said --
-    # a red gate here is the deliverable, and "verify_failed" would read as the
-    # worker having failed at a job it was told not to do. Only the gate-outcome
-    # statuses are overridden: a stopped, compacted or fixture-unproven run
-    # really did end for that reason, and calling it "reported" would hide it.
-    # Note: `reported` is neither ok nor stopped, so the LEDGER line counts it
-    # in the red bucket -- accepted, since a report IS an open problem.
-    if report and status in ("success", "success_but_preflight_passed",
-                             "verify_failed", "stuck_no_progress",
-                             "gate_suspect", "unverified"):
-        status = "reported"
-
-    # U3.2 (decision 4): the demotion happens HERE, not at render time. Chains,
-    # the run log and every server-side consumer read this status, and a
-    # receipt-only demotion left all of them believing a vacuous pass was a
-    # clean success. Under a declared "green" preflight (revision work) there is
-    # nothing to demote: the gate was expected to pass beforehand and said so.
-    if status == "success" and preflight and preflight_expect != "green":
-        status = "success_but_preflight_passed"
+    # The whole cascade lives in qd/core/status.py: a pure function of the
+    # trail and three flags, where ORDER IS PRECEDENCE and every branch is a
+    # more specific diagnosis than the one below it. It was an elif chain here,
+    # testable only by driving a full delegation, so its rules were asserted
+    # incidentally by tests about other things.
+    status = run_status(trail, no_progress=no_progress, report=report,
+                        preflight=preflight, preflight_expect=preflight_expect)
 
     # --- Tree facts (C3) ---
     # Captured from the tree the run ACTUALLY used, and BEFORE the worktree

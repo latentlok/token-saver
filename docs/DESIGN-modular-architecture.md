@@ -133,7 +133,7 @@ qd/
     plan.py       args + config  →  RunPlan  (frozen)
     scope.py      RunScope: container, session, call log  (lifecycle)
     facts.py      tree + run observations, computed once, read-only
-    pipeline.py   the fixed phase sequence
+    pipeline.py   the fixed phase sequence  (status.py extracted; rest pending)
     findings.py   Finding record + severity/priority
 
   adapters/       ← ALREADY EXISTS as gittree / invoke / worktrees / profiles
