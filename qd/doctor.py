@@ -363,12 +363,38 @@ def _stale_contract_pins(cwd):
     out = []
     try:
         from qd.core import contract
-        from qd.gittree import git, spec_files
+        from qd.gittree import git, spec_files, unquote_path
+        # For the receipt text only. `_one_line` is the formatting contract the
+        # guards were given in 6eae53a for the surface the DECODE below creates:
+        # before it a newline in a filename arrived as the two characters `\n`
+        # inside git's quotes and could not break a line; decoded, it is a real
+        # one, and `report()` renders each finding as a single indented block.
+        # Imported here rather than at module scope because doctor is a CLI a
+        # confused caller runs, and qd.verdict pulls in half the engine.
+        from qd.verdict import _one_line
     except Exception:
         return out
     try:
         rc, listing = git(cwd, "ls-files")
-        paths = listing.splitlines() if rc == 0 else []
+        # DECODED, the seam 23cb3f4 fixed at gittree's six sites and named this
+        # one as known-and-not-fixed. `ls-files` C-quotes (measured, git 2.53:
+        # tab, newline, `"`, `\`, control bytes under both core.quotePath
+        # settings; non-ASCII under the default true), so the raw line is
+        # `"tab\tchar_test.py"` INCLUDING the quotes -- which does not end in
+        # `.py`, so the extension filter below dropped it and the file was
+        # never inspected at all. Measured on this build with four stale-pinned
+        # files: 1 of 4 reported under quotePath=true, 2 of 4 under false. The
+        # check that exists to find gates graded against criteria that moved
+        # could not see three quarters of them.
+        #
+        # ONE direction here, not two: `ls-files` is called with NO pathspec
+        # and `rel` goes to `open()` and to receipt text, so nothing is fed
+        # back to git as a pattern and `literal_pathspec` has nothing to
+        # attach to. A `:(icase)`-named file is pinned in the spec for exactly
+        # that reason -- it is the case that would fail if a pathspec ever
+        # appeared here.
+        paths = [unquote_path(p) for p in listing.splitlines()] \
+            if rc == 0 else []
     except Exception:
         return out
 
@@ -382,11 +408,27 @@ def _stale_contract_pins(cwd):
             continue
         if not pinned:
             continue
+        # `pinned_path` needs no `_one_line`: `contract.parse_header` matches
+        # `(\S+)`, so it cannot contain a newline. Said out loud because it is
+        # the other repo-controlled value on these lines.
         full = os.path.join(cwd, pinned_path)
+        # DICTS, like every other project check. These used to be
+        # `("warn", text)` tuples, and `project_check` does `out +=` onto a
+        # list of dicts that `report()` and its own severity sort both index by
+        # NAME -- so the first time this check fired, which is the only time it
+        # does anything, doctor raised `TypeError: tuple indices must be
+        # integers` and took the entire "--- this project ---" section with it.
+        # It has never once produced a line a caller could read. Two ids rather
+        # than one because the two failures have different remedies, which the
+        # spec already said and nothing could act on.
         if not os.path.exists(full):
-            out.append(("warn", f"{rel} is pinned to {pinned_path}, which no "
-                                f"longer exists -- the gate is graded against "
-                                f"criteria nobody can read"))
+            out.append({
+                "id": "contract-pin-missing", "severity": "high",
+                "fixable": False,
+                "text": (f"{_one_line(rel)} is pinned to {pinned_path}, which "
+                         f"no longer exists -- the gate is graded against "
+                         f"criteria nobody can read"),
+            })
             continue
         try:
             with open(full) as f:
@@ -394,11 +436,15 @@ def _stale_contract_pins(cwd):
         except (OSError, UnicodeDecodeError):
             continue
         if now != pinned:
-            out.append(("warn",
-                        f"{rel} is pinned to {pinned_path} @ {pinned}, but it "
-                        f"is now @ {now} -- the contract changed after the gate "
-                        f"was written, so the test agrees with a version that "
-                        f"is gone. Re-run the step that wrote the gate."))
+            out.append({
+                "id": "contract-pin-stale", "severity": "high",
+                "fixable": False,
+                "text": (f"{_one_line(rel)} is pinned to {pinned_path} @ "
+                         f"{pinned}, but it is now @ {now} -- the contract "
+                         f"changed after the gate was written, so the test "
+                         f"agrees with a version that is gone. Re-run the step "
+                         f"that wrote the gate."),
+            })
     return out
 
 
