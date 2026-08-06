@@ -1,7 +1,7 @@
 # Handover — after the restructure round
 
-**State: clean. Branch `v0.6`, 71 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
-`bash ci/run-specs.sh` → exit 0, **1,187 tests** (was 1,013).
+**State: clean. Branch `v0.6`, 76 commits ahead of `origin/v0.6`, NOTHING PUSHED — deliberately.**
+`bash ci/run-specs.sh` → exit 0, **1,208 tests** (was 1,013).
 **All five patterns from DESIGN §7 are built.**
 **Steps 1–7 done; 8's user-visible half done. The one real gap is `core/pipeline.py` — see below.**
 Verified live against `snowy` several times, including two mutation-checked live runs.
@@ -179,23 +179,18 @@ caller that has never misbehaved.
    *Also nominally missing from §5: `surface/schema.py` and `surface/runlog.py`
    — but those are MOVES of `qd/schemas.py` and `qd/runlog.py`. Cosmetic; left
    undone on purpose rather than churned for a tick in a table.*
-2. **Finish step 3's tail — the SLOT mechanism.** *Adding a detector is one file
-   plus one line* is **still false**: the renderer names each detector's
-   placement, so a new detector needs a line there too, and one with the
-   registry entry but not the render line computes a finding nobody sees. A6's
-   spec pins the gap; closing it needs an explicit `SLOT` per detector so
-   placement is derived. **Placement is the size cap's tie-break, so this is a
-   behaviour change — golden-diff it.**
-3. **A4 / A2 (clause coverage + contract pinning).** The red gate's fourth check
-   is unbuilt because it needs the contract format. With it, "failed for a
-   legible reason" becomes exact rather than an exception-type heuristic.
-4. **G2 (whole-chain contradiction).** *Unblocked* — `runnable.of()` now
-   returns a chain whose links a gate can read before any of them runs.
-5. **G4 (brief-vs-diff advisory).** Unblocked. Must stay advisory — a witness
-   that can refuse breaks §I.
-6. **The free ones:** the two playbooks, a doctor check, the skill pass, server
+2. **A2 + A4 — contract pinning and clause coverage. THE remaining feature.**
+   The red gate's fourth check is unbuilt because it needs a contract format.
+   With it, *"failed for a legible reason"* stops being an exception-type
+   heuristic and becomes exact: the traceback must name the entry point the
+   contract declares missing. It also buys the receipt line the design wants
+   most — *your brief had 5 clauses, the gate covers 3, C3 is UNCOVERED* — and
+   §6.2 is explicit that `UNCOVERED` should be a **status change, not a
+   warning**. Design is written (DESIGN-v06-test-first §3.3, §6.2); this is the
+   largest single item left and deserves a session of its own.
+3. **The free ones:** the two playbooks, a doctor check, the skill pass, server
    lifecycle, G5 (cold-vs-warm retry, answerable from existing telemetry).
-7. **Release:** 0.6.0 is bumped and the changelog written. PR → CI →
+4. **Release:** 0.6.0 is bumped and the changelog written. PR → CI →
    squash-merge → tag is the user's, per [docs/RELEASING.md](docs/RELEASING.md).
 
 ---
