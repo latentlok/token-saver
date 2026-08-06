@@ -35,6 +35,7 @@ from qd.gittree import (
 )
 from qd.core.plan import RunPlan, setting
 from qd.core.attempt import Attempt
+from qd.core.prompt import tail as prompt_tail
 from qd.core.status import classify as run_status
 from qd.core.scope import RunScope
 from qd.features import detectors, gates, guards
@@ -1525,17 +1526,19 @@ def _delegate(args, t0_dir):
         return "retry"
 
     for attempt in range(1, max_iter + 1):
-        suffix = HANDOFF_SUFFIX if (attempt == 1 or send_suffix) else ""
-        if report and suffix:
-            # Asked for beside the handoff lines, not instead of them: the
-            # findings line is the deliverable, and it rides the same
-            # machine-read tail the parser already reads.
-            suffix += FINDINGS_SUFFIX
-        if result_schema is not None and suffix:
-            # Rides the same suffix: it is asked for once up front and again
-            # after a compaction, which are exactly the moments the worker has
-            # no other way to learn what shape its answer must take.
-            suffix += jsonschema.schema_suffix(result_schema)
+        # The machine-read tail, composed in one place (qd/core/prompt.py).
+        # WANTED on attempt 1 and after a compaction, and otherwise not: those
+        # are exactly the moments the worker has no other way to learn what
+        # shape its answer must take. The riders go with it or not at all --
+        # a machine-read instruction with nowhere to be read is worse than
+        # absent, because it spends tokens AND looks like the contract was
+        # stated.
+        suffix = prompt_tail(
+            HANDOFF_SUFFIX,
+            wanted=(attempt == 1 or send_suffix),
+            findings=FINDINGS_SUFFIX if report else None,
+            schema=(jsonschema.schema_suffix(result_schema)
+                    if result_schema is not None else None))
         send_suffix = False
         if progress is not None:
             # Records alone cannot tell a poller attempt 3 of 3 from an attempt

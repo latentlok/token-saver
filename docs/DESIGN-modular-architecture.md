@@ -277,7 +277,7 @@ improvements forget to go.
 | **Composite** | a *runnable* is a Run **or** a chain of Runs | `_batch_item`'s hand-written type check; makes "nesting is one level" a property rather than a refusal message |
 | **Strategy** | the gate | `verify` / self-gate / red gate are interchangeable; the parked red gate currently has nowhere to plug in |
 | **Registry + Pipeline** | features | features have no home and cannot be enumerated |
-| **Decorator** | the prompt | `task_suffix` + `HANDOFF` + `FINDINGS` + `CHALLENGE` + the chain preamble are string concatenation across three files |
+| ~~**Decorator**~~ **DONE** | the prompt (`qd/core/prompt.py`) | what was scattered was never the STRINGS — those live sensibly beside the parsers that read them back — but the CONDITIONS: five `if`s across three files, and nothing able to answer *what is this worker about to be told?* |
 
 ### Already present — named here so they are not deleted by accident
 
