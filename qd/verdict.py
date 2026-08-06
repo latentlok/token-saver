@@ -188,6 +188,11 @@ RESULT_VALID_LINE = "RESULT: valid (schema)"
 _TRANSCRIPT_MARKERS = ("\n--- final verify output ---",
                        "\n--- qwen result ---")
 
+# The same two, as a block PREFIX rather than a cut point: `_no_stamp` needs to
+# recognise the transcription blocks it must not rewrite, and they are exactly
+# the blocks these open. Derived, so the two lists cannot disagree.
+_TRANSCRIPT_HEADS = tuple(m.lstrip("\n") for m in _TRANSCRIPT_MARKERS)
+
 # The stamp and the block it vouches for, as `render` writes them: two adjacent
 # body lines.
 #
@@ -270,30 +275,65 @@ def _server_region(text):
     return text[:cut]
 
 
+def _no_stamp(part):
+    """One receipt block, with any line that IMPERSONATES the stamp defused.
+
+    THE INVARIANT `_server_region` RESTS ON, and the only form of it that does
+    not have to be re-proved every time somebody adds a field.
+
+    The bound above says the stamp can only be matched where the server does
+    the writing. Guarding the slots one at a time -- which is what the previous
+    two rounds did -- makes that true only for the slots somebody remembered,
+    and it is not a small set: 29 interpolation points sit inside the region,
+    and the sweep that reported "six" was reading its own payload's shape (a
+    fence with no trailing newline never closes when a format suffix like
+    `" @ {sha}"` follows the slot) rather than the code's. A probe that fails to
+    fire is indistinguishable from a defence that worked, and three rounds went
+    past on that mistake.
+
+    So the rule moved off the slots and onto the ONE thing every route has to
+    produce: a line equal to the stamp, somewhere the server did not put one.
+    The genuine stamp is a whole block -- `body.append(RESULT_VALID_LINE)` --
+    so it is identifiable by being the block, not by being inside one. Anything
+    else that contains that line is quoting, whatever slot it came through and
+    however it got its newline. Defusing it needs no list of fields, so a field
+    added tomorrow is covered by a rule written today.
+
+    Live routes this closes that no per-slot guard had reached:
+      · `advisory_gates[].name` -- in-schema, caller-supplied, and reachable
+        from a repo document (`advisory_gates` is in playbook.FRONT_KEYS and
+        front matter is json.loads'd, so "\\n" decodes to a real newline in a
+        file the worker can write). `_run_advisory` only `.strip()`s it.
+      · `reinjects` and `discards` -- counters nobody thinks of as text.
+
+    The two TRANSCRIPTION blocks are left alone. They are quotation by
+    definition and already outside the region, so rewriting them would edit the
+    worker's own words in the one place the receipt promises not to.
+    """
+    if part == RESULT_VALID_LINE:
+        return part                       # the server's own; the only one
+    if not isinstance(part, str) or RESULT_VALID_LINE not in part:
+        return part
+    if part.startswith(_TRANSCRIPT_HEADS):
+        return part
+    # Prefixed, not deleted: the caller still sees what was written, and the
+    # line can no longer be the start-of-line match the reader requires. A
+    # receipt that silently removes text is the failure mode this file argues
+    # against everywhere else.
+    return "\n".join(
+        f"(quoted) {ln}" if ln.rstrip() == RESULT_VALID_LINE else ln
+        for ln in part.split("\n"))
+
+
 def _one_line(value):
     """A value this receipt renders INLINE, with any second line removed.
 
-    THE INVARIANT `_server_region` RESTS ON, made a rule instead of a run of
-    luck. The bound above says the stamp can only be matched where the server
-    is the one writing; that is only true while no value the server interpolates
-    into a line can itself contain a newline, because a newline is how borrowed
-    text stops being borrowed and starts being a line of its own -- and a line of
-    its own can be `RESULT: valid (schema)` followed by a fence.
-
-    This was not hypothetical. `GRAPH: failed: <reason>` read `reason` verbatim
-    out of `.qwen-delegate/graph.json`, a file the worker can write (the
-    directory self-ignores, so no guard reverts it) and which is read AFTER the
-    worker runs. On a clean green there is no verify tail, so that line sits
-    inside the region, and a two-line `reason` carried `{"forged": true}` to the
-    next link over a run this server had certified nothing about.
-
-    Six ctx slots were reachable that way, and the other five were safe only by
-    invariants owned elsewhere -- `parse_handoff` being line-based, advisory
-    `head` being a first line, `bootstrap_notice` happening to be one f-string.
-    Every one of those is an accident from this bound's point of view, and an
-    accident is one refactor from being a hole. So the renderer enforces it
-    HERE, at each slot it fills, and the bound depends on no other module
-    keeping a promise it never made to this one.
+    A FORMATTING contract, not the security one -- that is `_no_stamp` above.
+    These slots are documented as single lines and are single lines by
+    construction; a paragraph arriving in one wrecks the receipt's shape
+    whether or not it is trying to forge anything. Kept because it is the
+    reason `GRAPH:` still reads as one status line, and because defence that
+    costs nothing and duplicates nothing is worth its four lines.
 
     Non-strings pass through untouched: `f"{None}"` must stay "None", or fixing
     a security bug would quietly rewrite receipts that were never at risk.
@@ -949,7 +989,11 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
         adv_lines = []
         for a in adv_red:
             head = _one_line((a.get("head") or "")).strip()
-            adv_lines.append(f"ADVISORY red: {a.get('name')}"
+            # `name` is caller-supplied and reaches here having been only
+            # `.strip()`ed, so it kept interior newlines -- guarded for the same
+            # single-line reason `head` is, one expression away and previously
+            # missed there.
+            adv_lines.append(f"ADVISORY red: {_one_line(a.get('name'))}"
                              + (f" — {head}" if head else ""))
         summary = f"ADVISORY: {len(advisory) - len(adv_red)}/{len(advisory)} green"
         skipped = ctx.get("advisory_skipped") or 0
@@ -1138,9 +1182,14 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     failed_detectors = list(ctx.get("detections_failed") or [])
 
     def _assembled():
-        parts = list(body)
+        # ONE choke point for the stamp invariant. Every block that is not the
+        # server's own stamp passes through _no_stamp on its way into the
+        # receipt, so no interpolation site anywhere above -- there are 29 --
+        # has to remember to guard itself, and none of them can reopen this by
+        # forgetting. See _no_stamp.
+        parts = [_no_stamp(p) for p in body]
         for blk in c2_blocks:
-            parts.append(blk.text)
+            parts.append(_no_stamp(blk.text))
         # A5: computed from the parts assembled SO FAR, so the figure describes
         # the receipt the caller would have had without it. Appended last for
         # the same reason.
