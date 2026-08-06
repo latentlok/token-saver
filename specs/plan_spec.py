@@ -168,10 +168,36 @@ class ThePlanRecord(unittest.TestCase):
             p.verify = "something else"
 
     def test_it_stays_small(self):
-        # A record that mirrors the whole config is a config parser with extra
-        # steps, and the next person to add a setting would add it here out of
-        # symmetry rather than need. This test is the tripwire for that.
-        self.assertEqual(len(RunPlan._fields), 5, RunPlan._fields)
+        """A record that mirrors the whole config is a config parser with extra
+        steps, and the next person would add to it out of symmetry rather than
+        need. This is the tripwire, and it has already fired once.
+
+        The bar for adding a field: **a FEATURE consumes it.** Not "the engine
+        resolves it" -- the engine resolves ~20 settings and they stay where
+        they are.
+
+        History, kept so the bar is visible rather than asserted:
+          5 -> 7  `fixture_provenance` and `fixture_segments`, when the fixture
+                  GUARD moved to features/guards/ and needed to know whether it
+                  was switched on and what marks a fixture. Both are answers to
+                  "what was asked for", and neither had another owner.
+
+        If this fires and the new field is not consumed by a feature, the answer
+        is to leave it in the engine, not to raise the number.
+        """
+        self.assertEqual(len(RunPlan._fields), 7, RunPlan._fields)
+
+    def test_the_fixture_settings_reached_the_plan(self):
+        p = RunPlan.build({"fixture_provenance": True}, {"fixture_globs": ["fx"]},
+                          {}, fixture_default=("fixtures",))
+        self.assertTrue(p.fixture_provenance)
+        self.assertEqual(p.fixture_segments, ["fx"])
+
+    def test_a_project_can_still_switch_path_detection_off(self):
+        # The falsy rule, carried into the plan: `[]` is an answer.
+        p = RunPlan.build({}, {"fixture_globs": []}, {},
+                          fixture_default=("fixtures",))
+        self.assertEqual(p.fixture_segments, [])
 
 
 if __name__ == "__main__":

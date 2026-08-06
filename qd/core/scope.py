@@ -79,6 +79,29 @@ class RunScope:
         # run OWNS -- the last field DetectorInputs was carrying on scope's
         # behalf. Set by mark_created() once the tree has been observed.
         self.created = []
+        self.pre_tracked = set()
+        self.hooked = False
+
+    def mark_attribution(self, pre_tracked, hooked):
+        """Who is answerable for a change in this tree.
+
+        `hooked` says a proxy logged the worker's writes, so an unattributed
+        change is somebody ELSE's -- a caller working the same tree. Reverting
+        those is how a caller's concurrent work got destroyed once, which is why
+        attribution is a property of the run rather than a per-guard argument.
+        """
+        self.pre_tracked = pre_tracked or set()
+        self.hooked = hooked
+
+    def unproven_fixtures(self, segments):
+        """Delivered fixtures carrying no traceable source (U3.3).
+
+        Asked of the scope because it is a question about the tree this run
+        owns, and the guard should not need to know how a tree is read.
+        """
+        from qd.engine import _fixture_files, _unproven_fixtures
+        return _unproven_fixtures(
+            self.work_cwd, _fixture_files(self.created, segments))
 
     def mark_created(self, created):
         """Record which files this run is answerable for. After the facts, by

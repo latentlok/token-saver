@@ -79,9 +79,11 @@ class RunPlan(NamedTuple):
     touch_scope: list    # paths the caller declared in scope
     trust: str           # "self" | "verified"
     preflight_expect: str  # "red" | "green" | "any"
+    fixture_provenance: bool   # U3.3 check on, or off
+    fixture_segments: tuple    # path segments that mark a fixture
 
     @classmethod
-    def build(cls, args, project, machine):
+    def build(cls, args, project, machine, fixture_default=()):
         """Resolve every layer once, in precedence order.
 
         A classmethod rather than a separate Builder class: the pattern's value
@@ -95,4 +97,8 @@ class RunPlan(NamedTuple):
             trust=setting("trust", args, project, machine, default="self"),
             preflight_expect=setting("preflight_expect", args, project, machine,
                                      default="any"),
+            fixture_provenance=bool(setting("fixture_provenance", args, project,
+                                            machine, default=False)),
+            fixture_segments=setting("fixture_globs", project, machine,
+                                     default=fixture_default),
         )

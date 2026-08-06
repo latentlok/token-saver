@@ -34,9 +34,10 @@ from qd.gittree import (
     _project_config, _global_config,
 )
 from qd.core.plan import RunPlan, setting
+from qd.core.attempt import Attempt
 from qd.core.status import classify as run_status
 from qd.core.scope import RunScope
-from qd.features import detectors, gates
+from qd.features import detectors, gates, guards
 from qd.bootstrap import (
     worker_rules_status, bootstrap_worker_rules,
     bootstrap_notice, bootstrap_failed_refusal,
@@ -1404,7 +1405,8 @@ def _delegate(args, t0_dir):
     # Step 6: WHAT WAS ASKED FOR, resolved once and frozen. Built here because
     # this is where every layer is in hand; read by the features below, which no
     # longer take loose arguments about the caller's intent.
-    plan = RunPlan.build(args, _project_config(cwd), _global_config())
+    plan = RunPlan.build(args, _project_config(cwd), _global_config(),
+                         fixture_default=_FIXTURE_SEGMENTS)
 
     # --- The gates (step 4) ---
     # ONE call, and deliberately outside the challenge branch above: it used to
@@ -1785,42 +1787,25 @@ def _delegate(args, t0_dir):
                     continue
                 break
 
-        # --- Fixture provenance (U3.3) ---
-        # Beside the other guards, BEFORE the no-verify break: a fixture with no
-        # traceable source is a defect whether or not a gate was supplied -- and
-        # the gate is the thing least able to catch it, since it was very likely
-        # written against those same bytes.
-        if fixture_provenance:
-            fixtures = _fixture_files(
-                _created(work_cwd, changed, pre_status, pre_tracked,
-                         ctx.get("writes"), hooked),
-                fixture_segments)
-            bad = _unproven_fixtures(work_cwd, fixtures)
-            ctx["fixtures_unproven"] = bad
-            if bad:
-                names = ", ".join(bad)
-                trail.append(
-                    f"attempt {attempt}: FIXTURE PROVENANCE -- {names} lack "
-                    f"{_PROVENANCE_HEADER} provenance"
-                )
-                if attempt < max_iter:
-                    # No compaction rider here (unlike the spec/scope prompts):
-                    # this instruction names every file and the exact line to
-                    # add, so it stands on its own without the task re-injected.
-                    prompt = (
-                        f"These fixture files carry no provenance: {names}. A "
-                        f"fixture nobody can trace is indistinguishable from an "
-                        f"invented one, and a gate written against invented "
-                        f"bytes passes forever. Add this line to each, within "
-                        f"the first 10 lines:\n\n"
-                        f"{_PROVENANCE_HEADER} <url or command> <date>\n\n"
-                        f"For a BINARY fixture, put that line first in a "
-                        f"sibling <path>.src file instead. Do not invent a "
-                        f"source: if you generated the data, say so and say "
-                        f"with what."
-                    )
-                    continue
-                break
+        # --- Guards: the things that fail an ATTEMPT (features/guards/) ---
+        # A guard detects, reverts if it must, and RETURNS a violation. The
+        # loop owns the control flow -- a guard cannot `continue` a loop it does
+        # not own, and that is what makes the retry-or-give-up rule exist once
+        # here instead of once per guard.
+        scope.mark_created(_created(work_cwd, changed, pre_status, pre_tracked,
+                                    ctx.get("writes"), hooked))
+        _v = guards.first(scope, plan,
+                          Attempt(n=attempt, of=max_iter, changed=changed,
+                                  writes=ctx.get("writes") or []))
+        if _v is not None:
+            if _v.kind == "fixture_provenance":
+                ctx["fixtures_unproven"] = scope.unproven_fixtures(
+                    plan.fixture_segments)
+            trail.append(_v.trail)
+            if _v.prompt and attempt < max_iter:
+                prompt = _v.prompt
+                continue
+            break
 
         # --- No verify: unverified success ---
         if not verify:
