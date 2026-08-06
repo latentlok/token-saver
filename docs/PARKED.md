@@ -26,9 +26,7 @@ thing and this list stays another.
 
 | Parked item | Blocked until | Then it lives in |
 |---|---|---|
-| **A2** contract pinning | steps 1–3 | facts + a detector + a receipt block |
 | **A3** tier map | step 6 | `core/plan.py` (it is config resolution) |
-| **A4** clause coverage as link 1's gate | ~~step 4~~ **unblocked** | `features/gates/` |
 | **A5** `SEAM CROSSED` | steps 1–3 | a detector reading existing facts |
 | **B** continuity grades | steps 5, 7 | `core/scope.py` + composite |
 | **D** `PAID:` receipt line | step 3 | a receipt block |
@@ -63,9 +61,9 @@ plumbing, batch-of-chains, handoff forwarding) all shipped.
 | # | Item | Design | Lands in |
 |---|---|---|---|
 | A1 | ~~**Red gate generator**~~ **DONE** — three of four checks (parses, ran-and-none-skipped, failed legibly) in `qd/features/gates/red.py`. The fourth, clause coverage, needs the contract format and stays as A4 | §6.1 | `features/gates/` |
-| A2 | **Contract pinning** — `spec_globs` cover, `CONTRACT: path @ digest`, digest header in the test file, cross-link compare | §3.3 | `contract/` feature |
+| A2 | ~~**Contract pinning**~~ **DONE** — `qd/core/contract.py`, the `CONTRACT:` receipt line (non-droppable), and `features/gates/contract.py` for the cross-link compare | §3.3 | done |
 | A3 | **Tier map** — `"tests": {unit, integration, e2e}`, declared never guessed; refuse-and-ask when a seam is crossed and nothing is declared | §2.2 | config + `tiers/` |
-| A4 | **Clause coverage as link 1's gate** — `UNCOVERED: C3` halts the chain, not an end-of-run note | §6.2 | `contract/` feature |
+| A4 | ~~**Clause coverage**~~ **DONE** — `features/guards/clauses.py`. A GUARD, so it fails the attempt and tells the worker which clause is missing, rather than demoting at the end | §6.2 | done |
 | A5 | **`SEAM CROSSED, UNIT-GATED ONLY`** — predicate on the new *symbol*, not the file it lives in | §7 | `seams/` feature |
 | A6 | **`*_qwen` naming rule** in generated `QWEN.md` + `_created()` compliance check | §2.5 | `provenance/` feature |
 | A7 | **`playbooks/write-gate.md`, `playbooks/implement.md`** | §4.2 | documents |

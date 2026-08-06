@@ -26,7 +26,7 @@ from qd.invoke import (
 from qd.gittree import (
     git, is_git_repo, file_sha,
     snapshot, violated_specs, revert_specs, untracked_files,
-    snapshot_contents, restore_paths,
+    snapshot_contents, restore_paths, spec_files,
     # committed_during_run / head_sha / new_public_symbols / numstat_map moved
     # to qd/core/facts.py, and uncalled_symbols / mocked_seams / never_executed
     # / dodge_markers to qd/features/detectors/ -- the engine neither computes
@@ -34,6 +34,7 @@ from qd.gittree import (
     _project_config, _global_config,
 )
 from qd.core.plan import RunPlan, setting
+from qd.core import contract as core_contract
 from qd.core.attempt import Attempt
 from qd.core.pipeline import ratchet_minimum
 from qd.core.prompt import tail as prompt_tail
@@ -634,7 +635,7 @@ BRIEF_KEYS = (
     "shell_feedback", "trust", "max_iterations", "timeout_sec",
     "verify_timeout_sec", "preflight_expect", "worktree", "executor",
     "report_dont_fix", "fixture_provenance", "advisory_gates", "challenge_brief",
-    "review_brief",
+    "review_brief", "contract",
     "challenge_warm",
     "result_schema", "on_compaction",
     # U6: a retry replays the same DOCUMENT, not a frozen copy of its text.
@@ -1429,7 +1430,10 @@ def _delegate(args, t0_dir):
     _decision = gates.run_all(gates.GATES, gates.GateRun(
         objection=objection,
         gate_output=preflight_out,
-        expect=preflight_expect))
+        expect=preflight_expect,
+        contract_path=plan.contract_path,
+        contract_tests=spec_files(work_cwd),
+        work_cwd=work_cwd))
     if not _decision.ok:
         return refuse(_decision.reason)
 
@@ -1835,6 +1839,17 @@ def _delegate(args, t0_dir):
                                     pre_tracked, ctx.get("writes"), hooked))
         ctx["detections"], ctx["detections_failed"] = detectors.run_all(
             ctx["tree_facts"], scope, plan)
+    if plan.contract_path:
+        # A2.2: pinned in the receipt. A reviewer weeks later must be able to
+        # tell whether the document they are reading is the one that ran.
+        try:
+            with open(os.path.join(work_cwd, plan.contract_path)) as _cf:
+                _doc = _cf.read()
+            ctx["contract"] = {"path": plan.contract_path,
+                               "digest": core_contract.digest(_doc),
+                               "clauses": core_contract.clauses(_doc)}
+        except OSError:
+            ctx["contract"] = None
     ctx["work_cwd"] = work_cwd
     # Extracted here rather than at render time so the one line a report run
     # exists to produce survives the receipt's result-text truncation.

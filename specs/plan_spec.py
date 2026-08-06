@@ -181,6 +181,11 @@ class ThePlanRecord(unittest.TestCase):
                   GUARD moved to features/guards/ and needed to know whether it
                   was switched on and what marks a fixture. Both are answers to
                   "what was asked for", and neither had another owner.
+          8 -> 9  `contract_path`, for A2/A4: the clause-coverage GUARD and the
+                  contract-pin GATE both need to know which document states the
+                  criteria. Its DIGEST and CLAUSES are derived, not stored --
+                  they are observations of a file, and a plan that cached them
+                  would go stale the moment the file moved.
           7 -> 8  `brief_path`, when the brief GUARD moved. The document that
                   briefed the run is the plainest possible answer to "what was
                   asked for"; its T0 DIGEST went to RunScope instead, because
@@ -189,7 +194,7 @@ class ThePlanRecord(unittest.TestCase):
         If this fires and the new field is not consumed by a feature, the answer
         is to leave it in the engine, not to raise the number.
         """
-        self.assertEqual(len(RunPlan._fields), 8, RunPlan._fields)
+        self.assertEqual(len(RunPlan._fields), 9, RunPlan._fields)
 
     def test_the_fixture_settings_reached_the_plan(self):
         p = RunPlan.build({"fixture_provenance": True}, {"fixture_globs": ["fx"]},

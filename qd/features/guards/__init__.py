@@ -29,12 +29,12 @@ directory rather than a flag on the other two.
 
 from qd.core.violation import Violation  # noqa: F401  (re-exported)
 
-from . import brief, fixtures, specs, touch_scope
+from . import brief, clauses, fixtures, specs, touch_scope
 
 # ORDER IS PRECEDENCE, as in core/status.py: the worker gets ONE correction,
 # and a scope violation is a more serious fact than a missing provenance
 # comment -- it is work that had to be undone.
-GUARDS = (specs, brief, touch_scope, fixtures)
+GUARDS = (specs, brief, touch_scope, clauses, fixtures)
 
 
 def first(scope, plan, attempt):

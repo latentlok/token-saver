@@ -25,23 +25,23 @@ the wrong list.
 
 from collections import namedtuple
 
-from . import challenge, red
+from . import challenge, contract, red
 
 _Decision = namedtuple("Decision", "ok reason")
 
 # Registration is the whole interface. A1's parked red gate is a file here plus
 # one line below; nothing in the engine changes to accept it.
-GATES = (challenge, red)
+GATES = (challenge, contract, red)
 
 # What a gate is asked ABOUT. Scaffolding, exactly like the detectors'
 # DetectorInputs: one closed field today, and it grows only until steps 5 and 6
 # give it a real owner (`core/scope.py` / `core/plan.py`). A gate must not be
 # handed a general-purpose bag -- that is `ctx` with a nicer name, which is the
 # thing this restructure exists to remove.
-GateRun = namedtuple("GateRun", "objection gate_output expect")
+GateRun = namedtuple("GateRun", "objection gate_output expect contract_path contract_tests work_cwd")
 # Defaults so a caller that predates a field still constructs. Every field is
 # still enumerated above -- this is not a bag that grows silently.
-GateRun.__new__.__defaults__ = (None, None, None)
+GateRun.__new__.__defaults__ = (None, None, None, None, None, None)
 
 
 def proceed():

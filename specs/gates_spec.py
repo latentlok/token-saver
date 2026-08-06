@@ -71,7 +71,7 @@ class TheRegistry(unittest.TestCase):
         # Grows when a gate is added, and is MEANT to: a gate that refuses runs
         # while being invisible to this list is a gate nobody can audit.
         self.assertEqual(sorted(g.NAME for g in gates.GATES),
-                         ["challenge", "red_gate"])
+                         ["challenge", "contract_pin", "red_gate"])
 
     def test_every_gate_answers_the_one_question(self):
         for g in gates.GATES:

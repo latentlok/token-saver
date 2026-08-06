@@ -32,12 +32,17 @@ unittest, collection error in pytest. The rule meant to catch broken tests
 would have rejected every correct greenfield artifact and accepted only the
 ones that were already half-built.
 
-**Where this is an approximation, said plainly.** With a contract, check 3 is
-exact: the error's traceback must name the entry point the contract declares
-missing. Without one, "missing symbol" is inferred from the exception type --
-ImportError, ModuleNotFoundError, NameError, AttributeError. That admits an
-error naming the WRONG missing symbol. A2 (contract pinning) closes the gap;
-until then this catches the broad class and says so rather than pretending.
+**Where this is an approximation, said plainly.** With a contract, check 3
+could be exact -- the traceback must name the entry point the contract declares
+missing. Without one, "missing symbol" is inferred from the exception type
+(ImportError, ModuleNotFoundError, NameError, AttributeError), which admits an
+error naming the WRONG missing symbol.
+
+A2 now exists (`qd/core/contract.py`), so the ingredient is here; what is still
+missing is the contract stating its ENTRY POINT as a symbol rather than as
+prose. Until a contract format declares that, this remains the broad class --
+recorded rather than quietly closed, because a check that claims exactness it
+does not have is worse than one that admits the gap.
 """
 
 from collections import namedtuple

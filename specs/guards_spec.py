@@ -73,7 +73,8 @@ class FakeScope:
 def plan(**over):
     base = dict(task="t", verify="v", touch_scope=None, trust="self",
                 preflight_expect="any", fixture_provenance=True,
-                fixture_segments=("fixtures",), brief_path=None)
+                fixture_segments=("fixtures",), brief_path=None,
+                contract_path=None)
     base.update(over)
     return RunPlan(**base)
 
@@ -86,7 +87,8 @@ class TheRegistry(unittest.TestCase):
     def test_every_guard_is_listed(self):
         self.assertEqual(sorted(g.KIND for g in guards.GUARDS),
                          ["fixture_provenance", "playbook_edited",
-                          "spec_violation", "touch_scope"])
+                          "spec_violation", "touch_scope",
+                          "uncovered_clauses"])
 
     def test_order_is_precedence(self):
         # As in core/status.py. The worker gets ONE correction, so the order is
@@ -97,7 +99,7 @@ class TheRegistry(unittest.TestCase):
         # then a missing provenance comment.
         self.assertEqual([g.KIND for g in guards.GUARDS],
                          ["spec_violation", "playbook_edited", "touch_scope",
-                          "fixture_provenance"])
+                          "uncovered_clauses", "fixture_provenance"])
 
     def test_a_clean_attempt_produces_no_violation(self):
         self.assertIsNone(guards.first(FakeScope(), plan(), attempt()))

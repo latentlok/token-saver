@@ -82,6 +82,7 @@ class RunPlan(NamedTuple):
     fixture_provenance: bool   # U3.3 check on, or off
     fixture_segments: tuple    # path segments that mark a fixture
     brief_path: str            # the document that briefed this run, or None
+    contract_path: str         # the criteria document, or None (A2/A4)
 
     @classmethod
     def build(cls, args, project, machine, fixture_default=(),
@@ -104,4 +105,5 @@ class RunPlan(NamedTuple):
             fixture_segments=setting("fixture_globs", project, machine,
                                      default=fixture_default),
             brief_path=brief_path,
+            contract_path=setting("contract", args, project, machine),
         )

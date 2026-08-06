@@ -819,6 +819,15 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     # U4.3 strays. The LINE lives with the detector (qd/features/detectors/);
     # what the renderer owns is WHERE it goes -- and its position here is
     # load-bearing, see qd/surface/receipt.py rule 1.
+    _con = ctx.get("contract")
+    if _con:
+        # A2.2. Non-droppable: a pin the size cap could shed is not a pin, and
+        # its absence would read as "no contract" rather than "did not fit".
+        c2_blocks.append(Block(
+            "contract",
+            f"CONTRACT: {_con['path']} @ {_con['digest']} "
+            f"({len(_con['clauses'])} clause(s))", False, -1))
+
     for _d in detectors.in_region("EARLY"):
         _emit(c2_blocks, _d, ctx)
 
