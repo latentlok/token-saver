@@ -38,7 +38,7 @@ elsewhere:
 | Item | Why it is free |
 |---|---|
 | ~~**A7** the two playbooks~~ | **DONE** — `playbooks/write-gate.md`, `playbooks/implement.md`, pinned by `specs/playbooks_spec.py` |
-| **A8** contract lifecycle check | a doctor check; doctor is not being restructured |
+| ~~**A8** contract lifecycle check~~ | **DONE** — `doctor._stale_contract_pins`. Finds gates pinned to a contract that has since moved or vanished: the third way a contract bites, and the only one with no run left to refuse it |
 | ~~**C** the skill pass~~ | **DONE** (the three content bugs). `specs/skill_spec.py` now pins the claims that cost tokens or capability when they drift |
 | ~~**D** server lifecycle (A0d)~~ | **DONE** — `qd/core/lifecycle.py`. Scope corrected during the build: it records and REPORTS, it does not kill. See below |
 | **E** the PENDING carryovers | adapter-level (streaming, `usage` fallback, live probes) |
@@ -65,7 +65,7 @@ plumbing, batch-of-chains, handoff forwarding) all shipped.
 | A5 | ~~**`SEAM CROSSED, UNIT-GATED ONLY`**~~ **DONE** — `features/detectors/seam_crossed.py`. Predicate on the new SYMBOL, and `mocked_seams` became a FACT because a second reader appeared (§4's own prescription) | §7 | done |
 | A6 | **`*_qwen` naming rule** in generated `QWEN.md` + `_created()` compliance check | §2.5 | `provenance/` feature |
 | A7 | **`playbooks/write-gate.md`, `playbooks/implement.md`** | §4.2 | documents |
-| A8 | **Contract lifecycle** — doctor check for contracts naming symbols that no longer exist | §11 item 8 | doctor |
+| A8 | ~~**Contract lifecycle**~~ **DONE** — scoped to stale PINS rather than symbol references: a pin is mechanical and exact, where 'symbols named in prose' is a guess, and a doctor check that guesses gets switched off | §11 item 8 | done |
 
 **Residual risk, unchanged:** both links read the same brief. `challenge_brief`
 now covers the worst of it (§13), but a contract that is wrong *and*

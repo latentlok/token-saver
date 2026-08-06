@@ -343,6 +343,65 @@ def main(argv=None):
 # the machine, and they exist because every one of them was a silent trap that
 # cost real time in the field. All are static: nothing runs, nothing is guessed.
 
+def _stale_contract_pins(cwd):
+    """A8: test files pinned to a contract that has since moved or vanished.
+
+    Link 1 writes `# contract: <path> @ <digest>` into the gate it commits, and
+    a later link REFUSES if the digest no longer matches -- that is the
+    cross-link protection (A2.3). This is the same question asked LATER, and it
+    is the third way the design says a contract bites: *edited between the run
+    and review, so the receipt you audit no longer describes the criteria that
+    ran.*
+
+    A gate refuses at the moment it matters. A doctor check finds the ones that
+    already drifted and nobody re-ran -- a test still passing against criteria
+    that changed underneath it, which reads exactly like a test that agrees with
+    the contract.
+
+    Never raises: doctor is what a confused caller reaches for.
+    """
+    out = []
+    try:
+        from qd.core import contract
+        from qd.gittree import git, spec_files
+    except Exception:
+        return out
+    try:
+        rc, listing = git(cwd, "ls-files")
+        paths = listing.splitlines() if rc == 0 else []
+    except Exception:
+        return out
+
+    for rel in paths:
+        if not rel.endswith((".py", ".js", ".ts", ".rb", ".go")):
+            continue
+        try:
+            with open(os.path.join(cwd, rel)) as f:
+                pinned_path, pinned = contract.parse_header(f.read())
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not pinned:
+            continue
+        full = os.path.join(cwd, pinned_path)
+        if not os.path.exists(full):
+            out.append(("warn", f"{rel} is pinned to {pinned_path}, which no "
+                                f"longer exists -- the gate is graded against "
+                                f"criteria nobody can read"))
+            continue
+        try:
+            with open(full) as f:
+                now = contract.digest(f.read())
+        except (OSError, UnicodeDecodeError):
+            continue
+        if now != pinned:
+            out.append(("warn",
+                        f"{rel} is pinned to {pinned_path} @ {pinned}, but it "
+                        f"is now @ {now} -- the contract changed after the gate "
+                        f"was written, so the test agrees with a version that "
+                        f"is gone. Re-run the step that wrote the gate."))
+    return out
+
+
 def project_check(cwd):
     """Findings about this project's delegation config. Same shape as check().
 
@@ -359,6 +418,8 @@ def project_check(cwd):
         cfg = gittree._project_config(cwd)
     except Exception:
         cfg = {}
+
+    out += _stale_contract_pins(cwd)
 
     # A9: the gate the server synthesises for trust="self" comes from
     # `test_command`. The architect's own gates live in specs/ by the plugin's
