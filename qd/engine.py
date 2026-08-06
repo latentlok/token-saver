@@ -1112,15 +1112,33 @@ def _delegate(args, t0_dir):
     # used to be guarded by a GREP for the `if` line that stood here and a
     # widening which kept that line left the whole suite green.
     #
-    # The mode is deliberately NOT re-tested here as a short-circuit: half a
-    # permission rule sitting at the call site is how the other half stopped
-    # being read. `graph.read_state` is a pure read (absent or unparseable ->
-    # None) whose only trace is the self-ignoring `.qwen-delegate/` that
-    # `git status` never reports and `write_runlog` creates on every run
-    # regardless, so asking it under every mode costs a stat and changes
-    # nothing a caller, a guard or a gate can observe.
+    # The mode is tested HERE as well, and the duplication is deliberate:
+    # `graph.read_state` is NOT a pure read and must not be reached under a mode
+    # that cannot use the answer. It calls `sidecar_path` -> `runlog_dir`
+    # (qd/runlog.py:43), which CREATES `.qwen-delegate/` and WRITES a .gitignore
+    # into it -- and that call sits OUTSIDE `read_state`'s own try
+    # (qd/graph.py:28), so on an unwritable tree a PermissionError escapes into
+    # this call site, which has no guard. Measured: read_state() on a chmod
+    # 0500 tree raises PermissionError rather than returning None. Under
+    # `auto-edit` -- the DEFAULT mode -- that path never ran before, and every
+    # other route to `runlog_dir` in a run is either guarded (`if burn` below)
+    # or contractually non-raising (`write_runlog`).
+    #
+    # The RULE still belongs to graph_shell_grant, which re-tests the mode; what
+    # stays here is only the cheap guard in front of the expensive, side-
+    # effecting half. The cost is that the widening mutation can no longer reach
+    # QGATE_EXTRA, so specs/pipeline_wiring_spec.py stops killing it -- it still
+    # dies in specs/pipeline_spec.py and specs/graph_allow_spec.py, which assert
+    # on the decision itself rather than on the source text.
+    #
+    # TRUTHINESS, not `is not None`: the line this replaced was
+    # `if approval_mode == "scoped" and graph.read_state(cwd):`, so a sidecar
+    # that parses to something falsy -- `{}` is the reachable one -- granted
+    # nothing, and this is a migration.
     shell_allow = graph_shell_grant(
-        approval_mode, graph.read_state(cwd) is not None, shell_allow)
+        approval_mode,
+        approval_mode == "scoped" and bool(graph.read_state(cwd)),
+        shell_allow)
     # Default: project config, else 3; clamped 1..10 -- the schema has promised
     # both since v1, and the engine port had silently dropped them.
     max_iter = (args.get("max_iterations")

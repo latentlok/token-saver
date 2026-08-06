@@ -137,6 +137,13 @@ def graph_shell_grant(approval_mode, has_graph, shell_allow):
     worth: a widening that kept the grepped line verbatim and added a branch
     granting this pattern under `auto-edit` and `yolo` left the entire suite
     green. The gate could not see the thing it named.
+
+    **The engine tests `scoped` at its call site TOO, and that is not a leftover
+    to tidy away.** Asking whether a graph exists is not free and not safe:
+    `graph.read_state` reaches `runlog_dir`, which creates `.qwen-delegate/` and
+    can raise `PermissionError` from outside its own try. So the cheap half of
+    the condition guards the expensive half there, while the rule -- all three
+    conditions, and which pattern -- stays here where it can be asserted on.
     """
     if approval_mode != "scoped" or not has_graph:
         return shell_allow
