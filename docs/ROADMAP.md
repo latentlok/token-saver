@@ -223,9 +223,15 @@ marker (DESIGN §2.5) as the other half of grading worker tests.
 
 ### 4.4 Carried from PENDING (unchanged, listed so they are not lost)
 
-Streaming loses `tools`/`lines_added`; the `usage` fallback has never run live; live
-probes P1–P8; `detect_test_cmd` cannot place this repo (the tier map addresses the
-symptom, not the detectors).
+Streaming loses `tools`/`lines_added`; ~~the `usage` fallback has never run
+live~~ **ran live 2026-07-31** (`docs/archive/handoff-v05/VLLM-ROUND.md` §A4) —
+what remains is narrower: `turn_tokens()`'s session-vs-run correction against
+a REAL resumed `-o stream-json` stream, proven so far only hermetically
+(`docs/FINDINGS.md:29-50`); ~~live probes P1–P8~~ **DONE** 2026-07-29 — P6
+(designed, not built) and P7's fixture-provenance follow-up (pinpointed, not
+built) still open; ~~`detect_test_cmd` cannot place this repo~~ **FIXED**
+(`9cbd360`) — the crash was general (every non-package `tests/` layout), not
+specific to this repo. Full evidence for each: [PARKED.md](PARKED.md) §E.
 
 ---
 

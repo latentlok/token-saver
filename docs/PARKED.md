@@ -76,7 +76,9 @@ uncontradicted by the code still produces a green gate defending it.
 
 `none` and `handoff` exist via `carry` / the chain preamble.
 `structured` (forward a validated `result_schema` payload) and `session` (share
-the executor conversation) do not. Design: DESIGN §10.3.
+the executor conversation) do not. Design: [DESIGN-v06-test-first.md](DESIGN-v06-test-first.md)
+§10.3 — not `DESIGN-modular-architecture.md`, whose §10 ("What this does NOT
+fix") has no subsections.
 
 The table's warning stands and should be built in, not just written down:
 `session` is the **cheapest** grade for us and the **most dangerous** — cost and
@@ -131,9 +133,26 @@ executor boundary.
 
 ## E. Carried from PENDING.md
 
-Streaming loses `tools` / `lines_added` · the `usage` fallback has never run
-live · live probes P1–P8 · `detect_test_cmd` still cannot place this repo (the
-tier map addresses the symptom, not the detectors).
+Streaming loses `tools` / `lines_added` · ~~the `usage` fallback has never run
+live~~ **ran live 2026-07-31** — `docs/archive/handoff-v05/VLLM-ROUND.md` §A4:
+tokens landed via the fallback, 50,025 in / 175 out across 2 calls, sane. What
+is still unproven live is narrower: `turn_tokens()`'s session-vs-run
+correction (the G5 fix, `docs/FINDINGS.md`) against a REAL resumed
+`-o stream-json` stream — proven today only hermetically, from fixtures built
+off a raw HTTP reverse proxy (`docs/FINDINGS.md:29-50`) · ~~live probes
+P1–P8~~ **DONE**, all eight run and recorded 2026-07-29
+(`docs/archive/handoff-v05/PROBES-P1-P8.md`; `RESUME.md`: "Task 3 (live
+probes) — DONE. All P1–P8 recorded."). What genuinely remains: **P6** (worker
+delete-command phrasing), DESIGNED and NOT BUILT (`docs/PENDING.md:129-132`);
+**P7**'s fixture-provenance follow-up — honor the sidecar for text, not only
+binary — is a pinpointed fix, recorded but not built (`RESUME.md`,
+"Open items carried forward") · ~~`detect_test_cmd` still cannot place this
+repo~~ **FIXED** (`9cbd360`, `qd/bootstrap.py`). Understated: the crash
+(`ImportError: Start directory is not importable`) was not this-repo-specific
+— `-t .` requires an importable start directory and crashed identically on
+the ordinary `tests/` + `test_*.py` layout too. Now `-t .` is kept only where
+the start dir really is a package, and `-p "*.py"` replaces unittest's
+default so the fallback actually collects a `*_spec.py` suite.
 
 ---
 
