@@ -250,12 +250,24 @@ class Receipt(unittest.TestCase):
 class WarmHandoff(Decision):
     """The build MAY resume the challenge's session (`challenge_warm`, off).
 
-    The builder would inherit the reading the challenge just did. NOT a saving --
-    measured live at +50% input tokens and +16% wall against a cold build,
-    because a resumed session re-sends its whole history on every turn. The
-    design predicted the opposite ("one prefill instead of two"); the numbers
-    are in _challenge_brief's docstring so the wrong reasoning cannot be
-    re-derived from the code.
+    The builder inherits the reading the challenge just did, and **warm is free**
+    -- re-measured on the wire at cold 97,049 vs warm 98,954 input tokens, with
+    wall-clock a wash.
+
+    **This class previously said the opposite**, and the correction is worth
+    keeping visible. It cited "+50% input tokens and +16% wall", which came from
+    `result.usage` -- a SESSION counter that a resumed process starts at the
+    previous run's total. Our own `parse_stats` misread it as this run's cost.
+    A number produced by the thing under test is not a measurement; the figures
+    above came from a proxy on the wire.
+
+    **Cold remains the default, on the argument that survived.** It is not cost:
+    the challenge prompt ends with *"Do NOT build anything yet"*, and a warm
+    build inherits that instruction in its history. Something has to retract it,
+    and a retraction the model composes for itself is not a retraction -- which
+    is why `CHALLENGE_CLEARED` exists and is written deterministically. Cold has
+    nothing to retract. Warm is a legitimate, and now genuinely cheap, opt-in
+    for a caller who wants the builder to start having already read the code.
     """
 
     def test_the_session_comes_back_for_the_build_to_resume(self):
@@ -278,9 +290,11 @@ class WarmHandoff(Decision):
         self.assertTrue(engine.CHALLENGE_CLEARED.startswith("---"))
         self.assertTrue(engine.CHALLENGE_CLEARED.endswith("\n\n"))
 
-    def test_cold_is_the_default_because_warm_measured_worse(self):
-        # Not taste: warm cost +50% input and +16% wall on a live A/B, because
-        # a resumed session re-sends its history every turn.
+    def test_cold_is_the_default_and_opting_in_is_explicit(self):
+        # The DEFAULT is what this pins, not the reason for it -- and the reason
+        # changed underneath it once the cost claim was refuted. Cold stands
+        # because a warm build inherits "Do NOT build anything yet" and needs a
+        # deterministic retraction; warm is a cheap, legitimate opt-in.
         w = engine._warm_challenge
         self.assertFalse(w({}, {}))                         # nobody says -> COLD
         self.assertTrue(w({"challenge_warm": True}, {}))    # caller opts in
