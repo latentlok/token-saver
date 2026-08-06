@@ -625,14 +625,18 @@ def _batch_item(args):
     deeply the caller happened to nest.
     """
     from qd import engine
-    if not isinstance(args, dict):
-        return engine.run(args)
-    if args.get("batch"):
-        return ("STATUS: error\na batch item may not contain `batch` -- "
-                "nesting is one level. Flatten the items, or use `chain` "
-                "inside the item for an ordered pipeline. Nothing was run.")
-    if args.get("chain"):
-        return run_chain(_inherit(args, args["chain"]), engine.run)
+    from qd.core import runnable
+    # Step 7: the SHAPE is decided by qd/core/runnable.py, which refuses nesting
+    # at construction rather than by handing back an error string. A dispatcher
+    # that returns a receipt for a structural mistake has made the caller's
+    # shape into control flow. Execution stays here: run_chain owns the shared
+    # worktree, the between-link commits and the handoff forwarding.
+    try:
+        item = runnable.of(args)
+    except runnable.NestingRefused as e:
+        return f"STATUS: error\n{e}"
+    if item.is_chain:
+        return run_chain(_inherit(args, list(item.links)), engine.run)
     return engine.run(args)
 
 
