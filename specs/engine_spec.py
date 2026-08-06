@@ -658,6 +658,93 @@ class Prefilter(Fixture):
         self.assertEqual(r["status"], "success")
         self.assertEqual(r["ctx"]["notes"], "")
 
+    # The prefilter's arguments are FILENAMES THE WORKER CHOSE. Creating files
+    # is the whole job we hire the worker for, so this is not a hostile-config
+    # story like `test_dir` (bootstrap_spec, a70c83a) -- it needs nothing but a
+    # filename, on the default path, and it runs on the SERVER's side of the
+    # boundary with the caller's own environment. Worker-to-server execution.
+    #
+    # Reproduced 2026-08-06 against the pre-fix build, driving this same loop:
+    #
+    #   worker writes  x$(touch${IFS}PWNED)_qwen.py
+    #     -> ./venv/bin/pytest -q -o "..." x$(touch${IFS}PWNED)_qwen.py
+    #     -> PWNED created in the repo; pytest saw the argument `x_qwen.py`
+    #
+    # Two mechanics decide which payload shapes bite, and both were measured
+    # rather than assumed (git 2.53):
+    #
+    #   * `git status --porcelain` C-QUOTES a path only when it holds a space
+    #     (or a quote/backslash/control/non-ASCII byte). `;`, `$`, backtick,
+    #     `|`, `&` come back BARE, so they land in the command unprotected.
+    #   * a path that DOES get C-quoted arrives wrapped in real double quotes,
+    #     which neuters `;` -- but `$(...)` and backticks still expand inside
+    #     double quotes, so quoting-by-git is not a defence, only a filter on
+    #     which metacharacter works.
+    #
+    # Hence the payloads below are space-free: it keeps them bare through
+    # porcelain and makes each sub-case bite for its own reason rather than
+    # riding on git's incidental behaviour. `${IFS}` is the space substitute
+    # (a literal space would change what porcelain returns; a `/` cannot appear
+    # in a filename at all, which is why the marker is repo-relative).
+    def test_a_hostile_filename_cannot_execute_anything(self):
+        self.enable_prefilter()
+        out = os.path.join(self.cwd, "out.py")
+        for name, marker in (
+                # `;` chaining, the plain case porcelain hands over bare.
+                ("a;touch${IFS}PWNED1;b_qwen.py", "PWNED1"),
+                # command substitution -- the shape that ALSO survives being
+                # C-quoted, so it is the one that works on any filename.
+                ("x$(touch${IFS}PWNED2)_qwen.py", "PWNED2"),
+                ("x`touch${IFS}PWNED3`_qwen.py", "PWNED3")):
+            with self.subTest(name=name):
+                # Each sub-case starts with out.py gone so the pre-flight is red
+                # again. A green pre-flight against a leftover out.py ends the
+                # run as gate_suspect before the prefilter is ever reached --
+                # the test would then pass having exercised nothing.
+                if os.path.exists(out):
+                    os.remove(out)
+                self.steps([{"write": {"out.py": "MARKER\n",
+                                       name: "def test_ok(): pass\n"}}])
+                r = self.delegate()
+                self.assertEqual(r["status"], "success")
+                # The prefilter must still RUN and must still be HANDED the
+                # file. A fix that quotes the payload away by dropping odd
+                # filenames would pass the marker assertion while handing the
+                # worker a way to hide a test file from its own prefilter.
+                self.assertTrue(os.path.exists(self.plog),
+                                "the prefilter did not run at all")
+                with open(self.plog) as f:
+                    logged = f.read()
+                # Marker first: it is the security fact, and asserting it ahead
+                # of the delivery check is what makes the observed red on a
+                # vulnerable build say "it executed" rather than "the argument
+                # arrived mangled".
+                self.assertFalse(
+                    os.path.exists(os.path.join(self.cwd, marker)),
+                    f"a file named {name!r} executed a command through the C8 "
+                    f"prefilter (qd/engine.py); prefilter argv was:\n{logged}")
+                self.assertIn(name, logged,
+                              f"{name!r} never reached the prefilter as an "
+                              f"argument:\n{logged}")
+
+    def test_quoting_left_an_ordinary_filename_byte_identical(self):
+        # The fix quotes MINIMALLY (shlex.quote), so an ordinary name reaches
+        # the test command as the same argument it always did. Asserted at the
+        # ARGV level -- the stub echoes "$@" -- because that is the contract the
+        # tool actually sees, and because unlike bootstrap.detect_test_cmd the
+        # engine never returns the command string for a spec to inspect.
+        # Without this, "quote it harder" (a blanket '"{p}"', or dropping the
+        # argument entirely) reads as a fix while changing what pytest is told
+        # to collect.
+        self.enable_prefilter()
+        self.steps([{"write": {"out.py": "MARKER\n", "calc_qwen.py": "x\n"}}])
+        self.delegate()
+        with open(self.plog) as f:
+            logged = f.read().strip()
+        self.assertTrue(logged.endswith(" calc_qwen.py"),
+                        f"prefilter argv changed shape for an ordinary "
+                        f"filename: {logged!r}")
+
 
 class Worktree(Fixture):
     """M4 seam: worktree='auto' runs the whole loop in an isolated container.

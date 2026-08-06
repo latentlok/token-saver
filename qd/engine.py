@@ -10,6 +10,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -1942,9 +1943,38 @@ def _delegate(args, t0_dir):
                 # timeout, so the unrecorded case was the expensive one: a full
                 # minute of a run's wall-clock belonging to nobody.
                 _t0_pf = time.monotonic()
+                # Each path quoted SEPARATELY, because every one of them is a
+                # filename the WORKER chose and this line runs with shell=True.
+                # That made it worker-to-server arbitrary command execution on
+                # the default path -- not the hostile-config story `test_dir`
+                # was (qd/bootstrap.py, a70c83a), which needed the attacker to
+                # write a config file first. Creating files IS the job we hire
+                # the worker for. Reproduced 2026-08-06 against this loop:
+                #
+                #   worker writes  x$(touch${IFS}PWNED)_qwen.py
+                #     -> ./venv/bin/pytest -q -o "..." x$(touch${IFS}PWNED)_qwen.py
+                #     -> PWNED created; pytest was handed the argument `x_qwen.py`
+                #
+                # `git status --porcelain` is not a defence and was measured,
+                # not assumed (git 2.53): it C-quotes a path only when it holds
+                # a space (or quote/backslash/control/non-ASCII), so `;`, `$`,
+                # backtick, `|` and `&` arrive BARE -- and even a path it does
+                # quote lands inside real double quotes, where `$(...)` and
+                # backticks still expand. Both halves are exploitable.
+                #
+                # shlex.quote and not a blanket f'"{p}"': it adds quotes only
+                # where the value needs them, so ordinary `calc_qwen.py` reaches
+                # pytest as the identical argument it always did -- and a
+                # double-quote wrapper would not even be a fix here, since
+                # command substitution survives it.
+                #
+                # `tc` is deliberately NOT quoted: it is a whole command line
+                # with its own flags (`venv/bin/pytest -q -o "..."`), the
+                # project declaring how to run its own tests, which is the same
+                # by-design verdict a70c83a reached for `test_command`.
                 try:
                     pv = subprocess.run(
-                        f"{tc} {' '.join(qwen_files)}",
+                        f"{tc} {' '.join(shlex.quote(p) for p in qwen_files)}",
                         cwd=work_cwd, shell=True,
                         capture_output=True, text=True, timeout=60,
                         env=os.environ, stdin=subprocess.DEVNULL,
