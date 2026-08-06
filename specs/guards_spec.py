@@ -38,6 +38,7 @@ from qd.core.attempt import Attempt  # noqa: E402
 from qd.core.plan import RunPlan  # noqa: E402
 from qd.core.violation import Violation  # noqa: E402
 from qd.features import guards  # noqa: E402
+from qd.features.guards import specs as spec_guard  # noqa: E402
 
 
 class FakeScope:
@@ -47,11 +48,19 @@ class FakeScope:
         self.hooked = hooked
         self.pre_sha = "T0SHA"
         self.scope_unattributed = []
+        self.spec_unattributed = []
+        self.work_cwd = "/repo"
+        self.t0_bytes = None
         self.unrestorable = []
         self.restored = []
 
     def unproven_fixtures(self, segments):
         return list(self._unproven)
+
+    def note_spec_unattributed(self, paths):
+        fresh = [p for p in paths if p not in self.spec_unattributed]
+        self.spec_unattributed.extend(fresh)
+        return fresh
 
     def note_scope_unattributed(self, paths):
         self.scope_unattributed.extend(paths)
@@ -64,7 +73,7 @@ class FakeScope:
 def plan(**over):
     base = dict(task="t", verify="v", touch_scope=None, trust="self",
                 preflight_expect="any", fixture_provenance=True,
-                fixture_segments=("fixtures",))
+                fixture_segments=("fixtures",), brief_path=None)
     base.update(over)
     return RunPlan(**base)
 
@@ -76,14 +85,19 @@ def attempt(n=1, of=3):
 class TheRegistry(unittest.TestCase):
     def test_every_guard_is_listed(self):
         self.assertEqual(sorted(g.KIND for g in guards.GUARDS),
-                         ["fixture_provenance", "touch_scope"])
+                         ["fixture_provenance", "playbook_edited",
+                          "spec_violation", "touch_scope"])
 
     def test_order_is_precedence(self):
         # As in core/status.py. The worker gets ONE correction, so the order is
         # the rule: a scope violation is work that had to be UNDONE, which
         # outranks a missing provenance comment.
+        # Precedence, most serious first: rewriting the thing that grades you,
+        # rewriting the thing that briefed you, work that had to be undone,
+        # then a missing provenance comment.
         self.assertEqual([g.KIND for g in guards.GUARDS],
-                         ["touch_scope", "fixture_provenance"])
+                         ["spec_violation", "playbook_edited", "touch_scope",
+                          "fixture_provenance"])
 
     def test_a_clean_attempt_produces_no_violation(self):
         self.assertIsNone(guards.first(FakeScope(), plan(), attempt()))
@@ -245,6 +259,81 @@ class TouchScope(unittest.TestCase):
         v = guards.first(FakeScope(["a.json"]), plan(touch_scope=None),
                          self.att([]))
         self.assertFalse(v.rider)
+
+
+class SpecGuard(unittest.TestCase):
+    """The most important guard in the system.
+
+    A gate written by the thing being graded is not a gate. PRINCIPLES §I: *if
+    the builder also writes the building inspection, a misunderstanding lands
+    identically in the wall and in the checklist. They agree perfectly. They are
+    both wrong.*
+    """
+
+    def setUp(self):
+        self.reverted = []
+        self._vs, self._rs = spec_guard.violated_specs, spec_guard.revert_specs
+        spec_guard.revert_specs = lambda cwd, paths, base, t0: \
+            self.reverted.append((tuple(paths), base))
+        self.addCleanup(setattr, spec_guard, "violated_specs", self._vs)
+        self.addCleanup(setattr, spec_guard, "revert_specs", self._rs)
+
+    def violated(self, *paths):
+        spec_guard.violated_specs = lambda cwd, base: list(paths)
+
+    def att(self, writes=()):
+        return Attempt(n=1, of=3, changed=[], writes=list(writes))
+
+    def test_a_worker_edit_is_reverted_and_fails_the_attempt(self):
+        self.violated("guard_spec.py")
+        v = guards.first(FakeScope(), plan(), self.att(["guard_spec.py"]))
+        self.assertEqual(v.kind, "spec_violation")
+        self.assertIn("SPEC VIOLATION", v.trail)
+        self.assertEqual(self.reverted[0][0], ("guard_spec.py",))
+
+    def test_it_reverts_from_T0_not_from_HEAD(self):
+        # The hole a mutation sweep found. If the worker COMMITTED its edit,
+        # HEAD now holds the WEAKENED spec, so restoring from HEAD would
+        # faithfully restore the sabotage -- the guard would run, report itself
+        # as having reverted, and hand back a spec the worker wrote.
+        self.violated("guard_spec.py")
+        sc = FakeScope()
+        guards.first(sc, plan(), self.att(["guard_spec.py"]))
+        self.assertEqual(self.reverted[0][1], sc.pre_sha)
+
+    def test_an_unattributed_spec_change_is_reported_never_reverted(self):
+        # C10. Under a proxy that logs the worker's writes, a protected file
+        # that moved with NO logged write is the caller's. Reverting it is how
+        # a caller's concurrent work got destroyed.
+        self.violated("guard_spec.py")
+        sc = FakeScope(hooked=True)
+        v = guards.first(sc, plan(), self.att(writes=[]))
+        self.assertEqual(self.reverted, [], "the caller's own edit was reverted")
+        self.assertEqual(sc.spec_unattributed, ["guard_spec.py"])
+        self.assertIsNone(v.trail, "an unattributed change failed the attempt")
+        self.assertIn("NOT reverted", v.notes[0])
+
+    def test_it_says_so_only_once_across_attempts(self):
+        # A trail repeating the same unattributed file every attempt is noise,
+        # and noise is how a real line stops being read.
+        self.violated("guard_spec.py")
+        sc = FakeScope(hooked=True)
+        guards.first(sc, plan(), self.att())
+        again = guards.first(sc, plan(), self.att())
+        self.assertIsNone(again)
+
+    def test_the_workers_own_edit_still_counts_when_hooked(self):
+        # Attribution must not become a blanket excuse.
+        self.violated("guard_spec.py")
+        v = guards.first(FakeScope(hooked=True), plan(),
+                         self.att(writes=["guard_spec.py"]))
+        self.assertIn("SPEC VIOLATION", v.trail)
+
+    def test_the_correction_forbids_editing_rather_than_explaining_it(self):
+        self.violated("guard_spec.py")
+        v = guards.first(FakeScope(), plan(), self.att(["guard_spec.py"]))
+        self.assertIn("Never modify a protected spec", v.prompt)
+        self.assertIn("stop and say so", v.prompt)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,10 @@ it.
             core/status.py later classifies
     prompt  the correction sent to the worker on its next attempt, or None if
             the violation is terminal and re-asking is pointless
+    notes   trail lines that are RECORDED but do not fail the attempt. The
+            spec guard needs this: a protected file that moved with no logged
+            worker write is somebody else's edit, which the receipt must say
+            out loud and must NOT punish the worker for.
     rider   whether the correction needs the compaction re-injection appended.
             A FLAG rather than the text, because applying it mutates session
             state (`discards`/`reinjects`, and possibly dropping the session)
@@ -21,5 +25,6 @@ it.
 
 from collections import namedtuple
 
-Violation = namedtuple("Violation", "kind trail prompt rider")
-Violation.__new__.__defaults__ = (False,)
+Violation = namedtuple("Violation", "kind trail prompt rider notes")
+# `trail=None` means informational only -- notes to record, nothing to fail.
+Violation.__new__.__defaults__ = (False, ())

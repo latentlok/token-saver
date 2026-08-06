@@ -181,11 +181,15 @@ class ThePlanRecord(unittest.TestCase):
                   GUARD moved to features/guards/ and needed to know whether it
                   was switched on and what marks a fixture. Both are answers to
                   "what was asked for", and neither had another owner.
+          7 -> 8  `brief_path`, when the brief GUARD moved. The document that
+                  briefed the run is the plainest possible answer to "what was
+                  asked for"; its T0 DIGEST went to RunScope instead, because
+                  that is an observation of the tree, not a request.
 
         If this fires and the new field is not consumed by a feature, the answer
         is to leave it in the engine, not to raise the number.
         """
-        self.assertEqual(len(RunPlan._fields), 7, RunPlan._fields)
+        self.assertEqual(len(RunPlan._fields), 8, RunPlan._fields)
 
     def test_the_fixture_settings_reached_the_plan(self):
         p = RunPlan.build({"fixture_provenance": True}, {"fixture_globs": ["fx"]},

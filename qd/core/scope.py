@@ -64,6 +64,15 @@ class RunScope:
         # USED, never disposed of.
         self.owned = owned and container is not None
 
+    def mark_brief(self, sha0):
+        """The brief's content digest at T0, AFTER any amendment was applied.
+
+        Content, not mtime: an amendment rewrites the file legitimately, and
+        comparing against the pre-amendment bytes would accuse the engine of
+        the edit it just made itself.
+        """
+        self.brief_sha0 = sha0
+
     def mark_t0_bytes(self, saved):
         """The T0 byte snapshot a restore reads from. Separate from `pre_sha`
         because a path may be untracked at T0 -- git has no copy, and only the
@@ -82,6 +91,7 @@ class RunScope:
         self.pre_status = pre_status if pre_status is not None else {}
         self.pre_sha = pre_sha
         self.t0_bytes = None
+        self.brief_sha0 = None
         # Files this run made, attributed. Run attribution, which is what this
         # run OWNS -- the last field DetectorInputs was carrying on scope's
         # behalf. Set by mark_created() once the tree has been observed.
@@ -93,6 +103,7 @@ class RunScope:
         # run holds" -- the same question `hooked` exists for.
         self.scope_unattributed = []   # changed, outside scope, not the worker's
         self.unrestorable = []         # over the snapshot cap, left in place
+        self.spec_unattributed = []    # protected spec moved, not by the worker
 
     def mark_attribution(self, pre_tracked, hooked):
         """Who is answerable for a change in this tree.
@@ -114,6 +125,14 @@ class RunScope:
         for p in paths:
             if p not in self.scope_unattributed:
                 self.scope_unattributed.append(p)
+
+    def note_spec_unattributed(self, paths):
+        """A protected spec moved with no logged worker write. Returns the ones
+        not already recorded, so the trail says it ONCE rather than per attempt.
+        """
+        fresh = [p for p in paths if p not in self.spec_unattributed]
+        self.spec_unattributed.extend(fresh)
+        return fresh
 
     def note_unrestorable(self, paths):
         """Over the snapshot cap, so the T0 bytes were never saved. Reported

@@ -81,9 +81,11 @@ class RunPlan(NamedTuple):
     preflight_expect: str  # "red" | "green" | "any"
     fixture_provenance: bool   # U3.3 check on, or off
     fixture_segments: tuple    # path segments that mark a fixture
+    brief_path: str            # the document that briefed this run, or None
 
     @classmethod
-    def build(cls, args, project, machine, fixture_default=()):
+    def build(cls, args, project, machine, fixture_default=(),
+              brief_path=None):
         """Resolve every layer once, in precedence order.
 
         A classmethod rather than a separate Builder class: the pattern's value
@@ -101,4 +103,5 @@ class RunPlan(NamedTuple):
                                             machine, default=False)),
             fixture_segments=setting("fixture_globs", project, machine,
                                      default=fixture_default),
+            brief_path=brief_path,
         )

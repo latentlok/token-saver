@@ -1406,7 +1406,8 @@ def _delegate(args, t0_dir):
     # this is where every layer is in hand; read by the features below, which no
     # longer take loose arguments about the caller's intent.
     plan = RunPlan.build(args, _project_config(cwd), _global_config(),
-                         fixture_default=_FIXTURE_SEGMENTS)
+                         fixture_default=_FIXTURE_SEGMENTS,
+                         brief_path=brief_rel)
 
     # --- The gates (step 4) ---
     # ONE call, and deliberately outside the challenge branch above: it used to
@@ -1631,102 +1632,6 @@ def _delegate(args, t0_dir):
 
         result_text = text or ""
 
-        # --- Spec guard ---
-        cheated = violated_specs(work_cwd, base=pre_sha_full)
-        if cheated and hooked:
-            # Co-work (C10): a protected spec that moved with no logged worker
-            # write is somebody ELSE's edit -- reverting it is how a caller's
-            # concurrent work got destroyed. Report and leave it, at the cost
-            # of a gate whose definition of correct changed under the run,
-            # which the receipt has to say out loud.
-            attributed = ctx.get("writes") or []
-            fresh = [p for p in cheated if p not in attributed
-                     and p not in ctx["spec_unattributed"]]
-            ctx["spec_unattributed"] += fresh
-            if fresh:
-                trail.append(
-                    f"attempt {attempt}: SPEC CHANGED (unattributed) -- "
-                    f"{', '.join(fresh)} differs from its pre-run state with no "
-                    f"logged worker write; NOT reverted"
-                )
-            cheated = [p for p in cheated if p in attributed]
-        if cheated:
-            revert_specs(work_cwd, cheated, base=pre_sha_full, t0=t0_saved)
-            names = ", ".join(cheated)
-            trail.append(
-                f"attempt {attempt}: SPEC VIOLATION -- edited {names} (auto-reverted)"
-            )
-            if attempt < max_iter:
-                prompt = (
-                    f"You edited a protected specification file ({names}). That file "
-                    f"defines what correct means and has been reverted. Never modify a "
-                    f"protected spec file. Fix the implementation code so it satisfies the "
-                    f"spec as written. If you believe the spec is wrong, stop and say so "
-                    f"instead of editing it."
-                )
-                if was_compacted_since_ack(session_id):
-                    ack_compaction(session_id)
-                    send_suffix = True
-                    if on_compaction == "discard":
-                        ctx["discards"] += 1
-                        session_id = None
-                    else:
-                        ctx["reinjects"] += 1
-                    prompt += (
-                        f"\n\nYour conversation history was summarised (compacted), so "
-                        f"you may have lost the original instructions and any summary of "
-                        f"your earlier work may be inaccurate. Re-read the files; do not "
-                        f"reconstruct it.\n\nOriginal task:\n{task}"
-                    )
-                continue
-            break
-
-        # --- Brief protection (U6) ---
-        # Compared by CONTENT against the post-amendment capture, with the
-        # spec guard's C10 attribution split: an unattributed change is a
-        # caller's edit on the same tree -- reported, never reverted.
-        if brief_rel:
-            brief_edited = file_sha(work_cwd, brief_rel) != brief_sha0
-            if brief_edited and hooked \
-                    and brief_rel not in (ctx.get("writes") or []):
-                if brief_rel not in ctx["spec_unattributed"]:
-                    ctx["spec_unattributed"].append(brief_rel)
-                    trail.append(
-                        f"attempt {attempt}: PLAYBOOK CHANGED (unattributed) "
-                        f"-- {brief_rel} differs from its pre-run content "
-                        f"with no logged worker write; NOT reverted")
-                brief_edited = False
-            if brief_edited:
-                restore_paths(work_cwd, [brief_rel], base=pre_sha_full,
-                              t0=t0_saved)
-                trail.append(f"attempt {attempt}: PLAYBOOK EDITED -- "
-                             f"{brief_rel} (auto-reverted)")
-                if attempt < max_iter:
-                    prompt = (
-                        f"You edited the brief document ({brief_rel}). That "
-                        f"file defines the task you were given and has been "
-                        f"reverted. Never modify the brief: do the work it "
-                        f"describes, and if you believe the brief is wrong, "
-                        f"stop and say so instead of editing it."
-                    )
-                    if was_compacted_since_ack(session_id):
-                        ack_compaction(session_id)
-                        send_suffix = True
-                        if on_compaction == "discard":
-                            ctx["discards"] += 1
-                            session_id = None
-                        else:
-                            ctx["reinjects"] += 1
-                        prompt += (
-                            f"\n\nYour conversation history was summarised "
-                            f"(compacted), so you may have lost the original "
-                            f"instructions and any summary of your earlier "
-                            f"work may be inaccurate. Re-read the files; do "
-                            f"not reconstruct it.\n\nOriginal task:\n{task}"
-                        )
-                    continue
-                break
-
         # --- Post snapshot (shared by touch scope + C8 prefilter) ---
         post_snap = snapshot(work_cwd)
         changed = [
@@ -1740,6 +1645,7 @@ def _delegate(args, t0_dir):
         # not own, and that is what makes the retry-or-give-up rule exist once
         # here instead of once per guard.
         scope.mark_attribution(pre_tracked, hooked)
+        scope.mark_brief(brief_sha0)
         scope.mark_t0_bytes(t0_saved)
         scope.mark_created(_created(work_cwd, changed, pre_status, pre_tracked,
                                     ctx.get("writes"), hooked))
@@ -1749,7 +1655,13 @@ def _delegate(args, t0_dir):
         # Attribution findings are the scope's; the receipt reads them here.
         ctx["scope_unattributed"] = list(scope.scope_unattributed)
         ctx["unrestorable"] = list(scope.unrestorable)
+        ctx["spec_unattributed"] = list(scope.spec_unattributed)
         if _v is not None:
+            # Notes are recorded whether or not anything failed: an
+            # unattributed spec change is the caller's own edit, which the
+            # receipt owes them and must not punish the worker for.
+            trail.extend(_v.notes)
+        if _v is not None and _v.trail is not None:
             if _v.kind == "fixture_provenance":
                 ctx["fixtures_unproven"] = scope.unproven_fixtures(
                     plan.fixture_segments)

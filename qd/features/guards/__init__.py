@@ -29,12 +29,12 @@ directory rather than a flag on the other two.
 
 from qd.core.violation import Violation  # noqa: F401  (re-exported)
 
-from . import fixtures, touch_scope
+from . import brief, fixtures, specs, touch_scope
 
 # ORDER IS PRECEDENCE, as in core/status.py: the worker gets ONE correction,
 # and a scope violation is a more serious fact than a missing provenance
 # comment -- it is work that had to be undone.
-GUARDS = (touch_scope, fixtures)
+GUARDS = (specs, brief, touch_scope, fixtures)
 
 
 def first(scope, plan, attempt):
@@ -52,11 +52,19 @@ def first(scope, plan, attempt):
     so anything skipped here is a protection silently not applied. That is why
     `guards_spec` pins each guard's detection separately from this loop.
     """
+    notes = []
     for guard in GUARDS:
         try:
             found = guard.check(scope, plan, attempt)
         except Exception:
             continue
-        if found is not None:
-            return found
-    return None
+        if found is None:
+            continue
+        # Notes ACCUMULATE across guards and travel with whichever violation
+        # wins, because they are observations the receipt owes the caller
+        # regardless of who failed the attempt. A guard that has only notes has
+        # not objected, so the search goes on.
+        notes.extend(found.notes)
+        if found.trail is not None:
+            return found._replace(notes=tuple(notes))
+    return Violation("", None, None, False, tuple(notes)) if notes else None
