@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.1 — 2026-08-07 (the dead-endpoint round)
+
+One finding, from the first eval run after 0.6.0: the machine-default endpoint was
+hard down (vLLM behind an auth proxy, answering HTTP 502 in ~8ms), and nothing
+checked reachability before spawning workers. Two delegation runs burned ~380s and
+11 API errors each, wrote nothing, and filed the outage as `gate_suspect` — the
+worker's failure, not the infrastructure's. The 502 was provable in one
+sub-second request.
+
+**Refuses before burning**
+- `qd/probe.py`: one `GET <baseUrl>/models` (3s timeout, stdlib urllib) before the
+  first executor call of a run. A connection error, a timeout, or HTTP ≥ 500
+  refuses immediately with `EXECUTOR UNREACHABLE: … nothing was run.` — the
+  existing `refused` status, same slot as the `GATE UNUSABLE` precedent; no new
+  status.
+- The verdict is one-sided: DOWN is only what one request can prove. 2xx, 401,
+  403 and 404 all read as alive (the field endpoint answered 401 to bare requests
+  while 502ing authenticated ones, so reading 4xx as down would refuse a working
+  configuration), an unrecognised exception reads as alive, and a profile with no
+  discoverable base URL is never probed. The probe fails open on its own bugs, so
+  it can never become the outage.
+- A chain or batch probes each distinct endpoint once at its head; one dead
+  endpoint refuses the whole call, so "nothing was run" stays true. Verdicts are
+  never cached across calls: a just-restarted endpoint works on the very next
+  call.
+- `qwen_query` against a dead endpoint answers `STATUS: refused` in ~3s instead
+  of hanging the synchronous call for the whole executor timeout.
+- `qd.doctor` `project_check()` gains `endpoint-down` (high), silent when the
+  default profile carries no base URL.
+
+`specs/probe_spec.py` pins all of it — 27 checks against real local `http.server`
+fixtures (502 / 200 / 401 / closed port / timeout), red phase witnessed in two
+stages before the wiring existed.
+
 ## 0.6.0 — 2026-08-05 (the friction-ledger round)
 
 The first round driven by a field ledger rather than a design doc: 23 findings from

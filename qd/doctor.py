@@ -527,6 +527,27 @@ def project_check(cwd):
     except Exception:
         pass
 
+    # U7: the run-time refusal's static twin. Field 2026-08-07: the endpoint
+    # was hard down (502 in ~8ms) and nothing in this sweep said so -- the
+    # caller found out ~380s of burned runs later. One GET (<=3s worst case,
+    # ~10ms against a live or cleanly-dead endpoint) keeps doctor cheap
+    # enough to run on a whim while catching the one outage that voids every
+    # other finding. Silent when the default profile shows no base URL.
+    try:
+        from qd import probe
+        d = probe.down(profiles.resolve(cwd, None))
+        if d:
+            out.append({
+                "id": "endpoint-down", "severity": "high", "fixable": False,
+                "text": ("Executor endpoint '%s' is unreachable: GET %s "
+                         "answered %s in %dms. Every delegation and query "
+                         "routed to it will be refused (EXECUTOR "
+                         "UNREACHABLE) until it is back."
+                         % (d["endpoint"], d["url"], d["signal"], d["ms"])),
+            })
+    except Exception:
+        pass
+
     # Orphaned containers. A lone run disposes of its worktree inside the run;
     # a CHAIN's container is held across every link and released only when the
     # chain ends, so a chain that dies mid-flight leaves one with no owner.

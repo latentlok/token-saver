@@ -64,7 +64,7 @@ CARRY_DEFAULT = "handoff"
 PROTOCOL_VERSION = "2024-11-05"
 from qd.core import lifecycle
 
-SERVER_INFO = {"name": "qwen-delegate", "version": "0.6.0"}
+SERVER_INFO = {"name": "qwen-delegate", "version": "0.6.1"}
 DRAIN_SECONDS = 10.0
 SLOT_POLL_SECONDS = 0.5
 
@@ -793,6 +793,18 @@ def run_delegate_batch(args, on_partial=None):
     args, refusal = engine.expand_playbook(args)
     if refusal:
         return engine.refusal_receipt(refusal)
+    # U7: probe the executor endpoints ONCE for the whole call, at the head.
+    # A lone delegation probes inside the engine; a chain or batch hoists the
+    # probe here because its links/items would otherwise each probe again --
+    # and each item's refusal would land as one slot of a partial receipt,
+    # when the honest answer to a dead endpoint is one refusal for the call
+    # with "nothing was run" still true. Same head-of-chain rule the carry
+    # refusals follow: a bad grade on link 3 refuses before link 1 runs.
+    if args.get("chain") or args.get("batch"):
+        refusal = _endpoint_refusal(
+            args, args.get("chain") or args.get("batch"))
+        if refusal:
+            return engine.refusal_receipt(refusal)
     if args.get("chain"):
         return run_chain(_inherit(args, args["chain"]), engine.run,
                          on_partial=on_partial)
@@ -800,6 +812,54 @@ def run_delegate_batch(args, on_partial=None):
         return run_batch(_inherit(args, args["batch"]), _batch_item,
                          on_partial=on_partial)
     return engine.run(args)
+
+
+def _endpoint_refusal(args, items):
+    """Probe each DISTINCT endpoint a chain/batch will touch, once, up front.
+
+    Returns the EXECUTOR UNREACHABLE refusal text (any dead endpoint refuses
+    the WHOLE call -- see the call site), or None after stamping every item
+    and nested link with engine.PROBED_ARG so no engine entry re-probes:
+    once per call, not per item. Nothing is remembered past this call, so a
+    restarted endpoint answers for itself on the next one.
+
+    Endpoints are deduplicated by base URL, not by profile name: two
+    profiles over one URL are one question. A profile that fails to RESOLVE
+    is skipped, not refused -- that item will report its own ProfileError
+    through the path that owns the wording (run_batch / engine).
+    """
+    from qd import engine, probe
+    pairs = []                        # (cwd, executor), submission order
+    stamp = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        stamp.append(item)
+        cwd = item.get("cwd") or args.get("cwd")
+        ex = item.get("executor") or args.get("executor")
+        pairs.append((cwd, ex))
+        # A batch OF chains: nesting is one level, so one level is walked.
+        for link in item.get("chain") or []:
+            if isinstance(link, dict):
+                stamp.append(link)
+                pairs.append((link.get("cwd") or cwd,
+                              link.get("executor") or ex))
+    seen = set()
+    for cwd, ex in pairs:
+        try:
+            prof = profiles.resolve(cwd or ".", ex)
+        except Exception:
+            continue
+        url, _ = probe.base_url(prof)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        text = probe.refusal(prof)
+        if text:
+            return text
+    for item in stamp:
+        item[engine.PROBED_ARG] = True
+    return None
 
 
 def _batch_item(args):
