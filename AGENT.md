@@ -80,6 +80,11 @@ it runs with a setting you did not ask for and the receipt reads normal.
 - a `verify` pre-flight that times out (`GATE UNUSABLE`), before any attempt is burned — every retry
   would have paid that cost; a `result_schema` keyword outside the enforced five (§8); `carry:
   "session"` (§7).
+- an executor endpoint that is provably down (`EXECUTOR UNREACHABLE`): the profile's base URL gets
+  one GET before the first executor call, and a connection error, a timeout or a 5xx refuses the run
+  — any answer, 401 included, proceeds. Probed once per call (a chain or batch probes each distinct
+  endpoint once at the head), never cached across calls, skipped when the profile declares no base
+  URL; on a submitted run the refusal lands in the receipt, like `GATE UNUSABLE`.
 - a playbook front-matter key outside the ten, a wrong-shaped value, a non-`key: value` line, an
   unclosed `---` fence, an unfilled `{{slot}}`, a `vars` key matching no slot; `amend_brief` without
   `retry_of` + `brief_file` + `retry_message`; `retry_of` with no stored brief; `BRIEF TOO BIG`; a

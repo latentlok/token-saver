@@ -8,6 +8,7 @@ import os
 import qd.bootstrap
 import qd.invoke
 import qd.jsonschema
+import qd.probe
 import qd.profiles
 import qd.runlog
 import qd.verdict
@@ -111,6 +112,16 @@ def run_query(args):
         schema_text = qd.jsonschema.schema_refusal(result_schema)
         if schema_text:
             return f"STATUS: refused\n\n{schema_text}"
+
+    # U7, after the shape refusals above (a caller's own mistake outranks an
+    # outage the caller can do nothing about): a query is SYNCHRONOUS, so a
+    # dead endpoint here did not even fail fast -- it hung the tool call for
+    # the executor's whole timeout and answered with an API error. One GET
+    # bounds that at ~3s and names the cause. Skipped when the profile shows
+    # no base URL (see qd/probe.py).
+    unreachable = qd.probe.refusal(profile)
+    if unreachable:
+        return f"STATUS: refused\n\n{unreachable}"
 
     suffix = INVESTIGATE_SUFFIX if fmt == "map" else ANSWER_SUFFIX
     if result_schema is not None:
