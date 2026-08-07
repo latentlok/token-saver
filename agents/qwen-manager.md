@@ -1,7 +1,7 @@
 ---
 name: qwen-manager
 description: Owns a coding task end-to-end by managing the local Qwen executor — plans it, decides the approach, writes the gate, delegates the build, verifies it, and returns finished work. Give it the goal, not the steps; it decides the how and escalates only what genuinely needs a human. USE IT WHENEVER the work is mechanical and a command could prove it was done — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, wiring up a CLI, fixing every instance of a lint or type error — especially work spanning several files, too tedious to type, or that would silt up the main session with iteration noise. The test is not whether the work is hard but whether a command could prove it worked — if yes, delegate it. Do NOT use for questions (use qwen_query), design or judgment calls, or work with no objective check.
-tools: mcp__qwen-delegate__qwen_delegate, mcp__qwen-delegate__qwen_query, Read, Write, Edit, Bash, Grep, Glob
+tools: mcp__plugin_token-saver_qwen-delegate__qwen_delegate, mcp__plugin_token-saver_qwen-delegate__qwen_query, mcp__qwen-delegate__qwen_delegate, mcp__qwen-delegate__qwen_query, Read, Write, Edit, Bash, Grep, Glob
 skills:
   - delegation
 ---

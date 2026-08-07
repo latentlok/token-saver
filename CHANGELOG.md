@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.2 — 2026-08-07 (the toolless-container round)
+
+Every subagent this plugin ships was born without its delegation tools, and two
+green-looking eval runs were needed to notice. The agents' frontmatter granted
+`mcp__qwen-delegate__qwen_delegate`/`__qwen_query`, but Claude Code exposes a
+plugin's MCP tools as `mcp__plugin_<plugin>_<server>__<tool>` — here
+`mcp__plugin_token-saver_qwen-delegate__qwen_delegate` (verified live). A granted
+name that matches no tool is dropped **silently**, so `qwen-manager` and
+`architect` containers came up with built-ins only. The failure hid twice over:
+one manager hand-rolled a JSON-RPC stdio client from Bash and drove the server
+anyway (numbers that looked like delegation and were not), the other implemented
+inline and said so only in a closing note.
+
+- `agents/qwen-manager.md`, `agents/architect.md`: grant the plugin-prefixed
+  names, first in the list; the bare legacy names ride along for older CLIs that
+  exposed plugin tools unprefixed — either resolves, the other is inert.
+- `specs/agent_tools_spec.py` (new): derives the correct prefix from
+  `.claude-plugin/plugin.json` + `.mcp.json` — the two manifests that define
+  it — so renaming the plugin or the server goes red instead of silently
+  orphaning every grant again; pins that the legacy names never stand alone.
+
 ## 0.6.1 — 2026-08-07 (the dead-endpoint round)
 
 One finding, from the first eval run after 0.6.0: the machine-default endpoint was
