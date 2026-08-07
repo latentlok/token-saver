@@ -64,7 +64,7 @@ CARRY_DEFAULT = "handoff"
 PROTOCOL_VERSION = "2024-11-05"
 from qd.core import lifecycle
 
-SERVER_INFO = {"name": "qwen-delegate", "version": "0.6.1"}
+SERVER_INFO = {"name": "qwen-delegate", "version": "0.6.2"}
 DRAIN_SECONDS = 10.0
 SLOT_POLL_SECONDS = 0.5
 
