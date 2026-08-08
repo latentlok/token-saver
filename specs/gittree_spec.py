@@ -148,7 +148,7 @@ class SpecGuard(Fixture):
     def test_spec_globs_default_and_project_override(self):
         self.assertEqual(gittree.spec_globs(self.cwd),
                          gittree.DEFAULT_SPEC_GLOBS)
-        put(self.cwd, ".qwen-delegate.json",
+        put(self.cwd, ".delegation.json",
             json.dumps({"spec_globs": ["gates/*.py"]}))
         self.assertEqual(gittree.spec_globs(self.cwd), ["gates/*.py"])
 

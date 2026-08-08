@@ -26,7 +26,7 @@ Load-bearing claims pinned here:
      endpoint exactly once at the head, and links/items inherit the verdict
      through engine.PROBED_ARG instead of re-probing. Verdicts are never
      cached ACROSS calls: a just-restarted endpoint works on the next call.
-  4. qwen_query refuses the same way (it is synchronous, so a dead endpoint
+  4. query refuses the same way (it is synchronous, so a dead endpoint
      used to cost the whole executor timeout inline).
   5. doctor.project_check reports a down endpoint ("endpoint-down"), so the
      static config sweep catches what the run-time refusal catches.
@@ -258,20 +258,20 @@ class Fixture(unittest.TestCase):
         # challenge_brief off for the same reason engine_spec switches it off:
         # it spends one stubbed executor call before the loop and shifts every
         # attempt-count assertion; its behavior has its own spec.
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"challenge_brief": false}\n')
         with open(os.path.join(self.cwd, "QWEN.md"), "w") as f:
             f.write("# rules\n")
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "base"],
                        check=True)
-        os.environ["QWEN_DELEGATE_WORKTREES"] = tempfile.mkdtemp()
-        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
-        os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(self.td, "reg.jsonl")
+        os.environ["DELEGATION_WORKTREES"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_LOCKS"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_REGISTRY"] = os.path.join(self.td, "reg.jsonl")
         cfg = os.path.join(self.td, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"autoedit_via_hook": False}, f)
-        os.environ["QWEN_DELEGATE_CONFIG"] = cfg
+        os.environ["DELEGATION_CONFIG"] = cfg
         from qd import invoke as _invoke
         self._compact_saved = _invoke.COMPACT_DIR
         _invoke.COMPACT_DIR = tempfile.mkdtemp()
@@ -317,7 +317,7 @@ class Fixture(unittest.TestCase):
         path = os.path.join(self.td, "executors.json")
         with open(path, "w") as f:
             json.dump(data, f)
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = path
+        os.environ["DELEGATION_EXECUTORS"] = path
 
     def delegate(self, **over):
         from qd import engine

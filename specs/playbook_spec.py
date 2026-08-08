@@ -339,10 +339,10 @@ class ServerSeam(Fixture):
     def setUp(self):
         super().setUp()
         self._env = dict(os.environ)
-        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = os.path.join(
+        os.environ["DELEGATION_LOCKS"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_EXECUTORS"] = os.path.join(
             tempfile.mkdtemp(), "absent.json")
-        os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(
+        os.environ["DELEGATION_REGISTRY"] = os.path.join(
             tempfile.mkdtemp(), "reg.jsonl")
 
     def tearDown(self):
@@ -387,7 +387,7 @@ class ServerSeam(Fixture):
         self.assertIn("STATUS: refused", out)
         self.assertIn("playbooks/absent.md", out)
         self.assertEqual(calls, [])
-        receipts = os.path.join(self.cwd, ".qwen-delegate", "receipts")
+        receipts = os.path.join(self.cwd, ".delegation", "receipts")
         self.assertFalse(os.path.isdir(receipts) and os.listdir(receipts))
 
     def test_brief_file_beside_chain_or_batch_is_refused_by_name(self):

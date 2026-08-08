@@ -1,4 +1,4 @@
-# token-saver — system reference
+# supervised-delegation — system reference
 
 Canonical reference for an agent working with this system. Read this to understand what
 it is, how to drive it, and what you must not assume. Task-specific docs live beside this
@@ -48,21 +48,21 @@ reusable underneath it.
 | engine | `server.py` → `qd/` | thin MCP entry over the v2 engine package: delegate/query, gate, trust dial, worktrees, graph, run log. Zero deps. |
 | safety | `scoped_hook.py` | PreToolUse allowlist for `scoped` mode (incl. graphify reads) |
 | spec suite | `specs/*.py` | the authoritative gates, one per qd module (13 files, incl. `trust_spec.py`) |
-| manager | `agents/qwen-manager.md` | isolation container for the delegation loop (inline is the default) |
+| manager | `agents/executor-manager.md` | isolation container for the delegation loop (inline is the default) |
 | architect | `agents/architect.md` + `skills/architect/` | the L5 loop: PRD→SRS→module tree→behavior-only handoffs→receipts |
 | discipline | `skills/lld-principles/SKILL.md` | design principles, **preloaded** into manager units |
 | loop | `skills/delegation/SKILL.md` | the canonical delegation loop + parameter facts |
 | front door | `commands/offload.md` | `/offload <task or question>` |
 | worker rules | `templates/QWEN.md` | per-project standing rules Qwen auto-loads (graph-before-grep) |
 | manifest | `.claude-plugin/plugin.json` | plugin identity; agent/skill/command auto-discovery |
-| mcp config | `.mcp.json` | registers the `qwen-delegate` MCP server + 2h timeout |
+| mcp config | `.mcp.json` | registers the `executor` MCP server + 2h timeout |
 
 Loaded as a **native Claude Code plugin** — `claude --plugin-dir <repo>` for dev
 (`/reload-plugins` after edits), `claude plugin install` for distribution. The manifest
 auto-discovers the agent/skill/command; `.mcp.json` registers the MCP server with a 2h
 timeout that also floors the idle timeout on 2.1.203+ (no env var). No installer, no
 symlinks, no `claude mcp add`. **Per-project setup is automatic** — the first
-`qwen_delegate` into a git repo self-configures (writes `QWEN.md`). Two optional follow-ups
+`delegate` into a git repo self-configures (writes `QWEN.md`). Two optional follow-ups
 stay with you: set the test command if it wasn't detected, and add the `CLAUDE.md` policy
 block (paste `templates/CLAUDE-snippet.md`, marker-guarded, or ask Claude to append it).
 
@@ -80,14 +80,14 @@ Two things still stop a run: a **non-git** project is refused (no rollback, so i
 self-configure — fix with `git init`), and a **placeholder-carrying legacy `QWEN.md`** is
 regenerated (backed up first). The rules lookup walks up to the repo top level (Qwen loads
 context hierarchically, so a subdirectory of a configured repo is configured) and no
-further. `qwen_query` never writes files as a side effect of a read — it warns and
+further. `query` never writes files as a side effect of a read — it warns and
 proceeds, and a delegation later configures the project.
 
 ---
 
 ## 3b. The run log
 
-Every call appends one JSON record to `<cwd>/.qwen-delegate/runs.jsonl`. It measures the
+Every call appends one JSON record to `<cwd>/.delegation/runs.jsonl`. It measures the
 thing the system exists to do — **leverage: free tokens burned ÷ tokens returned to you**
 (first measured data: 208.6× over 3 runs, range 151.8–266.0×).
 
@@ -100,28 +100,28 @@ Three things to know:
 - **`token_source` decides whether `tokens_overhead: 0` means anything.** `bySource` = the
   split is real. `blended` = no breakdown was reported, everything got attributed to
   `main`, and 0 means *unmeasured*. Never read a zero without checking this field.
-- **The log is invisible to git** (`.qwen-delegate/` self-ignores via a `.gitignore`
+- **The log is invisible to git** (`.delegation/` self-ignores via a `.gitignore`
   containing `*`) and is written *after* every diff. If it ever shows up in `CHANGED`,
   that is a bug — it would be misattributed to Qwen.
-- **`qwen_query` writes it too.** Queries are read-only with respect to your code, but
-  they do create `.qwen-delegate/` on disk. They burn real tokens (~20k baseline), so
+- **`query` writes it too.** Queries are read-only with respect to your code, but
+  they do create `.delegation/` on disk. They burn real tokens (~20k baseline), so
   excluding them would understate spend.
 
-`~/.qwen-delegate/projects.jsonl` is a **pointer index only** (paths, no metrics) so an
-aggregator can find every project's log. Relocate with `QWEN_DELEGATE_REGISTRY`.
+`~/.delegation/projects.jsonl` is a **pointer index only** (paths, no metrics) so an
+aggregator can find every project's log. Relocate with `DELEGATION_REGISTRY`.
 
 ---
 
 ## 4. Tool surface
 
-**`qwen_query`** — read-only Q&A about code. Qwen reads and answers; **cannot write**.
+**`query`** — read-only Q&A about code. Qwen reads and answers; **cannot write**.
 `question`, `cwd`, `format` (`answer` default | `map`), `session_id` (warm multi-turn),
 `focus`, `timeout_sec`.
 
-**`qwen_delegate`** — the build tool. `task`, `cwd`, `verify` (**the gate**: exits 0 only
+**`delegate`** — the build tool. `task`, `cwd`, `verify` (**the gate**: exits 0 only
 on real success), `approval_mode`, `max_iterations`, `session_id`, `shell_allow`,
-`shell_feedback`, `timeout_sec`, `trust` (resolves call arg > project `.qwen-delegate.json`
-> machine `~/.qwen-delegate/config.json` > `"self"` L5 default; `"verified"` = caller's gate;
+`shell_feedback`, `timeout_sec`, `trust` (resolves call arg > project `.delegation.json`
+> machine `~/.delegation/config.json` > `"self"` L5 default; `"verified"` = caller's gate;
 `"auto"` = refuse bare call so the model picks per task by criticality), `workers` (best-of-N),
 `worktree` (`auto`|`off` isolation + MERGE receipt), `executor` (C7 profile),
 `touch_scope` (modify-allowlist, out-of-scope edits auto-revert), `batch` (N delegations
@@ -150,8 +150,8 @@ a shell to converge, and arbitrary execution at user privilege stays unreachable
 
 ## 5. How to drive it
 
-**Front door:** `/offload <task or question>` — routes questions to `qwen_query`, builds
-to the `qwen-manager` subagent.
+**Front door:** `/offload <task or question>` — routes questions to `query`, builds
+to the `executor-manager` subagent.
 
 **The loop the manager runs** (and the shape to follow if driving directly):
 
@@ -182,7 +182,7 @@ only for direction, outward-facing changes, or irreversible calls.
    wrote a non-deterministic counter. **0/3 raised a blocker.** A green gate on a
    contradictory spec is a real, silent failure.
 3. **In plan mode it is honest** — it cannot hack there. The same contradiction, asked via
-   `qwen_query`, produced a clean "not implementable, these two tests conflict."
+   `query`, produced a clean "not implementable, these two tests conflict."
    → **Sanity-check any spec you're unsure of, read-only, *before* building.**
 4. **Never let Qwen write the file that grades it.** When it authors both code and tests,
    its misunderstanding lands identically in both — they agree, and both are wrong.
@@ -192,7 +192,7 @@ only for direction, outward-facing changes, or irreversible calls.
 6. **Vagueness is the root cause of everything.** Well-specified, Qwen is genuinely strong
    (a Jinja AST extension first try, correct beyond spec). Vague, it invents confident
    scope, silently changes public APIs, and breaks rules it honoured 11 times before.
-7. **`qwen_query` answers are a lead, not truth.** Structure and semantics reliable;
+7. **`query` answers are a lead, not truth.** Structure and semantics reliable;
    precise claims not (it once mapped a library perfectly and fabricated every line
    number). Verify anything load-bearing against source.
 8. **Compaction (~147k) causes fabrication** — past it, it claimed to have read files it
@@ -214,7 +214,7 @@ only for direction, outward-facing changes, or irreversible calls.
   rules bind. Use `session_id` only for follow-ups on the *same* task.
 - **Timing** (fitted, 198 real calls): `seconds ≈ input/10,882 + output/70`. Set
   `timeout_sec` with 2–3× headroom. Calls >120s are auto-backgrounded — normal.
-- **The run log is the record.** Per-project `.qwen-delegate/runs.jsonl`; check
+- **The run log is the record.** Per-project `.delegation/runs.jsonl`; check
   `token_source` before trusting a zero in `tokens_overhead`.
 - **Read the verdict's signals:** `gate_suspect` = your gate is broken, not the code.
   `success_but_preflight_passed` = the gate was already green, so the pass proves nothing.
@@ -231,5 +231,5 @@ only for direction, outward-facing changes, or irreversible calls.
 | `context/TESTING.md` | testing the system — state, test plan, expected outcomes |
 | `docs/archive/a92e876/FINDINGS.md` | **the evidence.** Every measurement behind every guard. Read before concluding a protection is paranoid — each was bought with a real failure. |
 |  `docs/archive/a92e876/HLD.md` | the v2 design: contracts C1–C9, lifecycle, concurrency |
-| `agents/qwen-manager.md` | the manager's full workflow and escalation policy |
+| `agents/executor-manager.md` | the manager's full workflow and escalation policy |
 | `skills/lld-principles/SKILL.md` | the design discipline the manager must follow |

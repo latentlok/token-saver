@@ -184,8 +184,8 @@ class ManagedBlock(Fixture):
     def test_the_template_still_carries_both_markers(self):
         block = setup.template_block("9.9.9")
         self.assertIsNotNone(block)
-        self.assertIn("qwen-delegate:begin", block.splitlines()[0])
-        self.assertIn("qwen-delegate:end", block.splitlines()[-1])
+        self.assertIn("supervised-delegation:begin", block.splitlines()[0])
+        self.assertIn("supervised-delegation:end", block.splitlines()[-1])
 
     def test_the_block_is_version_stamped(self):
         self.assertIn("<!-- v: 9.9.9 -->", setup.template_block("9.9.9"))
@@ -206,8 +206,8 @@ class ManagedBlock(Fixture):
         self.assertEqual(
             setup.update_managed_block(self.proj, version="9.9.9"), "current")
         self.assertEqual(self.read(), first)
-        self.assertEqual(first.count("qwen-delegate:begin"), 1)
-        self.assertEqual(first.count("qwen-delegate:end"), 1)
+        self.assertEqual(first.count("supervised-delegation:begin"), 1)
+        self.assertEqual(first.count("supervised-delegation:end"), 1)
 
     def test_an_unchanged_version_does_not_touch_the_file(self):
         self.installed("9.9.9")
@@ -232,7 +232,7 @@ class ManagedBlock(Fixture):
         self.assertEqual(self.read(), "# Just my notes\n")
 
     def test_a_half_marked_file_is_left_alone(self):
-        self.write("# Notes\n<!-- qwen-delegate:begin -->\nhalf a block\n")
+        self.write("# Notes\n<!-- supervised-delegation:begin -->\nhalf a block\n")
         before = self.read()
         self.assertEqual(
             setup.update_managed_block(self.proj, version="9.9.9"), "absent")
@@ -292,7 +292,7 @@ class ManagedBlock(Fixture):
         # description, not left for the caller to discover by triggering it
         # -- see trust :102, verify_timeout_sec :143, preflight_expect :147.
         # result_schema now refuses a keyword qd.jsonschema.schema_refusal()
-        # cannot enforce (U5.1 accept-time check), on BOTH tools -- qwen_query
+        # cannot enforce (U5.1 accept-time check), on BOTH tools -- query
         # never enters engine.py, so its own field needs its own sentence,
         # not a cross-reference the caller cannot see from the schema alone.
         for tool in (schemas.TOOL, schemas.QUERY_TOOL):
@@ -306,7 +306,7 @@ class ManagedBlock(Fixture):
         # loads (an uncommitted tree has no rollback; a hand-re-run green gate
         # spends the context this plugin exists to save).
         block = setup.template_block("9.9.9")
-        for required in ("qwen_delegate", "qwen_query", "delegation",
+        for required in ("delegate", "query", "delegation",
                          "Commit first", "STATUS"):
             self.assertIn(required, block)
 

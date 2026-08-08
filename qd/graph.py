@@ -3,7 +3,7 @@
 Graph freshness keyed to git; behavior frozen by specs/graphstate_spec.py.
 
 graphify owns querying; this module owns exactly one thing graphify cannot:
-freshness as a git fact. The sidecar (.qwen-delegate/graph.json) tracks the
+freshness as a git fact. The sidecar (.delegation/graph.json) tracks the
 last-indexed SHA and status; staleness is a plain `git diff` between that SHA
 and HEAD. refresh_sync/refresh_async shell out to graphify to update the index.
 """
@@ -19,7 +19,7 @@ from qd.runlog import now_iso, runlog_dir
 
 
 def sidecar_path(cwd):
-    """Path to .qwen-delegate/graph.json."""
+    """Path to .delegation/graph.json."""
     return os.path.join(runlog_dir(cwd), "graph.json")
 
 
@@ -65,12 +65,12 @@ def staleness(cwd):
 
 
 def graphify_bin():
-    """The graphify binary: $QWEN_DELEGATE_GRAPHIFY or `graphify` on PATH."""
-    return os.environ.get("QWEN_DELEGATE_GRAPHIFY", "graphify")
+    """The graphify binary: $DELEGATION_GRAPHIFY or `graphify` on PATH."""
+    return os.environ.get("DELEGATION_GRAPHIFY", "graphify")
 
 
 def available():
-    """True if the graphify binary is resolvable (PATH or QWEN_DELEGATE_GRAPHIFY)."""
+    """True if the graphify binary is resolvable (PATH or DELEGATION_GRAPHIFY)."""
     return bool(shutil.which(graphify_bin()))
 
 
@@ -253,7 +253,7 @@ def graph_line(cwd, will_refresh=False):
         return "GRAPH: indexing"
     if status == "failed":
         # FIRST LINE ONLY, like the advisory head. `reason` is read verbatim out
-        # of .qwen-delegate/graph.json, which the WORKER can write -- the
+        # of .delegation/graph.json, which the WORKER can write -- the
         # directory self-ignores so no guard reverts it, and this line is
         # computed after the run. A multi-line reason broke this function's own
         # promise above ("a single C2 GRAPH: status line") and, because the line

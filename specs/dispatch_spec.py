@@ -76,11 +76,11 @@ def batchrun(args):
 
 SCHEMAS = [
     {"name": "slow", "description": "stub", "inputSchema": {"type": "object"}},
-    {"name": "qwen_delegate", "description": "stub", "inputSchema": {"type": "object"}},
-    {"name": "qwen_query", "description": "stub", "inputSchema": {"type": "object"}},
+    {"name": "delegate", "description": "stub", "inputSchema": {"type": "object"}},
+    {"name": "query", "description": "stub", "inputSchema": {"type": "object"}},
     {"name": "boom", "description": "stub", "inputSchema": {"type": "object"}},
 ]
-server.main(tools={"slow": slow, "qwen_delegate": slow, "qwen_query": slow,
+server.main(tools={"slow": slow, "delegate": slow, "query": slow,
                    "boom": boom, "batchrun": batchrun}, schemas=SCHEMAS)
 """
 
@@ -164,13 +164,13 @@ class Fixture(unittest.TestCase):
                     "p2b": {"argv": ["x", "-p", "{task}"], "endpoint": "e2"},
                     "p3":  {"argv": ["x", "-p", "{task}"], "endpoint": "e3"},
                 }}, f)
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = machine
+        os.environ["DELEGATION_EXECUTORS"] = machine
         # Temp lock dir + a config path that cannot exist: the real machine
         # files must never decide whether these concurrency assertions pass.
         self.locks = os.path.join(self.sdir, "locks")
-        self.env_extra = {"QWEN_DELEGATE_EXECUTORS": machine,
-                          "QWEN_DELEGATE_LOCKS": self.locks,
-                          "QWEN_DELEGATE_CONFIG": os.path.join(self.sdir, "none.json")}
+        self.env_extra = {"DELEGATION_EXECUTORS": machine,
+                          "DELEGATION_LOCKS": self.locks,
+                          "DELEGATION_CONFIG": os.path.join(self.sdir, "none.json")}
         os.environ.update(self.env_extra)
         self.srv = Server(self.sdir, env_extra=self.env_extra)
         self.repo_a = tempfile.mkdtemp()
@@ -225,12 +225,12 @@ class Protocol(Fixture):
     def test_initialize_and_tools_list_crane_shaped(self):
         r = self.srv.responses[0]["result"]
         self.assertEqual(r["protocolVersion"], "2024-11-05")
-        self.assertEqual(r["serverInfo"]["name"], "qwen-delegate")
+        self.assertEqual(r["serverInfo"]["name"], "executor")
         self.assertEqual(r["capabilities"], {"tools": {}})    # survivor 6 closed
         self.srv.send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = self.srv.wait(1)["result"]["tools"]
         self.assertEqual([t["name"] for t in tools],
-                         ["slow", "qwen_delegate", "qwen_query", "boom"])
+                         ["slow", "delegate", "query", "boom"])
 
     def test_call_result_wrapping(self):
         self.srv.call(2, "slow", {"tag": "w", "sleep": 0.05})
@@ -265,13 +265,13 @@ class Concurrency(Fixture):
                 json.loads(line)  # every line parses whole
 
     def test_same_repo_delegates_serialize_cross_repo_overlap(self):
-        self.srv.call(20, "qwen_delegate",
+        self.srv.call(20, "delegate",
                       {"tag": "r1", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p2a"})
-        self.srv.call(21, "qwen_delegate",
+        self.srv.call(21, "delegate",
                       {"tag": "r2", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p2b"})
-        self.srv.call(22, "qwen_delegate",
+        self.srv.call(22, "delegate",
                       {"tag": "rx", "sleep": 1.5, "cwd": self.repo_b,
                        "executor": "p3"})
         for rid in (20, 21, 22):
@@ -282,16 +282,16 @@ class Concurrency(Fixture):
     def test_endpoint_caps_independent(self):
         # e1 (cap 1): its two profiles serialize even across repos.
         # e2 (cap 2): its two profiles overlap. e1's queue never blocks e2.
-        self.srv.call(30, "qwen_delegate",
+        self.srv.call(30, "delegate",
                       {"tag": "e1a", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p1a"})
-        self.srv.call(31, "qwen_delegate",
+        self.srv.call(31, "delegate",
                       {"tag": "e1b", "sleep": 1.5, "cwd": self.repo_b,
                        "executor": "p1b"})
-        self.srv.call(32, "qwen_delegate",
+        self.srv.call(32, "delegate",
                       {"tag": "e2a", "sleep": 1.5,
                        "cwd": tempfile.mkdtemp(), "executor": "p2a"})
-        self.srv.call(33, "qwen_delegate",
+        self.srv.call(33, "delegate",
                       {"tag": "e2b", "sleep": 1.5,
                        "cwd": tempfile.mkdtemp(), "executor": "p2b"})
         for rid in (30, 31, 32, 33):
@@ -301,10 +301,10 @@ class Concurrency(Fixture):
         self.assert_overlap("e1a", "e2a")      # endpoints independent
 
     def test_queries_gate_on_endpoint_too(self):
-        self.srv.call(40, "qwen_query",
+        self.srv.call(40, "query",
                       {"tag": "q1", "sleep": 0.8, "cwd": self.repo_a,
                        "executor": "p1a"})
-        self.srv.call(41, "qwen_query",
+        self.srv.call(41, "query",
                       {"tag": "q2", "sleep": 0.8, "cwd": self.repo_b,
                        "executor": "p1b"})
         self.srv.wait(40)
@@ -314,7 +314,7 @@ class Concurrency(Fixture):
 
     # `test_investigate_gates_on_endpoint_too` (survivor 1) was here. It drove
     # a second query tool through `_guards_for` to prove queries take the
-    # endpoint semaphore; `qwen_investigate` is gone and `qwen_query` is now the
+    # endpoint semaphore; `qwen_investigate` is gone and `query` is now the
     # only query tool, so `test_queries_gate_on_endpoint_too` above is that
     # claim in full rather than half of it.
 
@@ -329,7 +329,7 @@ class Failure(Fixture):
         self.assertEqual(self.srv.wait(51)["result"], {})
 
     def test_unknown_executor_is_error_receipt_not_crash(self):
-        self.srv.call(60, "qwen_delegate",
+        self.srv.call(60, "delegate",
                       {"tag": "z", "sleep": 0.1, "cwd": self.repo_a,
                        "executor": "no-such-profile"})
         r = self.srv.wait(60)["result"]
@@ -381,17 +381,17 @@ class Serial(Fixture):
 
     def serial_repo(self):
         d = tempfile.mkdtemp()
-        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(d, ".delegation.json"), "w") as f:
             json.dump({"dispatch": "serial"}, f)
         return d
 
     def test_endpoint_slot_holds_across_server_processes(self):
         srv2 = Server(self.sdir, env_extra=self.env_extra)
         try:
-            self.srv.call(90, "qwen_delegate",
+            self.srv.call(90, "delegate",
                           {"tag": "xp1", "sleep": 1.5, "cwd": self.repo_a,
                            "executor": "p1a"})
-            srv2.call(91, "qwen_delegate",
+            srv2.call(91, "delegate",
                       {"tag": "xp2", "sleep": 1.5, "cwd": self.repo_b,
                        "executor": "p1b"})
             self.srv.wait(90, timeout=25)
@@ -406,9 +406,9 @@ class Serial(Fixture):
     def test_serial_config_overrules_a_multi_slot_endpoint(self):
         # e2 declares parallel_max 2; the policy says one at a time anyway.
         a, b = self.serial_repo(), self.serial_repo()
-        self.srv.call(92, "qwen_delegate",
+        self.srv.call(92, "delegate",
                       {"tag": "sc1", "sleep": 1.0, "cwd": a, "executor": "p2a"})
-        self.srv.call(93, "qwen_delegate",
+        self.srv.call(93, "delegate",
                       {"tag": "sc2", "sleep": 1.0, "cwd": b, "executor": "p2b"})
         self.srv.wait(92, timeout=25)
         self.srv.wait(93, timeout=25)
@@ -446,7 +446,7 @@ class TheDispatchTableAndTheSchemaMustNameTheSameTOOLS(unittest.TestCase):
     advertised. Three of the four places that had to agree did; the one that
     faces the client did not, and nothing compared them.
 
-    The tool is gone (it was a back-compat alias for `qwen_query(format="map")`,
+    The tool is gone (it was a back-compat alias for `query(format="map")`,
     a value the surviving tool declares in its own enum). This gate is the part
     that outlives it: the two lists are checked against each other rather than
     each against a hand-written expectation, so the NEXT tool added to one and
@@ -498,7 +498,7 @@ class TheDispatchTableAndTheSchemaMustNameTheSameTOOLS(unittest.TestCase):
         import inspect
         from qd import server
         src = inspect.getsource(server._guards_for)
-        for name in ("qwen_delegate", "qwen_query", "qwen_investigate"):
+        for name in ("delegate", "query", "qwen_investigate"):
             if f'"{name}"' in src:
                 self.assertIn(name, self.dispatch,
                               f"_guards_for gates {name}, which nothing "

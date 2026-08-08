@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Spec for the ASYNC qwen_delegate submit path (U5.2, C9) in qd/server.py.
+Spec for the ASYNC delegate submit path (U5.2, C9) in qd/server.py.
 
 Claude-authored gate (never delegate this file -- it defines what correct means).
 
@@ -35,7 +35,7 @@ Driven with a fake engine (no worker, no subprocess) and bounded poll loops;
 the wait-vs-async equivalence, which needs a real run, lives in engine_spec.
 
 Public surface pinned here:
-    qd.server.submit_delegate(args) -> str   (the qwen_delegate handler)
+    qd.server.submit_delegate(args) -> str   (the delegate handler)
     qd.server.receipt_paths(cwd, run_id) -> (final, partial)
     qd.server.self_guarded(fn)
 
@@ -66,11 +66,11 @@ class Fixture(unittest.TestCase):
         self._env = dict(os.environ)
         # The guards are real (claim 2 is about them), so they resolve a
         # profile and take lock files -- both pointed at throwaway paths so the
-        # spec never reads a developer's config or writes into ~/.qwen-delegate.
-        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = os.path.join(
+        # spec never reads a developer's config or writes into ~/.delegation.
+        os.environ["DELEGATION_LOCKS"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_EXECUTORS"] = os.path.join(
             tempfile.mkdtemp(), "absent.json")
-        os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(
+        os.environ["DELEGATION_REGISTRY"] = os.path.join(
             tempfile.mkdtemp(), "reg.jsonl")
         self.cwd = tempfile.mkdtemp()
         self.seen = []
@@ -168,7 +168,7 @@ class Fixture(unittest.TestCase):
             return f.read()
 
     def log_records(self):
-        path = os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")
+        path = os.path.join(self.cwd, ".delegation", "runs.jsonl")
         if not os.path.isfile(path):
             return []
         with open(path) as f:
@@ -203,8 +203,8 @@ class Submission(Fixture):
         # the next run's guards, and trips the dirty-tree precondition.
         path = self.receipt_of(self.submit())
         self.assertEqual(os.path.dirname(path),
-                         os.path.join(self.cwd, ".qwen-delegate", "receipts"))
-        with open(os.path.join(self.cwd, ".qwen-delegate", ".gitignore")) as f:
+                         os.path.join(self.cwd, ".delegation", "receipts"))
+        with open(os.path.join(self.cwd, ".delegation", ".gitignore")) as f:
             self.assertEqual(f.read(), "*\n")
 
     def test_the_watch_line_waits_for_that_exact_file(self):
@@ -217,7 +217,7 @@ class Submission(Fixture):
 
     def test_the_heartbeat_line_names_the_sidecar(self):
         self.assertEqual(self.field(self.submit(), "HEARTBEAT"),
-                         os.path.join(self.cwd, ".qwen-delegate",
+                         os.path.join(self.cwd, ".delegation",
                                       "progress.json"))
 
     def test_a_lone_delegation_advertises_no_partial(self):
@@ -290,9 +290,9 @@ class NeverBlocksOnALock(Fixture):
         # guarding everything that has not taken its own locks.
         from qd import queries
         tools = server._default_tools()
-        self.assertTrue(getattr(tools["qwen_delegate"], "self_guarded", False))
-        self.assertIs(tools["qwen_query"], queries.run_query)
-        self.assertFalse(getattr(tools["qwen_query"], "self_guarded", False))
+        self.assertTrue(getattr(tools["delegate"], "self_guarded", False))
+        self.assertIs(tools["query"], queries.run_query)
+        self.assertFalse(getattr(tools["query"], "self_guarded", False))
 
     def test_run_call_skips_guards_only_for_a_self_guarded_handler(self):
         calls = []
@@ -304,11 +304,11 @@ class NeverBlocksOnALock(Fixture):
         server.respond = lambda rid, *a, **kw: responses.append((a, kw))
         self.addCleanup(setattr, server, "respond", real_respond)
 
-        server._run_call(1, "qwen_query", {}, lambda a: "sync")
-        self.assertEqual(calls, ["qwen_query"])
-        server._run_call(2, "qwen_delegate", {}, server.self_guarded(
+        server._run_call(1, "query", {}, lambda a: "sync")
+        self.assertEqual(calls, ["query"])
+        server._run_call(2, "delegate", {}, server.self_guarded(
             lambda a: "submitted"))
-        self.assertEqual(calls, ["qwen_query"])   # not called again
+        self.assertEqual(calls, ["query"])   # not called again
         self.assertEqual(len(responses), 2)
 
 
@@ -358,7 +358,7 @@ class SynchronousRefusals(Fixture):
     in the response -- and files nothing."""
 
     def receipts_dir(self):
-        return os.path.join(self.cwd, ".qwen-delegate", "receipts")
+        return os.path.join(self.cwd, ".delegation", "receipts")
 
     def assertNothingFiled(self):
         d = self.receipts_dir()
@@ -424,7 +424,7 @@ class RunRegistry(Fixture):
         recs = [r for r in self.log_records() if r.get("status") == "running"]
         self.assertEqual(len(recs), 1)
         rec = recs[0]
-        self.assertEqual(rec["tool"], "qwen_delegate")
+        self.assertEqual(rec["tool"], "delegate")
         self.assertEqual(rec["run_id"], run_id)
         self.assertEqual(rec["pid"], os.getpid())
         self.assertTrue(rec["ts"])
@@ -444,7 +444,7 @@ class RunRegistry(Fixture):
         gate.set()
         self.assertTrue(self.wait_file(self.receipt_of(out)))
         # The verdict writes this half for a real run (ctx["run_id"] -> extra).
-        runlog.write_runlog(self.cwd, {"tool": "qwen_delegate",
+        runlog.write_runlog(self.cwd, {"tool": "delegate",
                                        "status": "success",
                                        "run_id": run_id})
         self.assertEqual(runlog.runs_in_flight(self.cwd), [])
@@ -500,7 +500,7 @@ class WaitTrue(Fixture):
     def test_wait_true_files_nothing(self):
         self.patch_engine(run=self.recorder())
         self.submit(wait=True)
-        d = os.path.join(self.cwd, ".qwen-delegate", "receipts")
+        d = os.path.join(self.cwd, ".delegation", "receipts")
         self.assertEqual(os.listdir(d) if os.path.isdir(d) else [], [])
 
     def test_wait_true_holds_the_guards_for_the_whole_run(self):

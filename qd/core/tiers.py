@@ -57,7 +57,7 @@ def gate_for(cfg, crosses_seam=False):
                 "TIERS UNDECLARED: this task crosses a seam, so a unit suite "
                 "cannot prove it works -- and this project has not said which "
                 "suite is which.\n\n"
-                "Nothing was built. Add to .qwen-delegate.json:\n\n"
+                "Nothing was built. Add to .delegation.json:\n\n"
                 '    "tests": {\n'
                 '      "unit":        "<command>",\n'
                 '      "integration": "<command>"\n'

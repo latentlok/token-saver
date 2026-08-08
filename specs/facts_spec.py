@@ -187,12 +187,12 @@ class WhenAndHowManyTimes(Fixture):
         # A worktree run must observe the WORKTREE. Reading the main tree would
         # report the caller's edits as the worker's, which is the false
         # accusation this project has spent a phase removing.
-        os.environ["QWEN_DELEGATE_WORKTREES"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_WORKTREES"] = tempfile.mkdtemp()
         try:
             from qd import worktrees
             wt = worktrees.acquire(self.cwd)
         finally:
-            os.environ.pop("QWEN_DELEGATE_WORKTREES", None)
+            os.environ.pop("DELEGATION_WORKTREES", None)
         with open(os.path.join(wt["path"], "only_here.py"), "w") as f:
             f.write("z = 3\n")
         self.write("only_main.py", "m = 1\n")

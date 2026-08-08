@@ -128,7 +128,7 @@ class TheGraphGrantReachesTheWorkersGate(EngineFixture):
     fails here."""
 
     def with_a_graph(self):
-        # graph.read_state() parses .qwen-delegate/graph.json; sidecar_path
+        # graph.read_state() parses .delegation/graph.json; sidecar_path
         # creates the (self-ignoring) directory, so this leaves the tree clean
         # and the dirty-tree precondition unbothered.
         with open(graph.sidecar_path(self.cwd), "w") as f:

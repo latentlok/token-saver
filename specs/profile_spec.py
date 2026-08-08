@@ -9,7 +9,7 @@ The load-bearing cases, in order of what would hurt most if broken:
   1. The builtin qwen-local profile must render the EXACT invocation the v1 server
      uses today (the regression pin). If this drifts, every delegation changes
      behavior silently.
-  2. Resolution precedence: call arg > project .qwen-delegate.json "executor" >
+  2. Resolution precedence: call arg > project .delegation.json "executor" >
      machine executors.json "default" > builtin. A swapped order silently routes
      work to the wrong executor.
   3. Endpoint config is the concurrency domain (C7): profiles resolve to an
@@ -28,8 +28,8 @@ Public surface pinned here:
     qd.profiles.render_argv(profile, task, mode, resume) -> list[str]
     qd.profiles.cost_usd(profile, tokens_in, tokens_out) -> float
 
-Machine file: ~/.qwen-delegate/executors.json, overridable via the
-QWEN_DELEGATE_EXECUTORS env var (mirrors QWEN_DELEGATE_REGISTRY).
+Machine file: ~/.delegation/executors.json, overridable via the
+DELEGATION_EXECUTORS env var (mirrors DELEGATION_REGISTRY).
 
 Run:  python3 specs/profile_spec.py
 """
@@ -57,7 +57,7 @@ class Fixture(unittest.TestCase):
         os.environ.pop("QWEN_BIN", None)
         self.cwd = tempfile.mkdtemp()
         self.machine = os.path.join(tempfile.mkdtemp(), "executors.json")
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = self.machine
+        os.environ["DELEGATION_EXECUTORS"] = self.machine
 
     def tearDown(self):
         os.environ.clear()
@@ -82,7 +82,7 @@ class Fixture(unittest.TestCase):
         write(self.machine, cfg)
 
     def project_cfg(self, executor):
-        write(os.path.join(self.cwd, ".qwen-delegate.json"),
+        write(os.path.join(self.cwd, ".delegation.json"),
               {"executor": executor})
 
 
@@ -225,11 +225,11 @@ class Dispatch(Fixture):
     around it."""
 
     def cfg(self, where, mode):
-        path = (os.path.join(self.cwd, ".qwen-delegate.json") if where == "project"
+        path = (os.path.join(self.cwd, ".delegation.json") if where == "project"
                 else os.path.join(os.path.dirname(self.machine), "config.json"))
         write(path, {"dispatch": mode})
         if where != "project":
-            os.environ["QWEN_DELEGATE_CONFIG"] = path
+            os.environ["DELEGATION_CONFIG"] = path
 
     def test_unset_is_serial_out_of_the_box(self):
         # No endpoints section => one slot each, so nothing to configure.
@@ -282,7 +282,7 @@ class Dispatch(Fixture):
                          ["endpoint_cfg"]["parallel_max"], 1)
 
     def test_corrupt_config_is_not_an_error(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write("{not json")
         self.assertIsNone(profiles.dispatch_mode(self.cwd))
         self.assertEqual(profiles.resolve(self.cwd, None)["dispatch"], "serial")

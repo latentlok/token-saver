@@ -4,7 +4,7 @@ First-run setup, behavior frozen by specs/setup_spec.py.
 
 Claude Code has no post-install hook, so this runs from a SessionStart hook and
 makes itself idempotent instead: it stamps the plugin version under
-~/.qwen-delegate/setup/ and does nothing on every later session. A version bump
+~/.delegation/setup/ and does nothing on every later session. A version bump
 un-stamps it, which is what makes this fire on INSTALL and on UPDATE and at no
 other time.
 
@@ -26,14 +26,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-STAMP_DIR = os.environ.get("QWEN_DELEGATE_SETUP") or os.path.expanduser(
-    "~/.qwen-delegate/setup")
+STAMP_DIR = os.environ.get("DELEGATION_SETUP") or os.path.expanduser(
+    "~/.delegation/setup")
 
 # U5.3: the managed block in a project's CLAUDE.md. Everything between these
 # two markers belongs to the plugin; everything outside them belongs to the
 # user and is never touched.
-BEGIN_MARK = "qwen-delegate:begin"
-END_MARK = "qwen-delegate:end"
+BEGIN_MARK = "supervised-delegation:begin"
+END_MARK = "supervised-delegation:end"
 
 
 def plugin_version(root=None):
@@ -149,7 +149,7 @@ def build_notice(version, findings):
     if not high:
         return None
     lines = [
-        f"token-saver {version} — first run on this machine. The executor "
+        f"supervised-delegation {version} — first run on this machine. The executor "
         f"settings live in ~/.qwen/settings.json and do NOT ship with the plugin; "
         f"{len(high)} of them will affect delegations here:",
     ]
@@ -157,7 +157,7 @@ def build_notice(version, findings):
         # Split on ". ", never ".", or a version number in a model name ends the
         # sentence early -- "Model 'qwen3." was the whole finding.
         lines.append(f"  - {f['id']}: {f['text'].split('. ')[0].strip()}.")
-    lines.append("Run `/token-saver:doctor` for the detail, or "
+    lines.append("Run `/supervised-delegation:doctor` for the detail, or "
                  "`python3 -m qd.doctor --fix` to write the safe fixes. "
                  "These are machine settings, not repo bugs.")
     return "\n".join(lines)

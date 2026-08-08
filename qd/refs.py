@@ -4,8 +4,8 @@ import os
 
 
 def snapshot(cwd):
-    """Return {relative_filename: (size, mtime_ns)} for files in .qwen-delegate/refs/."""
-    ref_dir = os.path.join(cwd, ".qwen-delegate", "refs")
+    """Return {relative_filename: (size, mtime_ns)} for files in .delegation/refs/."""
+    ref_dir = os.path.join(cwd, ".delegation", "refs")
     if not os.path.isdir(ref_dir):
         return {}
     result = {}

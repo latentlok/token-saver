@@ -248,11 +248,11 @@ _PRECHECK_TOKEN = secrets.token_hex(8)
 
 # U3.3 fixture provenance. Directory SEGMENTS, matched per path component: the
 # five names the field report's fixtures actually lived under. Projects override
-# with `fixture_globs` in .qwen-delegate.json.
+# with `fixture_globs` in .delegation.json.
 _FIXTURE_SEGMENTS = ("fixtures", "testdata", "golden", "snapshots", "cassettes")
 _PROVENANCE_HEADER = "captured-from:"
 
-_SELF_GATE_PATH = os.path.join(".qwen-delegate", "selfgate.sh")
+_SELF_GATE_PATH = os.path.join(".delegation", "selfgate.sh")
 
 _SELF_GATE = """#!/bin/bash
 # Generated per-attempt by trust="self" (L5): the DELEGATE'S OWN suite is the
@@ -318,16 +318,16 @@ def _ensure_self_gate(work_cwd, min_override=None):
 
     Rewritten before every gate run so a worker edit to the script cannot
     survive to the next gate (the same reason spec files auto-revert). Lives
-    in .qwen-delegate/ -- self-gitignored, so it never appears in CHANGED.
+    in .delegation/ -- self-gitignored, so it never appears in CHANGED.
     Suite: the project's detected test command, else stdlib unittest discovery.
-    Vacuous-pass guard: >= min_tests (project .qwen-delegate.json, default 5)
+    Vacuous-pass guard: >= min_tests (project .delegation.json, default 5)
     when a test count is parseable (unittest "Ran N" / pytest "N passed").
     min_override: the incremental ratchet (see delegate()) -- an existing green
     suite of N tests raises the bar to N+1 so the gate binds on the delta.
     """
     min_tests = 5
     try:
-        with open(os.path.join(work_cwd, ".qwen-delegate.json")) as f:
+        with open(os.path.join(work_cwd, ".delegation.json")) as f:
             min_tests = int(json.load(f).get("min_tests") or min_tests)
     except Exception:
         pass
@@ -335,7 +335,7 @@ def _ensure_self_gate(work_cwd, min_override=None):
         min_tests = max(min_tests, min_override)
     suite = detect_test_cmd(work_cwd) or \
         f"python3 -m unittest discover -s {detect_test_dir(work_cwd) or 'tests'} -t . -v"
-    d = os.path.join(work_cwd, ".qwen-delegate")
+    d = os.path.join(work_cwd, ".delegation")
     os.makedirs(d, exist_ok=True)
     gi = os.path.join(d, ".gitignore")
     if not os.path.exists(gi):
@@ -782,7 +782,7 @@ def _resolve_retry(args):
     if not isinstance(stored, dict) or not stored:
         return args, (
             f"retry_of=\"{sid}\": no stored brief for that session. Briefs are "
-            f"written to {os.path.join(cwd, '.qwen-delegate', BRIEFS_DIR)}/ "
+            f"written to {os.path.join(cwd, '.delegation', BRIEFS_DIR)}/ "
             f"when a delegation comes back with a session id -- a project can "
             f"switch that off with \"store_briefs\": false. Send the task "
             f"again, or check that directory for the session you meant."
@@ -885,7 +885,7 @@ def worktree_mode(args, cwd=None):
     the caller expected to land in the tree, nor vice versa: "off" is the
     long-standing default, so unrecognised input degrades to v1 behavior.
 
-    Config, not front matter: .qwen-delegate.json is the CALLER's standing
+    Config, not front matter: .delegation.json is the CALLER's standing
     file, so a repo where co-work is the norm states "worktree": "auto"
     once. A brief document stays unable to choose where it runs (U6).
     """
@@ -985,14 +985,14 @@ def _preconditions(args):
     cwd = args["cwd"]
     verify = args.get("verify")
     # Config-aware for the same reason the engine is (U5.6): a project that
-    # declares its gate expectation in .qwen-delegate.json must hit the same
+    # declares its gate expectation in .delegation.json must hit the same
     # contradiction check as one that passes it per call.
     preflight_expect = setting("preflight_expect", args, _project_config(cwd),
                                _global_config(), default="any")
 
     # --- Precondition: trust (R3: the slider) ---
-    # Position resolves like `executor`: call arg > project .qwen-delegate.json
-    # 'trust' > machine ~/.qwen-delegate/config.json 'trust' > builtin ("self"/L5).
+    # Position resolves like `executor`: call arg > project .delegation.json
+    # 'trust' > machine ~/.delegation/config.json 'trust' > builtin ("self"/L5).
     # The resolved value is validated below, so a bad config value is refused by
     # name exactly like a bad call arg.
     trust = setting("trust", args, _project_config(cwd), _global_config(),
@@ -1124,7 +1124,7 @@ def _delegate(args, t0_dir):
         # (e.g. retry_of a document later edited to chain: true).
         return _refusal(
             "this brief compiles to a chain (`chain: true`) -- submit it as "
-            "its own qwen_delegate call so the server runs the links; "
+            "its own delegate call so the server runs the links; "
             "retry_of replays one link, never a document.")
     task = args["task"]
     cwd = args["cwd"]
@@ -1138,7 +1138,7 @@ def _delegate(args, t0_dir):
     cfg.update(_project_config(cwd))
 
     # U5.6 recipe defaults: a project states its standing preferences once in
-    # .qwen-delegate.json instead of every call repeating them. Call args
+    # .delegation.json instead of every call repeating them. Call args
     # always win -- the config is what a call FALLS BACK to, never what
     # overrides it.
     approval_mode = args.get("approval_mode") or cfg.get("approval_mode") \
@@ -1158,7 +1158,7 @@ def _delegate(args, t0_dir):
     # The mode is tested HERE as well, and the duplication is deliberate:
     # `graph.read_state` is NOT a pure read and must not be reached under a mode
     # that cannot use the answer. It calls `sidecar_path` -> `runlog_dir`
-    # (qd/runlog.py:43), which CREATES `.qwen-delegate/` and WRITES a .gitignore
+    # (qd/runlog.py:43), which CREATES `.delegation/` and WRITES a .gitignore
     # into it -- and that call sits OUTSIDE `read_state`'s own try
     # (qd/graph.py:28), so on an unwritable tree a PermissionError escapes into
     # this call site, which has no guard. Measured: read_state() on a chmod
@@ -1719,7 +1719,7 @@ def _delegate(args, t0_dir):
     # adapter emits no `stats` -- so a heartbeat attached to a burn_budget=0 run
     # would silently cost it the tool counts and the bySource token split that
     # batch mode is kept for. The sidecar lands in the SUBMIT cwd, not the
-    # work tree: the poller was handed <cwd>/.qwen-delegate/progress.json at
+    # work tree: the poller was handed <cwd>/.delegation/progress.json at
     # submit time, and a worktree run's pulse written inside its container is
     # a heartbeat nobody is watching. runlog_dir's self-ignoring .gitignore
     # keeps it out of the guards' view of the caller's tree.

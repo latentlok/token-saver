@@ -187,7 +187,7 @@ class Fixture(unittest.TestCase):
         # layer so it covers the inline `engine.run({...})` call sites too, not
         # just the shared delegate() helper. Its own behaviour is pinned by
         # specs/challenge_spec.py.
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"challenge_brief": false}\n')
         with open(os.path.join(self.cwd, "guard_spec.py"), "w") as f:
             f.write("PROTECTED = 1\n")
@@ -198,9 +198,9 @@ class Fixture(unittest.TestCase):
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "base"],
                        check=True)
-        os.environ["QWEN_DELEGATE_WORKTREES"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_WORKTREES"] = tempfile.mkdtemp()
         # invoke.COMPACT_DIR is read at import; point it at a temp dir so marker
-        # files from these runs never touch the real ~/.qwen-delegate.
+        # files from these runs never touch the real ~/.delegation.
         from qd import invoke as _invoke
         self._compact_dir_saved = _invoke.COMPACT_DIR
         _invoke.COMPACT_DIR = tempfile.mkdtemp()
@@ -216,8 +216,8 @@ class Fixture(unittest.TestCase):
                          "-r", "{resume}"],
                 "env": {"STUB_DIR": self.sdir, "MAIN_REPO": self.cwd},
             }}}, f)
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = machine
-        os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(td, "reg.jsonl")
+        os.environ["DELEGATION_EXECUTORS"] = machine
+        os.environ["DELEGATION_REGISTRY"] = os.path.join(td, "reg.jsonl")
         # Pin the harness to `autoedit_via_hook: false` via the lowest-precedence
         # machine config. Production default flipped ON (probe P1, 2026-07-29); the
         # harness opts out so the many tests written against "auto-edit = no
@@ -226,7 +226,7 @@ class Fixture(unittest.TestCase):
         _cfg = os.path.join(td, "cfg.json")
         with open(_cfg, "w") as f:
             json.dump({"autoedit_via_hook": False}, f)
-        os.environ["QWEN_DELEGATE_CONFIG"] = _cfg
+        os.environ["DELEGATION_CONFIG"] = _cfg
 
     def tearDown(self):
         os.environ.clear()
@@ -251,7 +251,7 @@ class Fixture(unittest.TestCase):
             return json.load(f)
 
     def commit_cfg(self, cfg):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump(cfg, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "cfg"],
@@ -1102,7 +1102,7 @@ class Worktree(Fixture):
         self.assertIsNone(r["ctx"].get("merge"))
 
     def test_project_config_auto_isolates_without_the_arg(self):
-        # "worktree": "auto" in .qwen-delegate.json is the standing default
+        # "worktree": "auto" in .delegation.json is the standing default
         # for a repo where co-work is the norm; a call that says nothing gets
         # the isolation.
         self.commit_cfg({"worktree": "auto"})
@@ -1306,7 +1306,7 @@ class Accounting(Fixture):
         # vLLM cutover (2026-07-31): with a machine-file default and no call
         # arg, the ledger labeled every run "qwen-local" whatever profile
         # actually served it -- routing forensics off by an entire endpoint.
-        mp = os.environ["QWEN_DELEGATE_EXECUTORS"]
+        mp = os.environ["DELEGATION_EXECUTORS"]
         with open(mp) as f:
             m = json.load(f)
         m["default"] = "stub"
@@ -1316,7 +1316,7 @@ class Accounting(Fixture):
         engine.run({"task": "build out.py with MARKER", "cwd": self.cwd,
                     "verify": "grep -q MARKER out.py",
                     "approval_mode": "auto-edit"})
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             rec = json.loads(f.read().splitlines()[-1])
         self.assertEqual(rec["executor"], "stub")
 
@@ -1384,7 +1384,7 @@ class LiveLimits(Fixture):
         self.assertGreaterEqual(r["ctx"]["stall_after"], 1800)
 
     def test_a_project_can_lower_the_budget_and_it_binds(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump({"burn_budget": 1000}, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "budget"],
@@ -1396,7 +1396,7 @@ class LiveLimits(Fixture):
         self.assertIn("run stopped", r["trail"][-1])
 
     def test_zero_disables_the_budget(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump({"burn_budget": 0}, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "nobudget"],
@@ -1408,7 +1408,7 @@ class LiveLimits(Fixture):
 
     def test_a_stopped_run_does_not_retry(self):
         # Re-running into the same ceiling just spends the budget twice.
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump({"burn_budget": 1000}, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "budget"],
@@ -1419,7 +1419,7 @@ class LiveLimits(Fixture):
         self.assertEqual(len(r["trail"]), 1)
 
     def test_the_receipt_blames_the_limit_not_the_worker(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump({"burn_budget": 1000}, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "budget"],
@@ -1513,7 +1513,7 @@ class GraphWiring(Fixture):
         with open(g, "w") as f:
             f.write("#!/usr/bin/env python3\nimport sys; sys.exit(0)\n")
         os.chmod(g, os.stat(g).st_mode | _stat.S_IEXEC)
-        os.environ["QWEN_DELEGATE_GRAPHIFY"] = g
+        os.environ["DELEGATION_GRAPHIFY"] = g
 
     def _wait_sidecar(self, cwd, timeout=8):
         from qd import graph
@@ -1786,7 +1786,7 @@ class ObservedAutoEdit(Fixture):
     out per-project with "autoedit_via_hook": false."""
 
     def _commit_cfg(self, cfg):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump(cfg, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "cfg"],
@@ -1794,13 +1794,13 @@ class ObservedAutoEdit(Fixture):
 
     def test_default_on_auto_edit_attributes_writes(self):
         # No config: the production default is ON, so an auto-edit run gets the
-        # hook. The base Fixture opts the harness OUT via QWEN_DELEGATE_CONFIG;
+        # hook. The base Fixture opts the harness OUT via DELEGATION_CONFIG;
         # point at an empty config here to exercise the real default.
         _empty = os.path.join(os.path.dirname(self.stub), "empty_cfg.json")
         with open(_empty, "w") as f:
             json.dump({}, f)
-        saved = os.environ.get("QWEN_DELEGATE_CONFIG")
-        os.environ["QWEN_DELEGATE_CONFIG"] = _empty
+        saved = os.environ.get("DELEGATION_CONFIG")
+        os.environ["DELEGATION_CONFIG"] = _empty
         try:
             self.steps([{"write": {"out.py": "MARKER\n"},
                          "write_log": [os.path.join(self.cwd, "out.py")]}])
@@ -1809,9 +1809,9 @@ class ObservedAutoEdit(Fixture):
             self.assertEqual(r["ctx"]["writes"], ["out.py"])
         finally:
             if saved is None:
-                os.environ.pop("QWEN_DELEGATE_CONFIG", None)
+                os.environ.pop("DELEGATION_CONFIG", None)
             else:
-                os.environ["QWEN_DELEGATE_CONFIG"] = saved
+                os.environ["DELEGATION_CONFIG"] = saved
 
     def test_explicit_off_opt_out_of_attribution(self):
         self._commit_cfg({"autoedit_via_hook": False})
@@ -1858,7 +1858,7 @@ class StoppedRunHygiene(Fixture):
     it were the stopped attempt's output."""
 
     def test_burn_stop_on_attempt_2_clears_attempt_1_prose(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump({"burn_budget": 30000}, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "b"],
@@ -1877,7 +1877,7 @@ class MaxIterations(Fixture):
     clamped 1..10."""
 
     def _commit_cfg(self, cfg):
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             json.dump(cfg, f)
         subprocess.run(["git", "-C", self.cwd, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.cwd, "commit", "-qm", "cfg"],
@@ -2303,7 +2303,7 @@ class Heartbeat(Fixture):
 
     def test_a_worktree_run_beats_in_the_submit_cwd(self):
         # C11 fix (U6 round): the poller was handed
-        # <cwd>/.qwen-delegate/progress.json at submit time, so a pulse
+        # <cwd>/.delegation/progress.json at submit time, so a pulse
         # written inside the container was a heartbeat nobody was watching.
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         r = self.delegate(worktree="auto")
@@ -2340,7 +2340,7 @@ class ChainEndToEnd(Fixture):
 
     def setUp(self):
         super().setUp()
-        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_LOCKS"] = tempfile.mkdtemp()
 
     def link(self, name):
         return {"task": f"build {name}.py", "cwd": self.cwd,
@@ -2353,7 +2353,7 @@ class ChainEndToEnd(Fixture):
             return int(f.read())
 
     def read_log(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             return [json.loads(line) for line in f.read().splitlines()]
 
     def test_a_red_link_never_reaches_the_next_links_worker(self):
@@ -2460,7 +2460,7 @@ class ReportDontFix(Fixture):
         engine.run({"task": "why", "cwd": self.cwd, "verify": "true",
                     "approval_mode": "auto-edit", "executor": "stub",
                     "report_dont_fix": True})
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             rec = json.loads(f.read().splitlines()[-1])
         self.assertIs(rec["report"], True)
         self.assertIs(rec["findings"], True)
@@ -2474,7 +2474,7 @@ class ReportDontFix(Fixture):
         self.assertIn("STATUS: success", out)
         self.assertNotIn("REPORTED", out)
         self.assertNotIn("FINDINGS:", self.task_seen(1))
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             self.assertNotIn("\"report\"", f.read())
 
 
@@ -2618,7 +2618,7 @@ class Strays(Fixture):
         self.assertIn("1 strays", out)                     # the RUN line
         self.assertIn("STRAYS: 1 file(s) not named in the task: "
                       "scratch_dump.py", out)
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             self.assertEqual(json.loads(f.read().splitlines()[-1])["strays"], 1)
 
 
@@ -2994,7 +2994,7 @@ class ResultSchemaOutOfSubset(Fixture):
                      "result": self.reply({"name": "x"})}])
         first = self.delegate(result_schema=self.GOOD)
         self.assertEqual(first["status"], "success")
-        brief = os.path.join(self.cwd, ".qwen-delegate", "briefs",
+        brief = os.path.join(self.cwd, ".delegation", "briefs",
                              f"{first['session_id']}.json")
         with open(brief) as f:
             stored = json.load(f)
@@ -3017,7 +3017,7 @@ class RetryOf(Fixture):
     """
 
     def brief_file(self, sid):
-        return os.path.join(self.cwd, ".qwen-delegate", "briefs", f"{sid}.json")
+        return os.path.join(self.cwd, ".delegation", "briefs", f"{sid}.json")
 
     def first_run(self, **over):
         self.steps([{"write": {"out.py": "MARKER\n"}, "sid": "s-one"}])
@@ -3041,7 +3041,7 @@ class RetryOf(Fixture):
         self.assertTrue(os.path.isfile(self.brief_file(sid)))
         out = subprocess.run(["git", "status", "--porcelain"], cwd=self.cwd,
                              capture_output=True, text=True).stdout
-        self.assertNotIn(".qwen-delegate", out)
+        self.assertNotIn(".delegation", out)
 
     def test_the_task_comes_back_with_the_correction_appended(self):
         sid = self.first_run()
@@ -3112,7 +3112,7 @@ class RetryOf(Fixture):
                           "retry_of": "s-nope", "retry_message": "x"})
         self.assertIn("STATUS: refused", out)
         self.assertIn("no stored brief", out)
-        self.assertIn(os.path.join(".qwen-delegate", "briefs"), out)
+        self.assertIn(os.path.join(".delegation", "briefs"), out)
         self.assertFalse(os.path.exists(os.path.join(self.sdir, "task_1.txt")))
 
     def test_the_refusal_is_available_before_the_run_is_spawned(self):
@@ -3225,7 +3225,7 @@ class RecipeDefaults(Fixture):
         self.commit_cfg({"task_suffix": "MANDATORY: run the linter."})
         self.steps([{"write": {"out.py": "MARKER\n"}, "sid": "s-one"}])
         r = self.delegate(task="do the thing")
-        with open(os.path.join(self.cwd, ".qwen-delegate", "briefs",
+        with open(os.path.join(self.cwd, ".delegation", "briefs",
                                f"{r['session_id']}.json")) as f:
             self.assertEqual(json.load(f)["args"]["task"], "do the thing")
 
@@ -3251,12 +3251,12 @@ class AsyncEndToEnd(Fixture):
 
     def setUp(self):
         super().setUp()
-        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_LOCKS"] = tempfile.mkdtemp()
         # No indexer: a real graphify on the developer's PATH would drop a
         # graphify-out/ into the tree AFTER the first run's receipt, and the
         # second run would then report the first run's index as a stray. The
         # refresh wiring itself is pinned in GraphWiring.
-        os.environ["QWEN_DELEGATE_GRAPHIFY"] = os.path.join(
+        os.environ["DELEGATION_GRAPHIFY"] = os.path.join(
             tempfile.mkdtemp(), "absent-graphify")
 
     def args(self, **over):
@@ -3288,7 +3288,7 @@ class AsyncEndToEnd(Fixture):
                        check=True)
         subprocess.run(["git", "-C", self.cwd, "clean", "-qfd"], check=True)
         os.remove(os.path.join(self.sdir, "attempt"))
-        os.remove(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl"))
+        os.remove(os.path.join(self.cwd, ".delegation", "runs.jsonl"))
 
     def normalize(self, receipt):
         """Drop the two lines that legitimately differ between a FIRST and a
@@ -3331,7 +3331,7 @@ class AsyncEndToEnd(Fixture):
         self.wait_receipt(self.receipt_path(submission))
         run_id = [ln[len("RUN: "):] for ln in submission.splitlines()
                   if ln.startswith("RUN: ")][0]
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             recs = [json.loads(line) for line in f.read().splitlines()]
         self.assertEqual(recs[0]["status"], "running")
         self.assertEqual(recs[0]["run_id"], run_id)
@@ -3343,7 +3343,7 @@ class AsyncEndToEnd(Fixture):
         # Inertness: nothing was left open, so nothing needs closing.
         self.steps([{"write": {"out.py": "MARKER\n"}}])
         engine.run(self.args())
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             recs = [json.loads(line) for line in f.read().splitlines()]
         self.assertNotIn("run_id", recs[-1])
 

@@ -55,10 +55,10 @@ class SameProcess(Fixture):
     def test_same_repo_in_tree_serializes_on_a_capacity_2_endpoint(self):
         # p2a/p2b share endpoint e2 (parallel_max 2): the endpoint slot alone
         # would let these overlap, so serialization here proves the repo lock.
-        self.srv.call(10, "qwen_delegate",
+        self.srv.call(10, "delegate",
                       {"tag": "sp1", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p2a"})
-        self.srv.call(11, "qwen_delegate",
+        self.srv.call(11, "delegate",
                       {"tag": "sp2", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p2b"})
         self.srv.wait(10, timeout=25)
@@ -77,10 +77,10 @@ class CrossProcess(Fixture):
 
     def test_endpoint_slot_holds_across_server_processes(self):
         srv2 = self.second_server()
-        self.srv.call(20, "qwen_delegate",
+        self.srv.call(20, "delegate",
                       {"tag": "xe1", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p1a"})
-        srv2.call(21, "qwen_delegate",
+        srv2.call(21, "delegate",
                   {"tag": "xe2", "sleep": 1.5, "cwd": self.repo_b,
                    "executor": "p1b"})
         self.srv.wait(20, timeout=25)
@@ -92,10 +92,10 @@ class CrossProcess(Fixture):
         # in-tree: no endpoint slot is shared, so only the repo lock's flock
         # can serialize these. A per-process repo lock overlaps them.
         srv2 = self.second_server()
-        self.srv.call(30, "qwen_delegate",
+        self.srv.call(30, "delegate",
                       {"tag": "xr1", "sleep": 1.5, "cwd": self.repo_a,
                        "executor": "p2a"})
-        srv2.call(31, "qwen_delegate",
+        srv2.call(31, "delegate",
                   {"tag": "xr2", "sleep": 1.5, "cwd": self.repo_a,
                    "executor": "p3"})
         self.srv.wait(30, timeout=25)
@@ -106,25 +106,25 @@ class CrossProcess(Fixture):
 class SerialPolicy(Fixture):
     def serial_repo(self):
         d = tempfile.mkdtemp()
-        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(d, ".delegation.json"), "w") as f:
             json.dump({"dispatch": "serial"}, f)
         return d
 
     def test_serial_config_overrules_a_multi_slot_endpoint(self):
         a, b = self.serial_repo(), self.serial_repo()
-        self.srv.call(40, "qwen_delegate",
+        self.srv.call(40, "delegate",
                       {"tag": "pc1", "sleep": 1.0, "cwd": a, "executor": "p2a"})
-        self.srv.call(41, "qwen_delegate",
+        self.srv.call(41, "delegate",
                       {"tag": "pc2", "sleep": 1.0, "cwd": b, "executor": "p2b"})
         self.srv.wait(40, timeout=25)
         self.srv.wait(41, timeout=25)
         self.assert_serialized("pc1", "pc2")
 
     def test_queries_gate_on_the_endpoint_slot(self):
-        self.srv.call(42, "qwen_query",
+        self.srv.call(42, "query",
                       {"tag": "qs1", "sleep": 0.8, "cwd": self.repo_a,
                        "executor": "p1a"})
-        self.srv.call(43, "qwen_query",
+        self.srv.call(43, "query",
                       {"tag": "qs2", "sleep": 0.8, "cwd": self.repo_b,
                        "executor": "p1b"})
         self.srv.wait(42, timeout=25)
@@ -139,7 +139,7 @@ class GuardShape(Fixture):
 
     def guards(self, args):
         from qd import server as qs
-        return qs._guards_for("qwen_delegate", args)
+        return qs._guards_for("delegate", args)
 
     def test_in_tree_takes_endpoint_and_repo_lock(self):
         g = self.guards({"cwd": self.repo_a, "executor": "p2a"})
@@ -152,7 +152,7 @@ class GuardShape(Fixture):
 
     def test_worktree_config_default_skips_the_repo_lock(self):
         d = tempfile.mkdtemp()
-        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(d, ".delegation.json"), "w") as f:
             json.dump({"worktree": "auto"}, f)
         self.assertEqual(len(self.guards({"cwd": d, "executor": "p2a"})), 1)
 
@@ -160,20 +160,20 @@ class GuardShape(Fixture):
         # "off" is the long-standing default; an unrecognised value must not
         # silently isolate work the caller expected to land in the tree.
         d = tempfile.mkdtemp()
-        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(d, ".delegation.json"), "w") as f:
             json.dump({"worktree": "Auto"}, f)
         self.assertEqual(len(self.guards({"cwd": d, "executor": "p2a"})), 2)
 
     def test_arg_off_beats_a_config_auto(self):
         d = tempfile.mkdtemp()
-        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(d, ".delegation.json"), "w") as f:
             json.dump({"worktree": "auto"}, f)
         g = self.guards({"cwd": d, "executor": "p2a", "worktree": "off"})
         self.assertEqual(len(g), 2)
 
     def test_query_holds_the_endpoint_slot_only(self):
         from qd import server as qs
-        g = qs._guards_for("qwen_query",
+        g = qs._guards_for("query",
                            {"cwd": self.repo_a, "executor": "p2a"})
         self.assertEqual(len(g), 1)
 

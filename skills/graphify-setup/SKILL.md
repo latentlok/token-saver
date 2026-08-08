@@ -30,7 +30,7 @@ Check first — `command -v graphify`; if present, skip.
 
     graphify update . --no-cluster          # ~2s, deterministic, no LLM, no egress
 
-Writes `graphify-out/graph.json`. From here the token-saver server keeps it fresh (also
+Writes `graphify-out/graph.json`. From here the supervised-delegation server keeps it fresh (also
 `--no-cluster`, so it never touches an LLM) after every delegation — you do not re-run it.
 
 ## 3. Semantic naming — only if asked, and only explicitly
@@ -59,7 +59,7 @@ Delegate in `approval_mode="scoped"`: that gives Qwen the shell for the allowlis
 (`graphify explain/affected/path/query/diagnose/god-nodes`), and the server-injected
 `QWEN.md` graph-before-grep rule
 does the rest. In `auto-edit` (no shell) the worker greps instead — still correct.
-**Claude never queries graphify itself** — locate via `qwen_query` (measured +64% when
+**Claude never queries graphify itself** — locate via `query` (measured +64% when
 Claude uses the graph directly). Keep LLDs behavior-only.
 
-Point at a non-default binary with `QWEN_DELEGATE_GRAPHIFY=/path/to/graphify`.
+Point at a non-default binary with `DELEGATION_GRAPHIFY=/path/to/graphify`.

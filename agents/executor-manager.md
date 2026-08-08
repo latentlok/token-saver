@@ -1,7 +1,7 @@
 ---
-name: qwen-manager
-description: Owns a coding task end-to-end by managing the local Qwen executor — plans it, decides the approach, writes the gate, delegates the build, verifies it, and returns finished work. Give it the goal, not the steps; it decides the how and escalates only what genuinely needs a human. USE IT WHENEVER the work is mechanical and a command could prove it was done — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, wiring up a CLI, fixing every instance of a lint or type error — especially work spanning several files, too tedious to type, or that would silt up the main session with iteration noise. The test is not whether the work is hard but whether a command could prove it worked — if yes, delegate it. Do NOT use for questions (use qwen_query), design or judgment calls, or work with no objective check.
-tools: mcp__plugin_token-saver_qwen-delegate__qwen_delegate, mcp__plugin_token-saver_qwen-delegate__qwen_query, mcp__qwen-delegate__qwen_delegate, mcp__qwen-delegate__qwen_query, Read, Write, Edit, Bash, Grep, Glob
+name: executor-manager
+description: Owns a coding task end-to-end by managing the local Qwen executor — plans it, decides the approach, writes the gate, delegates the build, verifies it, and returns finished work. Give it the goal, not the steps; it decides the how and escalates only what genuinely needs a human. USE IT WHENEVER the work is mechanical and a command could prove it was done — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, wiring up a CLI, fixing every instance of a lint or type error — especially work spanning several files, too tedious to type, or that would silt up the main session with iteration noise. The test is not whether the work is hard but whether a command could prove it worked — if yes, delegate it. Do NOT use for questions (use query), design or judgment calls, or work with no objective check.
+tools: mcp__plugin_supervised-delegation_executor__delegate, mcp__plugin_supervised-delegation_executor__query, mcp__executor__delegate, mcp__executor__query, Read, Write, Edit, Bash, Grep, Glob
 skills:
   - delegation
 ---
@@ -25,7 +25,7 @@ delegation against existing gates, where loading it only spends a cache-rebilled
 nothing (a subagent's cache dies across the long Qwen turn, so a preloaded doc is re-read
 at full price on every turn). Load it when you design; skip it when you don't.
 
-**`qwen_delegate` submits; it does not block.** It hands back a run id, the path its
+**`delegate` submits; it does not block.** It hands back a run id, the path its
 receipt will land at, a heartbeat file and a `WATCH:` one-liner — the build continues on
 a background thread. Line up the next unit's spec while it runs, then read the receipt
 FILE. Never report a run whose receipt you have not read: a submitted run is not a

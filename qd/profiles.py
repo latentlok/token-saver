@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Executor profiles for qwen-delegate.
+Executor profiles for supervised-delegation.
 
 Resolves which Qwen Code invocation to use for delegation, based on a
 four-level precedence chain: call arg > project config > machine file
@@ -55,23 +55,23 @@ QWEN_LOCAL = {
 
 def _machine_path():
     return os.environ.get(
-        "QWEN_DELEGATE_EXECUTORS",
-        os.path.expanduser("~/.qwen-delegate/executors.json"),
+        "DELEGATION_EXECUTORS",
+        os.path.expanduser("~/.delegation/executors.json"),
     )
 
 
 def _machine_config_path():
     return os.environ.get(
-        "QWEN_DELEGATE_CONFIG",
-        os.path.expanduser("~/.qwen-delegate/config.json"),
+        "DELEGATION_CONFIG",
+        os.path.expanduser("~/.delegation/config.json"),
     )
 
 
 def dispatch_mode(cwd):
     """The configured delegation dispatch policy, or None if nobody set one.
 
-    Precedence: project .qwen-delegate.json `dispatch` > machine
-    ~/.qwen-delegate/config.json `dispatch`.
+    Precedence: project .delegation.json `dispatch` > machine
+    ~/.delegation/config.json `dispatch`.
 
     A KILL SWITCH, not the concurrency knob. Capacity is declared per endpoint
     as `parallel_max`; this exists to clamp every endpoint to ONE in-flight
@@ -85,7 +85,7 @@ def dispatch_mode(cwd):
     value other than "parallel" reads as "serial": a typo must not turn
     concurrency on.
     """
-    for path in (os.path.join(cwd or ".", ".qwen-delegate.json"),
+    for path in (os.path.join(cwd or ".", ".delegation.json"),
                  _machine_config_path()):
         data, _ = _load(path)
         mode = (data or {}).get("dispatch")
@@ -157,7 +157,7 @@ def _resolve(name, profiles, endpoints):
 def resolve(cwd, call_executor=None):
     """Resolve the executor profile to use for a delegation.
 
-    Precedence: call_executor arg > project .qwen-delegate.json 'executor'
+    Precedence: call_executor arg > project .delegation.json 'executor'
     > machine file 'default' > builtin qwen-local.
 
     Concurrency comes from ONE place: the endpoint's `parallel_max`. Each
@@ -199,7 +199,7 @@ def _resolve_profile(cwd, call_executor=None):
         )
 
     # Level 2: project config
-    proj_path = os.path.join(cwd, ".qwen-delegate.json")
+    proj_path = os.path.join(cwd, ".delegation.json")
     proj, _ = _load(proj_path)
     if proj and "executor" in proj:
         data, err = _load(mp_path)

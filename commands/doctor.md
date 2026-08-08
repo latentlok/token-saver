@@ -3,7 +3,7 @@ description: Audit this machine's Qwen executor settings — the per-machine hal
 argument-hint: (no arguments; add --fix to write the settings-side fixes)
 ---
 
-# token-saver — doctor
+# supervised-delegation — doctor
 
 Run the audit and report it. Nothing else — this is a 30-second command, not an
 investigation.

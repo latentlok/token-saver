@@ -1,4 +1,4 @@
-# token-saver
+# supervised-delegation
 
 Claude plans the work and decides what "correct" means. A free local model does the
 typing. A command you choose decides whether it worked. You read a short receipt
@@ -19,8 +19,8 @@ renames, test scaffolding, codemods — done on someone else's tokens.
 
 In Claude Code:
 ```
-/plugin marketplace add latentlok/token-saver
-/plugin install token-saver@token-saver
+/plugin marketplace add latentlok/supervised-delegation
+/plugin install supervised-delegation@supervised-delegation
 /reload-plugins
 ```
 
@@ -32,7 +32,7 @@ up the install in the session you ran it in.
 **Third-party marketplaces do not auto-update by default.** You will sit on the
 version you installed until you run:
 ```
-/plugin marketplace update token-saver
+/plugin marketplace update supervised-delegation
 ```
 
 ## First thing to do
@@ -40,17 +40,17 @@ version you installed until you run:
 1. Check the machine half of the setup — the one step nothing can do for you:
 
    ```
-   /token-saver:doctor
+   /supervised-delegation:doctor
    ```
 
-2. Ask Claude to add token-saver's block to this project's `CLAUDE.md`, and say yes
+2. Ask Claude to add supervised-delegation's block to this project's `CLAUDE.md`, and say yes
    when it offers. Nothing installs it uninvited. It is optional; skipping it changes
    nothing except that delegation stops being automatic.
 
 3. Commit your work first — git is the only undo — then ask for something mechanical:
 
    ```
-   /token-saver:offload add tests for the functions in src/parser.py
+   /supervised-delegation:offload add tests for the functions in src/parser.py
    ```
 
 ## Read next

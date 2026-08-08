@@ -13,7 +13,7 @@ import time
 
 # ---------- compaction markers ----------
 COMPACT_DIR = os.environ.get("QCOMPACT_DIR") or os.path.expanduser(
-    "~/.qwen-delegate/compacted"
+    "~/.delegation/compacted"
 )
 
 # Fraction of the context window at which the executor may auto-compact. 1.0 = "as

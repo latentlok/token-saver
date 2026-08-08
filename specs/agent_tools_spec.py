@@ -32,8 +32,8 @@ import unittest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_HERE)
 
-TOOL_BASENAMES = ("qwen_delegate", "qwen_query")
-LEGACY_PREFIX = "mcp__qwen-delegate__"
+TOOL_BASENAMES = ("delegate", "query")
+LEGACY_PREFIX = "mcp__executor__"
 
 
 def prefixed_names():

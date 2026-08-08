@@ -55,7 +55,7 @@ def test_dir(cwd):
 def detect_test_cmd(cwd):
     """Return a test command string for this project, or '' if nothing detected.
 
-    Config wins over detection. `test_command` in .qwen-delegate.json is an
+    Config wins over detection. `test_command` in .delegation.json is an
     exact answer for a project whose layout no detector can guess -- and every
     detector here is a guess, so a project only has to be slightly unusual to
     get a wrong one or none at all. `test_dir` names the folder for the
@@ -138,7 +138,7 @@ def detect_test_cmd(cwd):
         # command with shell=True). The pattern is a constant but would be
         # glob-expanded against the project root before unittest ever saw it.
         # `d` is the dangerous one: it comes from `test_dir` in
-        # .qwen-delegate.json, so it is ATTACKER-CONTROLLED for anyone who
+        # .delegation.json, so it is ATTACKER-CONTROLLED for anyone who
         # delegates into a repo carrying a hostile config, and unquoted it was
         # arbitrary command execution, not merely a spaces bug --
         #

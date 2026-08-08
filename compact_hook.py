@@ -25,7 +25,7 @@ import sys
 import time
 
 MARK_DIR = os.environ.get("QCOMPACT_DIR") or os.path.expanduser(
-    "~/.qwen-delegate/compacted"
+    "~/.delegation/compacted"
 )
 
 # "refuse" (the default policy) means: this run must not continue on a summarised
@@ -73,7 +73,7 @@ def main():
         _record(sid, "pending", {"ts": now, "trigger": payload.get("trigger")})
         if POLICY == "refuse":
             sys.stderr.write(
-                "qwen-delegate: compaction refused -- this task exceeds the context "
+                "supervised-delegation: compaction refused -- this task exceeds the context "
                 "budget for one delegation. It must be split, not summarised.\n")
             sys.exit(2)          # documented as "block compaction"
 

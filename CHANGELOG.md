@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.3 — 2026-08-08 (the rename round)
+
+`token-saver` was already taken in Anthropic's community plugin directory — by an
+unrelated CLI-output compressor — and the name was outcome-shaped anyway, which is
+how it collided. Everything the plugin exposes is renamed to describe the mechanism
+instead, and the `qwen` debt goes with it: the executor has been fungible since the
+vLLM cutover in 0.5.1, but the server key, the tool names, the state directories and
+seven env vars all still named one model.
+
+Nothing here is backward compatible and nothing needs to be — there are no installs
+to migrate.
+
+- Plugin `token-saver` → **`supervised-delegation`** (`.claude-plugin/plugin.json`
+  name + displayName, and the marketplace manifest). Install is now
+  `/plugin install supervised-delegation@supervised-delegation`.
+- MCP server key `qwen-delegate` → **`executor`**; tools `qwen_delegate`/`qwen_query`
+  → **`delegate`**/**`query`**. Claude sees
+  `mcp__plugin_supervised-delegation_executor__delegate`. `specs/agent_tools_spec.py`
+  derives that prefix from the two manifests, so it went red until every grant
+  followed — which is what it was built in 0.6.2 to do.
+- Agent `qwen-manager` → **`executor-manager`**.
+- State namespace `.qwen-delegate/`, `~/.qwen-delegate/`, `.qwen-delegate.json` →
+  **`.delegation/`**, **`~/.delegation/`**, **`.delegation.json`**; the seven
+  `QWEN_DELEGATE_*` env vars → **`DELEGATION_*`**. Existing machines need
+  `mv ~/.qwen-delegate ~/.delegation` with no server running.
+- CLAUDE.md managed-block markers and the compaction refusal now say
+  `supervised-delegation:`, not `executor:` — they land in someone else's file,
+  where the server key would not identify what wrote them.
+- `qd/doctor.py`: the running-server detector matches the install path, which now
+  has two sources that disagree — installed plugins sit under the plugin name, git
+  checkouts under the repo name (still `token-saver`). It matches both; dropping
+  either half makes the duplicate-server check fail **open**.
+- Unchanged on purpose: `QWEN.md` (the qwen CLI's own context-file contract),
+  `qwen-code`, `QWEN_CODE_SYSTEM_SETTINGS_PATH`, the `qwen-local` executor profile,
+  and `qd/limits_qwen.py` — these name the real external CLI and a real model's
+  token math. The `qd/` package keeps its name; it has no surface outside the repo.
+
 ## 0.6.2 — 2026-08-07 (the toolless-container round)
 
 Every subagent this plugin ships was born without its delegation tools, and two

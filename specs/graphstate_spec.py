@@ -30,7 +30,7 @@ Public surface pinned here:
     qd.graph.refresh_async(cwd, files) -> threading.Thread
     qd.graph.graph_line(cwd) -> str                    (a C2 GRAPH: line)
 
-The graphify binary is QWEN_DELEGATE_GRAPHIFY (default "graphify"); tests
+The graphify binary is DELEGATION_GRAPHIFY (default "graphify"); tests
 point it at a stub whose exit code and delay they control.
 
 Run:  python3 specs/graphstate_spec.py
@@ -79,7 +79,7 @@ class Fixture(unittest.TestCase):
         with open(self.stub, "w") as f:
             f.write(STUB)
         os.chmod(self.stub, os.stat(self.stub).st_mode | stat.S_IEXEC)
-        os.environ["QWEN_DELEGATE_GRAPHIFY"] = self.stub
+        os.environ["DELEGATION_GRAPHIFY"] = self.stub
         self.argv_rec = os.path.join(td, "argv.txt")
         os.environ["STUB_GRAPHIFY_ARGV"] = self.argv_rec
 
@@ -158,7 +158,7 @@ class Sidecar(Fixture):
         self.assertTrue(st.get("reason"))
 
     def test_missing_graphify_fails_soft(self):
-        os.environ["QWEN_DELEGATE_GRAPHIFY"] = "/no/such/graphify-xyz"
+        os.environ["DELEGATION_GRAPHIFY"] = "/no/such/graphify-xyz"
         graph.refresh_sync(self.cwd, ["a.py"])   # must not raise
         st = graph.read_state(self.cwd)
         self.assertEqual(st["status"], "failed")
@@ -189,7 +189,7 @@ class GraphifyCmd(Fixture):
         self.assertIn(self.cwd, cmd)
 
     def test_cmd_default_binary_is_graphify(self):
-        del os.environ["QWEN_DELEGATE_GRAPHIFY"]
+        del os.environ["DELEGATION_GRAPHIFY"]
         self.assertEqual(graph.graphify_cmd(self.cwd, [])[0], "graphify")
 
     def test_cmd_forces_structural_no_cluster(self):
@@ -205,13 +205,13 @@ class GraphAvailability(unittest.TestCase):
     no-op tip (not an error) when graphify is absent."""
 
     def setUp(self):
-        self._saved = os.environ.get("QWEN_DELEGATE_GRAPHIFY")
+        self._saved = os.environ.get("DELEGATION_GRAPHIFY")
 
     def tearDown(self):
         if self._saved is None:
-            os.environ.pop("QWEN_DELEGATE_GRAPHIFY", None)
+            os.environ.pop("DELEGATION_GRAPHIFY", None)
         else:
-            os.environ["QWEN_DELEGATE_GRAPHIFY"] = self._saved
+            os.environ["DELEGATION_GRAPHIFY"] = self._saved
 
     def test_available_and_line_when_binary_present(self):
         d = tempfile.mkdtemp()
@@ -219,12 +219,12 @@ class GraphAvailability(unittest.TestCase):
         with open(p, "w") as f:
             f.write("#!/bin/sh\n")
         os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
-        os.environ["QWEN_DELEGATE_GRAPHIFY"] = p
+        os.environ["DELEGATION_GRAPHIFY"] = p
         self.assertTrue(graph.available())
         self.assertIn("structural code graph", graph.bootstrap_line())
 
     def test_unavailable_and_tip_when_binary_missing(self):
-        os.environ["QWEN_DELEGATE_GRAPHIFY"] = "/nonexistent/graphify-xyz-123"
+        os.environ["DELEGATION_GRAPHIFY"] = "/nonexistent/graphify-xyz-123"
         self.assertFalse(graph.available())
         self.assertIn("isn't installed", graph.bootstrap_line())
 

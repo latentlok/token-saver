@@ -39,8 +39,8 @@ class Fixture(unittest.TestCase):
     def setUp(self):
         self._env = dict(os.environ)
         self.d = tempfile.mkdtemp()
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = os.path.join(self.d, "ex.json")
-        os.environ["QWEN_DELEGATE_CONFIG"] = os.path.join(self.d, "cfg.json")
+        os.environ["DELEGATION_EXECUTORS"] = os.path.join(self.d, "ex.json")
+        os.environ["DELEGATION_CONFIG"] = os.path.join(self.d, "cfg.json")
         engine._preflight_forget()
 
     def tearDown(self):
@@ -50,7 +50,7 @@ class Fixture(unittest.TestCase):
 
     def fleet(self, endpoints, dispatch=None):
         """A machine file with two profiles on distinct endpoints."""
-        with open(os.environ["QWEN_DELEGATE_EXECUTORS"], "w") as f:
+        with open(os.environ["DELEGATION_EXECUTORS"], "w") as f:
             json.dump({
                 "default": "gpu",
                 "profiles": {
@@ -60,7 +60,7 @@ class Fixture(unittest.TestCase):
                 "endpoints": endpoints,
             }, f)
         if dispatch is not None:
-            with open(os.environ["QWEN_DELEGATE_CONFIG"], "w") as f:
+            with open(os.environ["DELEGATION_CONFIG"], "w") as f:
                 json.dump({"dispatch": dispatch}, f)
 
 

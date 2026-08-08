@@ -314,10 +314,10 @@ more expensive than waiting.
 `pgrep -af "token-saver.*server.py"` on this box:
 
 ```
-7 x /home/dev-jaya/....../token-saver/0.3.0/server.py
-1 x /home/hermes-vishal/.../token-saver/0.4.1/server.py   <- running since Aug 1 (3 days)
-1 x /home/hermes-vishal/.../token-saver/0.5.1/server.py   <- current
-1 x /home/dev-vishal/....../token-saver/0.5.1/server.py
+7 x /home/<user-a>/...../token-saver/0.3.0/server.py
+1 x /home/<user-b>/.../token-saver/0.4.1/server.py   <- running since Aug 1 (3 days)
+1 x /home/<user-b>/.../token-saver/0.5.1/server.py   <- current
+1 x /home/<user-c>/...../token-saver/0.5.1/server.py
 ```
 
 `installed_plugins.json` says the installed version is **0.5.1**, yet a **0.4.1**
@@ -1307,7 +1307,7 @@ if not llm_url:
 ```
 
 But this repo's production path resolves through `engine.llm.resolve_role`, which falls
-back to `~/.hermes/profiles/scout/.env`. On this correctly-configured machine:
+back to `~/.<internal-tool>/profiles/<profile>/.env`. On this correctly-configured machine:
 
 ```
 $ uv run pytest gate_tests/test_l10_synthesis_live.py   # HERMES_LIVE_TESTS=1

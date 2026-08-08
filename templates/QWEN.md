@@ -139,7 +139,7 @@ naming files you did not touch, is a false report.
 ## Web references
 
 Any web page or documentation fetched during a task must be saved to
-`.qwen-delegate/refs/<short-slug>.md` with the source URL on line 1. This keeps the
+`.delegation/refs/<short-slug>.md` with the source URL on line 1. This keeps the
 build reproducible and lets the manager spot-check sources. Never cite a web source you
 did not save.
 

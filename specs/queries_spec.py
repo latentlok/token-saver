@@ -8,7 +8,7 @@ Port of run_query with the v2 seam: the executor comes from the
 profile chain (qd.profiles.resolve honoring the per-call "executor" arg), runs
 through qd.invoke.run_executor, and the log record carries C5 executor/cost.
 The stub profile is injected through the REAL resolution chain via
-QWEN_DELEGATE_EXECUTORS -- no test-only backdoors in the module.
+DELEGATION_EXECUTORS -- no test-only backdoors in the module.
 
 Load-bearing:
   1. Queries run in plan mode -- read-only by construction. The stub must
@@ -70,8 +70,8 @@ class Fixture(unittest.TestCase):
                          "-r", "{resume}"],
                 "env": {"STUB_OUT": self.out},
             }}}, f)
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = machine
-        os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(td, "reg.jsonl")
+        os.environ["DELEGATION_EXECUTORS"] = machine
+        os.environ["DELEGATION_REGISTRY"] = os.path.join(td, "reg.jsonl")
 
     def tearDown(self):
         os.environ.clear()
@@ -88,7 +88,7 @@ class Fixture(unittest.TestCase):
             return json.load(f)
 
     def log_records(self):
-        p = os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")
+        p = os.path.join(self.cwd, ".delegation", "runs.jsonl")
         with open(p) as f:
             return [json.loads(l) for l in f.read().splitlines()]
 
@@ -178,7 +178,7 @@ class Errors(Fixture):
         self.assertIn("STATUS: error", out)
 
     def test_executor_failure_is_error_receipt_and_logged(self):
-        machine = os.environ["QWEN_DELEGATE_EXECUTORS"]
+        machine = os.environ["DELEGATION_EXECUTORS"]
         with open(machine) as f:
             cfg = json.load(f)
         cfg["profiles"]["stub"]["argv"][0] = "/no/such/interp"
@@ -255,7 +255,7 @@ class ResultSchemaOutOfSubset(Fixture):
     disconnected (PRINCIPLES §IV).
 
     The check is the SAME function qd/engine.py's `_preconditions` calls.
-    qwen_query never enters engine.py, and a keyword list maintained twice
+    query never enters engine.py, and a keyword list maintained twice
     drifts on the first edit -- which is exactly the shape of bug this repo
     keeps finding: covered on one surface, silently open on the other.
 
@@ -288,7 +288,7 @@ class ResultSchemaOutOfSubset(Fixture):
         # question it exists for.
         self.q(result_schema=self.BAD)
         self.assertFalse(os.path.exists(
-            os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")))
+            os.path.join(self.cwd, ".delegation", "runs.jsonl")))
 
     def test_a_keyword_buried_deeper_is_refused_here_too(self):
         out = self.q(result_schema={"type": "array", "items": {
@@ -311,7 +311,7 @@ class LogSeam(Fixture):
     def test_c5_fields_and_query_shape(self):
         self.q()
         rec = self.log_records()[-1]
-        self.assertEqual(rec["tool"], "qwen_query")
+        self.assertEqual(rec["tool"], "query")
         self.assertEqual(rec["executor"], "stub")
         self.assertEqual(rec["cost_usd"], 0.0)
         self.assertEqual(rec["approval_mode"], "plan")

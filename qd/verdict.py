@@ -678,7 +678,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             "is partial. It is not a defect in the worker or in your code. "
             "Either the task is too big for one delegation -- split it -- or "
             "the limit is too tight for this project: raise `burn_budget` / "
-            "`decode_tps` in .qwen-delegate.json. Re-running it unchanged will "
+            "`decode_tps` in .delegation.json. Re-running it unchanged will "
             "hit the same wall."
         )
 
@@ -770,7 +770,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             f"MCP APPROVAL NEEDED: {len(mcp_blocked)} call(s) to "
             f"{len(names)} tool(s) (judge on the tool name; approve via a "
             "mcp_allow name regex and re-delegate; full list in "
-            ".qwen-delegate/runs.jsonl):\n"
+            ".delegation/runs.jsonl):\n"
             + "\n".join(f"  - {n}" for n in names[:6]))
     if blocked:
         groups = {}
@@ -795,7 +795,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
             f"SHELL APPROVAL NEEDED: {len(blocked)} blocked in {len(groups)} "
             "group(s) (judge on the command alone; approve via shell_allow + "
             "same session_id, deny with the reason in shell_feedback; full "
-            "list in .qwen-delegate/runs.jsonl):\n" + "\n".join(lines)
+            "list in .delegation/runs.jsonl):\n" + "\n".join(lines)
         )
 
     st = ctx.get("meta", {}).get("stats") or {}
@@ -1564,7 +1564,7 @@ def render(status, session_id, trail, result_text, denials, max_iter, ctx, last_
     extra["accounted_ms"] = accounted_ms
     extra["unaccounted_ms"] = wall_ms - accounted_ms
     write_runlog(cwd, leverage_record(
-        "qwen_delegate", cwd, status, verdict, cum, ctx.get("peak", 0),
+        "delegate", cwd, status, verdict, cum, ctx.get("peak", 0),
         executor=executor or "qwen-local",
         cost_usd=cost_usd,
         extra=extra,

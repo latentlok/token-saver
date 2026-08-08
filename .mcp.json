@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "qwen-delegate": {
+    "executor": {
       "command": "python3",
       "args": ["${CLAUDE_PLUGIN_ROOT}/server.py"],
       "timeout": 7200000

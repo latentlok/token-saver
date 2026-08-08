@@ -19,7 +19,7 @@ Locks wrap the whole handler, not just the subprocess -- a deliberate
 simplification (bookkeeping is milliseconds against minutes of inference)
 pinned in specs/dispatch_spec.py, which freezes all behavior here.
 
-U5.2 makes qwen_delegate ASYNCHRONOUS: the tool call SUBMITS a run and answers
+U5.2 makes delegate ASYNCHRONOUS: the tool call SUBMITS a run and answers
 in milliseconds with a run id and the path its receipt will land at; the
 delegation itself continues on a daemon thread and files the receipt when it
 finishes. Two consequences are load-bearing here:
@@ -64,7 +64,7 @@ CARRY_DEFAULT = "handoff"
 PROTOCOL_VERSION = "2024-11-05"
 from qd.core import lifecycle
 
-SERVER_INFO = {"name": "qwen-delegate", "version": "0.6.2"}
+SERVER_INFO = {"name": "executor", "version": "0.6.3"}
 DRAIN_SECONDS = 10.0
 SLOT_POLL_SECONDS = 0.5
 
@@ -83,8 +83,8 @@ _endpoint_guard = threading.Lock()
 
 
 def lock_dir():
-    return os.environ.get("QWEN_DELEGATE_LOCKS") or os.path.expanduser(
-        "~/.qwen-delegate/locks")
+    return os.environ.get("DELEGATION_LOCKS") or os.path.expanduser(
+        "~/.delegation/locks")
 
 
 class FileSlots:
@@ -173,7 +173,7 @@ class EndpointGuard:
 
 
 def log(msg):
-    sys.stderr.write(f"[qwen-delegate] {msg}\n")
+    sys.stderr.write(f"[executor] {msg}\n")
     sys.stderr.flush()
 
 
@@ -235,9 +235,9 @@ def _guards_for(name, args):
     in-tree."""
     from qd import engine
     guards = []
-    if name in ("qwen_delegate", "qwen_query"):
+    if name in ("delegate", "query"):
         guards.append(_endpoint_sem(args.get("cwd"), args.get("executor")))
-    if name == "qwen_delegate" and engine.worktree_mode(args) == "off":
+    if name == "delegate" and engine.worktree_mode(args) == "off":
         guards.append(_repo_lock(args.get("cwd")))
     return guards
 
@@ -245,7 +245,7 @@ def _guards_for(name, args):
 def self_guarded(fn):
     """Mark a handler as taking its own locks.
 
-    A property of the HANDLER, not of the tool name: qwen_delegate submits and
+    A property of the HANDLER, not of the tool name: delegate submits and
     returns in milliseconds (U5.2), so guarding the submit would queue the
     caller behind a busy GPU for a call that runs nothing. Anything else
     registered under that name -- a test double, a future synchronous tool --
@@ -341,7 +341,7 @@ def run_batch(items, handler, on_partial=None):
             return
         acquired = []
         try:
-            for g in _guards_for("qwen_delegate", args):
+            for g in _guards_for("delegate", args):
                 g.acquire()
                 acquired.append(g)
             try:
@@ -624,7 +624,7 @@ def run_chain(items, handler, on_partial=None):
         carry_line = _carry_line(k, grade, crossed, declared) if k > 1 else ""
         acquired = []
         try:
-            for g in _guards_for("qwen_delegate", args):
+            for g in _guards_for("delegate", args):
                 g.acquire()
                 acquired.append(g)
             try:
@@ -1036,7 +1036,7 @@ def _deliver(run_id, receipt, partial, work):
 
 @self_guarded
 def submit_delegate(args):
-    """The qwen_delegate entry: SUBMIT the run, answer now (U5.2).
+    """The delegate entry: SUBMIT the run, answer now (U5.2).
 
     A delegation runs for minutes. Blocking the tool call for them bought the
     caller nothing it could not get from a file, and cost it everything it
@@ -1073,13 +1073,13 @@ def submit_delegate(args):
         # to do: the response IS the receipt. Chain and batch take their guards
         # per link, so only the lone delegation needs them here.
         if single:
-            return _held(_guards_for("qwen_delegate", args),
+            return _held(_guards_for("delegate", args),
                          lambda: run_delegate_batch(args))
         return run_delegate_batch(args)
 
     # Resolved here, acquired in the thread: resolving names a profile (an
     # argument error worth answering now), acquiring waits for a GPU.
-    guards = _guards_for("qwen_delegate", args) if single else []
+    guards = _guards_for("delegate", args) if single else []
 
     run_args = dict(args)
     if single:
@@ -1116,7 +1116,7 @@ def submit_delegate(args):
     # completions elsewhere and so leaves this marker open until its process
     # ends. Accepted: the marker answers "did my run die with the session",
     # and for a run that outlived its session the answer is still correct.
-    runlog.write_runlog(cwd, {"tool": "qwen_delegate", "status": "running",
+    runlog.write_runlog(cwd, {"tool": "delegate", "status": "running",
                               "run_id": run_id, "pid": os.getpid(),
                               "cwd": cwd, "ts": runlog.now_iso()})
     threading.Thread(target=_deliver,
@@ -1127,11 +1127,11 @@ def submit_delegate(args):
 
 def _default_tools():
     from qd import queries
-    return {"qwen_delegate": submit_delegate,
+    return {"delegate": submit_delegate,
             # Queries stay SYNCHRONOUS: the answer is the deliverable and it
             # arrives in a minute or two, so a file to poll would be pure
             # ceremony between a question and its answer.
-            "qwen_query": queries.run_query}
+            "query": queries.run_query}
 
 
 def _default_schemas():
@@ -1141,7 +1141,7 @@ def _default_schemas():
     `qwen_investigate` sat in the table above with no entry here, so it was
     dispatchable and undiscoverable at once: unreachable by any conformant
     client, and a lie to anyone reading the dispatch table. Deleted rather than
-    declared -- it was an alias for `qwen_query(format="map")`, a value
+    declared -- it was an alias for `query(format="map")`, a value
     QUERY_TOOL already declares in its own enum.
     """
     from qd import schemas
@@ -1166,11 +1166,11 @@ def _claim_machine():
     serving. Never fatal: failing to start is worse than the duplication.
     """
     try:
-        base = os.path.join(os.path.expanduser("~"), ".qwen-delegate")
+        base = os.path.join(os.path.expanduser("~"), ".delegation")
         outcome = lifecycle.supersede(base, os.getpid(),
                                       SERVER_INFO.get("version", "?"))
         if outcome == "live":
-            log("another token-saver server is already running -- "
+            log("another supervised-delegation server is already running -- "
                 "run `doctor` to see its pid and version")
         elif outcome == "stale":
             log("cleared a stale server record")

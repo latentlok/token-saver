@@ -71,7 +71,7 @@ class SelfGateScript(unittest.TestCase):
         # satisfiable -- self-grading then silently never works for anyone
         # whose suite is more than one file.
         write_suite(self.cwd, 3)
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"min_tests": 7, "test_command": '
                     '"python3 -m unittest discover -s tests -t . -v; '
                     'python3 -m unittest discover -s tests -t . -v; '
@@ -84,7 +84,7 @@ class SelfGateScript(unittest.TestCase):
     def test_an_unparseable_count_still_says_so(self):
         # The summing must not turn "no count found" into a silent zero: the
         # vacuous-pass guard being INACTIVE is something the reader must see.
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"test_command": "echo no counts here"}')
         rc, out = run_gate(self.cwd)
         self.assertEqual(rc, 0)
@@ -120,7 +120,7 @@ class SelfGateScript(unittest.TestCase):
         with open(os.path.join(self.cwd, "tests", "test_skip.py"), "w") as f:
             f.write("import unittest\n\nclass S(unittest.TestCase):\n"
                     '    @unittest.skip("x")\n    def test_s(self):\n        pass\n')
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"min_tests": 7}')      # 7 ran, 1 skipped -> 6 real
         rc, out = run_gate(self.cwd)
         self.assertNotEqual(rc, 0, f"a skipped test counted toward the floor:\n{out}")
@@ -139,7 +139,7 @@ class SelfGateScript(unittest.TestCase):
     def test_an_all_skipped_pytest_suite_fails(self):
         # pytest's summary is "5 skipped" -- no "passed" clause, so the old
         # parse found no count and fell through to "guard inactive" + exit 0.
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"test_command": "echo \'===== 5 skipped in 0.01s =====\'"}')
         rc, out = run_gate(self.cwd)
         self.assertNotEqual(rc, 0, f"a fully-skipped pytest run passed:\n{out}")
@@ -147,14 +147,14 @@ class SelfGateScript(unittest.TestCase):
     def test_pytest_passed_counts_are_not_double_discounted(self):
         # pytest's "N passed" already EXCLUDES skips, so subtracting them again
         # would fail a suite that genuinely passed enough tests.
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"test_command": "echo \'6 passed, 3 skipped in 0.1s\'"}')
         rc, out = run_gate(self.cwd)
         self.assertEqual(rc, 0, out)
 
     def test_min_tests_config_override(self):
         write_suite(self.cwd, 6)
-        with open(os.path.join(self.cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.cwd, ".delegation.json"), "w") as f:
             f.write('{"min_tests": 10}')
         rc, out = run_gate(self.cwd)
         self.assertNotEqual(rc, 0)
@@ -171,7 +171,7 @@ class SelfGateScript(unittest.TestCase):
 
     def test_gate_dir_is_self_gitignored(self):
         engine._ensure_self_gate(self.cwd)
-        with open(os.path.join(self.cwd, ".qwen-delegate", ".gitignore")) as f:
+        with open(os.path.join(self.cwd, ".delegation", ".gitignore")) as f:
             self.assertEqual(f.read().strip(), "*")
 
     def test_min_override_ratchets_above_config(self):
@@ -194,8 +194,8 @@ class TrustPrecondition(unittest.TestCase):
 
 
 class TrustResolution(unittest.TestCase):
-    """R3 slider resolves: call arg > project .qwen-delegate.json > machine
-    ~/.qwen-delegate/config.json > builtin 'self'. A resolved 'auto' is refused,
+    """R3 slider resolves: call arg > project .delegation.json > machine
+    ~/.delegation/config.json > builtin 'self'. A resolved 'auto' is refused,
     steering the orchestrator to pick 'self'/'verified' per task.
 
     Proven hermetically through the refusal branch (which runs before git/worker):
@@ -205,20 +205,20 @@ class TrustResolution(unittest.TestCase):
 
     def setUp(self):
         # Point the machine config at a nonexistent file so the global tier is
-        # empty unless a test sets it -- never the real ~/.qwen-delegate/config.json.
-        self._saved = os.environ.get("QWEN_DELEGATE_CONFIG")
-        os.environ["QWEN_DELEGATE_CONFIG"] = os.path.join(
+        # empty unless a test sets it -- never the real ~/.delegation/config.json.
+        self._saved = os.environ.get("DELEGATION_CONFIG")
+        os.environ["DELEGATION_CONFIG"] = os.path.join(
             tempfile.mkdtemp(), "none.json")
 
     def tearDown(self):
         if self._saved is None:
-            os.environ.pop("QWEN_DELEGATE_CONFIG", None)
+            os.environ.pop("DELEGATION_CONFIG", None)
         else:
-            os.environ["QWEN_DELEGATE_CONFIG"] = self._saved
+            os.environ["DELEGATION_CONFIG"] = self._saved
 
     def _proj(self, trust_val):
         cwd = tempfile.mkdtemp()
-        with open(os.path.join(cwd, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(cwd, ".delegation.json"), "w") as f:
             f.write('{"trust": "%s"}' % trust_val)
         return cwd
 
@@ -226,7 +226,7 @@ class TrustResolution(unittest.TestCase):
         p = os.path.join(tempfile.mkdtemp(), "config.json")
         with open(p, "w") as f:
             f.write('{"trust": "%s"}' % trust_val)
-        os.environ["QWEN_DELEGATE_CONFIG"] = p
+        os.environ["DELEGATION_CONFIG"] = p
 
     # --- project tier ---
     def test_project_config_sets_the_default(self):
@@ -293,7 +293,7 @@ class ReceiptTrustLine(unittest.TestCase):
         from qd import verdict
         cwd = tempfile.mkdtemp()
         subprocess.run(["git", "init", "-q"], cwd=cwd)
-        os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(cwd, "reg.jsonl")
+        os.environ["DELEGATION_REGISTRY"] = os.path.join(cwd, "reg.jsonl")
         ctx = {"cwd": cwd, "guard_on": False, "preflight": False,
                "pre_status": {}, "pre_sha": "", "pre_clean": True, "peak": 0,
                "meta": {}, "timeout": 900, "approval_mode": "scoped",

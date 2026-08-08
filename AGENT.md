@@ -1,4 +1,4 @@
-# AGENT.md — token-saver
+# AGENT.md — supervised-delegation
 
 Part I is using the tool, Part II is working on this repository. A reference, not a tutorial: read
 §1, then look things up.
@@ -24,17 +24,17 @@ whose receipt has not landed. Full list: §9.
 
 ## 2. The two tools
 
-**`qwen_query`** — a read-only question about a codebase. Plan mode by construction: it cannot
+**`query`** — a read-only question about a codebase. Plan mode by construction: it cannot
 write, needs no gate, and runs **synchronously**, so the answer is the deliverable. Required
 `question` and `cwd`; optional `format` (`answer` default, `map` for a structured repo map),
 `focus`, `session_id`, `timeout_sec`, `result_schema`. No `executor`.
 
-**`qwen_delegate`** — build something. Required `task` and `cwd`, everything in §3 optional; the
-call submits and the receipt lands later. A question about code is a `qwen_query`, **never** a
+**`delegate`** — build something. Required `task` and `cwd`, everything in §3 optional; the
+call submits and the receipt lands later. A question about code is a `query`, **never** a
 delegation: that spends a build loop on something with no gate. `cwd` must be a committed git repo —
 git is the only rollback.
 
-## 3. `qwen_delegate` arguments
+## 3. `delegate` arguments
 
 | Argument | What it does | Default |
 |---|---|---|
@@ -107,8 +107,8 @@ call, and the answer it gets in milliseconds — **real output shape, run agains
 ```
 STATUS: submitted
 RUN: r5fc3ab
-RECEIPT: /abs/path/to/greet/.qwen-delegate/receipts/r5fc3ab.md — lands on completion
-HEARTBEAT: /abs/path/to/greet/.qwen-delegate/progress.json
+RECEIPT: /abs/path/to/greet/.delegation/receipts/r5fc3ab.md — lands on completion
+HEARTBEAT: /abs/path/to/greet/.delegation/progress.json
 WATCH: until [ -f …/receipts/r5fc3ab.md ]; do sleep 5; done; cat …/receipts/r5fc3ab.md
 ```
 
@@ -157,7 +157,7 @@ worker starts at all**, past every approval mode, `touch_scope` and trust level 
 `advisory_gates[].cmd` — a *larger* grant than the three keys left out. **A playbook from a repo you
 did not write runs its authors' commands.**
 
-**What lands in your repo.** `.qwen-delegate/` is self-ignoring — it writes its own `.gitignore`
+**What lands in your repo.** `.delegation/` is self-ignoring — it writes its own `.gitignore`
 containing `*`, and your project's is untouched — and three files in it are yours:
 `receipts/<run_id>.md`, the deliverable; its `.partial.md` sibling while a chain or batch runs;
 `progress.json`, to see the run is alive. Outside it: the first delegation writes **`QWEN.md`**, the
@@ -168,7 +168,7 @@ gitignore by hand.
 
 **The code graph** is a fourth thing, and not yours to query: it is a tool that the **worker** uses,
 not one you use — architect-side graph calls measured **+64% total cost**, because every call is a
-turn whose output stays in your context forever. Ask one `qwen_query` and let the worker read the
+turn whose output stays in your context forever. Ask one `query` and let the worker read the
 graph on free tokens, under `approval_mode: "scoped"` with the read-only subcommands allowed
 explicitly: `auto-edit` has **no shell at all**, so a worker told to use the graph under it falls
 back to grep silently.
@@ -229,7 +229,7 @@ Only enum, items, properties, required, type are checked -- a schema built entir
 from that subset is honoured, so rewrite the schema within it, or drop result_schema.
 ```
 
-On `qwen_query` that refusal is harder still: a query has no gate to bounce a false pass off, so it
+On `query` that refusal is harder still: a query has no gate to bounce a false pass off, so it
 stops the call rather than reporting one, and the conformance check there is only *reported* — one
 `RESULT:` line above the answer. `RESULT: valid (schema)` counts only where the server writes it,
 never inside quoted worker output.
@@ -316,7 +316,7 @@ is not there is not a failure. Removing a spec is never how a red suite gets fix
 **Merging does NOT publish to existing users by itself.** Users compare the *declared version
 string*, so a merge without a version bump reaches nobody — step 1 is the release, not the merge.
 And third-party marketplaces do not auto-update: a user stays on the old version until they run
-`/plugin marketplace update token-saver`.
+`/plugin marketplace update supervised-delegation`.
 
 ## Documentation
 
