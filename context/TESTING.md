@@ -1,6 +1,6 @@
 # Testing brief
 
-You are testing **token-saver**, a Claude Code plugin that delegates work to a free local
+You are testing **supervised-delegation**, a Claude Code plugin that delegates work to a free local
 model under supervision. This file is self-contained, but read
 [SYSTEM.md](SYSTEM.md) first if you want the full mental model — it is the canonical
 reference for how the system works and what you must not assume.
@@ -16,31 +16,31 @@ comes from — Qwen burns millions of tokens, you ingest a verdict.
 
 | thing | where | status |
 |---|---|---|
-| repo | `~/projects/token-saver` | clean, remote `github.com/latentlok/token-saver` (private) |
+| repo | `~/projects/token-saver` | clean, remote `github.com/latentlok/supervised-delegation` (public) |
 | MCP server | `server.py` via bundled `.mcp.json` | stdio; `"timeout": 7200000` (2h) |
-| subagent | `agents/qwen-manager.md` | plugin-bundled, auto-discovered |
+| subagent | `agents/executor-manager.md` | plugin-bundled, auto-discovered |
 | skill | `skills/lld-principles` | plugin-bundled, preloaded via manager frontmatter |
 | command | `commands/offload.md` | plugin-bundled, invoke as `/offload` |
 | worker model | `qwen3.6:27b-agent` on Ollama over Tailscale | configured in `~/.qwen/settings.json` (has the API key — never in the repo) |
 | idle timeout | none needed on 2.1.203+ | the `.mcp.json` `timeout` floors idle to 2h; pre-2.1.203 fallback is `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` |
 | Firecrawl | `localhost:3002` (podman) | optional, gives Qwen web access |
-| run log | `<cwd>/.qwen-delegate/runs.jsonl` | per-project, self-ignoring, one record per call |
-| project index | `~/.qwen-delegate/projects.jsonl` | paths only; `QWEN_DELEGATE_REGISTRY` overrides |
+| run log | `<cwd>/.delegation/runs.jsonl` | per-project, self-ignoring, one record per call |
+| project index | `~/.delegation/projects.jsonl` | paths only; `DELEGATION_REGISTRY` overrides |
 | log gate | `runlog_spec.py` | 34 tests, mutation-tested 13/13 caught |
 
 Loaded as a native plugin (`claude --plugin-dir <repo>`). Per-project setup is automatic —
-the first `qwen_delegate` into a git repo writes `QWEN.md` itself; a **non-git project is
+the first `delegate` into a git repo writes `QWEN.md` itself; a **non-git project is
 refused** (git is the only rollback; there is no sandbox).
 
 ---
 
 ## 2. The tool surface
 
-**`qwen_query`** — read-only Q&A about code. Qwen reads and answers; cannot write
+**`query`** — read-only Q&A about code. Qwen reads and answers; cannot write
 (plan mode). Params: `question`, `cwd`, `format` (`answer` default | `map`),
 `session_id` (warm multi-turn follow-ups), `focus`, `timeout_sec`.
 
-**`qwen_delegate`** — the build tool. Params: `task`, `cwd`, `verify` (the gate — a shell
+**`delegate`** — the build tool. Params: `task`, `cwd`, `verify` (the gate — a shell
 command exiting 0 only on real success), `approval_mode`, `max_iterations`, `session_id`,
 `shell_allow`, `shell_feedback`, `timeout_sec`, `trust` (`verified`|`self`), `workers`,
 `worktree`, `executor`, `touch_scope`, `batch`, `on_compaction`.
@@ -55,8 +55,8 @@ command exiting 0 only on real success), `approval_mode`, `max_iterations`, `ses
 | `yolo` | yes | yes | only when running something *is* the task |
 | `default`, `auto` | no | no | never — headless auto-denies |
 
-**`/offload <task or question>`** — the front door. Routes questions to `qwen_query`,
-builds to the `qwen-manager` subagent.
+**`/offload <task or question>`** — the front door. Routes questions to `query`,
+builds to the `executor-manager` subagent.
 
 ---
 
@@ -72,9 +72,9 @@ produce confusing results.
    it wrote a non-deterministic counter. **0/3 times did it raise a blocker.** A green
    gate on a contradictory spec is a real failure mode.
 3. **But in plan mode it is honest** — because it cannot hack. The same contradiction,
-   asked via `qwen_query`, got a clean "not implementable, these two tests conflict."
+   asked via `query`, got a clean "not implementable, these two tests conflict."
    **This is the reliable way to catch a bad spec: ask before building.**
-4. **`qwen_query` fabricates line numbers.** Structure and semantics are reliable; precise
+4. **`query` fabricates line numbers.** Structure and semantics are reliable; precise
    claims are not. It now returns grep-able symbol names instead. Treat any answer as a
    **lead to verify**, not truth.
 5. **Compaction (~147k context) causes fabrication.** Past it, Qwen claimed to have read
@@ -94,10 +94,10 @@ is disposable; delete it when done. If an experiment produces a finding worth ke
 write the finding into `docs/archive/a92e876/FINDINGS.md` and let the artifact go.
 
 ### A. Tools load
-Confirm `qwen_delegate` and `qwen_query` are available, and `/offload` is invocable.
+Confirm `delegate` and `query` are available, and `/offload` is invocable.
 (These load at session start; if missing, restart Claude Code.)
 
-### B. `qwen_query` — read-only Q&A
+### B. `query` — read-only Q&A
 1. Ask a question about a real repo: *"How does X work? Which function does it?"*
    → expect a direct answer + `VERIFY:` list + `CONTEXT: peak N (…% )`.
 2. **Multi-turn:** pass the returned `SESSION` as `session_id` and ask a follow-up
@@ -107,7 +107,7 @@ Confirm `qwen_delegate` and `qwen_query` are available, and `/offload` is invoca
 4. **Verify a claim it made against the actual source.** Expect structure correct,
    any precise/numeric claim suspect.
 
-### C. `qwen_delegate` — the gate
+### C. `delegate` — the gate
 1. Simple build with a real gate (`auto-edit`): *"Create x.py with f(n) that …"*,
    `verify` = a command that fails without it. Expect `STATUS: success`, `ATTEMPTS: 1/N`.
 2. **Iterate loop:** give a gate that rejects the obvious approach (e.g. ban a module the
@@ -133,13 +133,13 @@ Delegate something that adds a public function plus an internal helper. Expect
 explaining the denial → Qwen should acknowledge the constraint instead of retrying.
 
 ### G. Plan-mode spec sanity check (the important one)
-Write a deliberately contradictory spec. Ask via `qwen_query`: *"Is this implementable as
+Write a deliberately contradictory spec. Ask via `query`: *"Is this implementable as
 written, or are there contradictions?"* → expect it to **name the conflicting tests**.
 Then delegate the same spec in `auto-edit` → expect it to **game the gate to green**.
 That contrast is the core finding; confirm both halves.
 
 ### H. End-to-end via the manager
-`/offload <a real goal, stated as a goal not steps>` or spawn `qwen-manager` directly.
+`/offload <a real goal, stated as a goal not steps>` or spawn `executor-manager` directly.
 Expect a report: `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`. Check that
 **`VERIFIED` names a command it actually ran**, and that `DECIDED` shows real calls made
 (not a menu handed back — a manager that returns options has failed its job).
@@ -148,17 +148,17 @@ Expect a report: `DONE / VERIFIED / CHANGED / DECIDED / NEEDS HUMAN`. Check that
 Run `python3 runlog_spec.py` in the repo (34 tests) — that is the gate. Then, after any
 delegation above:
 
-1. `cat <repo>/.qwen-delegate/runs.jsonl` → one JSON record per call, delegate **and**
+1. `cat <repo>/.delegation/runs.jsonl` → one JSON record per call, delegate **and**
    query. Check `leverage` (free tokens ÷ returned tokens) looks sane — measured range so
    far 151.8–266.0×.
-2. **The hazard check:** `git status --porcelain` must NOT list `.qwen-delegate/`. If it
+2. **The hazard check:** `git status --porcelain` must NOT list `.delegation/`. If it
    does, the log is being misattributed to Qwen in `CHANGED` and will trip the dirty-tree
    precondition.
 3. **Multi-attempt runs:** force a retry (test C.2) and confirm the record's token totals
    are the sum across attempts, not just the last one.
 4. Check `token_source` before believing `tokens_overhead: 0` — `blended` means the split
    was unavailable and the zero is *unmeasured*, not real.
-5. `cat ~/.qwen-delegate/projects.jsonl` → the project appears exactly once.
+5. `cat ~/.delegation/projects.jsonl` → the project appears exactly once.
 
 ---
 
@@ -207,5 +207,5 @@ delegation above:
    unreachable until you remove `QWEN.md` and re-run. Do that deliberately, in a scratch
    repo.
 - `../docs/archive/a92e876/HLD.md` — the v2 design: contracts, lifecycle, concurrency.
-- `../agents/qwen-manager.md` — the manager's full workflow.
+- `../agents/executor-manager.md` — the manager's full workflow.
 - `../skills/lld-principles/SKILL.md` — the design discipline it must follow.

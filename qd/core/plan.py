@@ -3,7 +3,7 @@
 
 Step 6 of docs/archive/a92e876/DESIGN-modular-architecture.md §5. Four layers of precedence --
 
-    call argument  >  project .qwen-delegate.json  >  machine config  >  builtin
+    call argument  >  project .delegation.json  >  machine config  >  builtin
 
 -- were resolved inline at ~20 sites, and two of them (`trust`,
 `preflight_expect`) were resolved TWICE, once in the preconditions and again in

@@ -120,7 +120,7 @@ class EndpointsAtLevel4(unittest.TestCase):
         p = os.path.join(self.d, "executors.json")
         with open(p, "w") as f:
             f.write(body)
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = p
+        os.environ["DELEGATION_EXECUTORS"] = p
 
     def test_endpoints_only_file_is_honoured(self):
         self._machine_file('{"endpoints": {"local": {"parallel_max": 4}}}')
@@ -130,7 +130,7 @@ class EndpointsAtLevel4(unittest.TestCase):
         self.assertEqual(prof["dispatch"], "parallel")
 
     def test_no_machine_file_still_defaults_to_one_slot(self):
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = os.path.join(self.d, "nope")
+        os.environ["DELEGATION_EXECUTORS"] = os.path.join(self.d, "nope")
         prof = profiles.resolve(self.d, None)
         self.assertEqual(prof["endpoint_cfg"]["parallel_max"], 1)
         self.assertEqual(prof["dispatch"], "serial")
@@ -213,7 +213,7 @@ class HeartbeatIdentity(unittest.TestCase):
     the whole live window (a cold run learns it from the first reply), so
     during the only period the file is the sole signal it carried no
     identifier at all -- and with several servers sharing one
-    `.qwen-delegate/`, another run's heartbeat is indistinguishable from yours
+    `.delegation/`, another run's heartbeat is indistinguishable from yours
     by construction.
     """
 
@@ -222,7 +222,7 @@ class HeartbeatIdentity(unittest.TestCase):
 
     def read(self):
         import json
-        with open(os.path.join(self.d, ".qwen-delegate", "progress.json")) as f:
+        with open(os.path.join(self.d, ".delegation", "progress.json")) as f:
             return json.load(f)
 
     def test_the_run_id_is_stamped_before_the_first_token(self):
@@ -283,7 +283,7 @@ class ProjectDoctor(unittest.TestCase):
 
     def cfg(self, body):
         import json
-        with open(os.path.join(self.d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.d, ".delegation.json"), "w") as f:
             json.dump(body, f)
 
     def ids(self):

@@ -1,10 +1,10 @@
 {
-  "name": "token-saver",
+  "name": "supervised-delegation",
   "owner": { "name": "latentlok" },
   "description": "Supervised delegation to a free local model: Claude architects and verifies, the local model builds, and an objective gate decides what ships.",
   "plugins": [
     {
-      "name": "token-saver",
+      "name": "supervised-delegation",
       "source": "./",
       "description": "Claude architects, a free local model builds — measured 18-69% fewer Claude tokens at equal quality. Supervised delegation with an objective gate and a trust dial."
     }

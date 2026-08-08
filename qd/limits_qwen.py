@@ -78,7 +78,7 @@ class ProgressSnapshot(unittest.TestCase):
         nested = os.path.join(self.tmpdir, "sub", "dir")
         p = limits.Progress(nested)
         p(assistant(1))
-        target = os.path.join(nested, ".qwen-delegate", "progress.json")
+        target = os.path.join(nested, ".delegation", "progress.json")
         self.assertTrue(os.path.isfile(target))
 
 
@@ -90,7 +90,7 @@ class ProgressAtomicity(unittest.TestCase):
         p = limits.Progress(tmpdir)
         for _ in range(20):
             p(assistant(999))
-            with open(os.path.join(tmpdir, ".qwen-delegate", "progress.json")) as f:
+            with open(os.path.join(tmpdir, ".delegation", "progress.json")) as f:
                 json.load(f)  # must not raise
 
 
@@ -131,7 +131,7 @@ class ReadProgress(unittest.TestCase):
 
     def test_returns_none_for_corrupt_file(self):
         tmpdir = tempfile.mkdtemp()
-        prog_dir = os.path.join(tmpdir, ".qwen-delegate")
+        prog_dir = os.path.join(tmpdir, ".delegation")
         os.makedirs(prog_dir)
         with open(os.path.join(prog_dir, "progress.json"), "w") as f:
             f.write("not-json{{{")
@@ -148,7 +148,7 @@ class ReadProgress(unittest.TestCase):
 
     def test_never_raises_on_permission_error(self):
         tmpdir = tempfile.mkdtemp()
-        prog_dir = os.path.join(tmpdir, ".qwen-delegate")
+        prog_dir = os.path.join(tmpdir, ".delegation")
         os.makedirs(prog_dir)
         os.chmod(prog_dir, 0)
         self.assertIsNone(limits.read_progress(tmpdir))

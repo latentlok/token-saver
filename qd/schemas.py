@@ -1,5 +1,5 @@
 """Tool schemas for the MCP surface -- the capability map ambient in every
-session. Extracted from the v1 crane at cutover (M6); the qwen_delegate schema
+session. Extracted from the v1 crane at cutover (M6); the delegate schema
 gains the v2 input params (worktree, executor, trust, touch_scope, batch).
 
 R1 (PLAN-v3-l5): descriptions are one-line descriptors -- a list of what each
@@ -30,14 +30,14 @@ CARRY_GRADES = ("none", "handoff", "structured")
 
 TOOL = json.loads(r'''
 {
-  "name": "qwen_delegate",
+  "name": "delegate",
   "description": "Delegate a coding task to the local Qwen worker on free tokens. The call SUBMITS and answers in seconds with a run id, the file path its receipt will land at, a heartbeat file and a shell one-liner to wait on it -- do other work, then read that file (`wait: true` blocks and returns the receipt instead). The run builds in `cwd`; this server runs `verify` after each attempt and feeds failures back. The worker's self-report is never evidence -- the gate decides. Before first use, load the `delegation` skill: it carries the discipline (gates, approval modes, timeouts, fan-out, sessions).",
   "inputSchema": {
     "type": "object",
     "properties": {
       "task": {
         "type": "string",
-        "description": "Concrete task: exact paths, symbols, expected end state. Vague tasks get invented scope -- route those through approval_mode 'plan'. A project's .qwen-delegate.json `task_suffix` is appended to every task server-side, so standing discipline does not have to be retyped here."
+        "description": "Concrete task: exact paths, symbols, expected end state. Vague tasks get invented scope -- route those through approval_mode 'plan'. A project's .delegation.json `task_suffix` is appended to every task server-side, so standing discipline does not have to be retyped here."
       },
       "cwd": {
         "type": "string",
@@ -69,7 +69,7 @@ TOOL = json.loads(r'''
         "items": {
           "type": "string"
         },
-        "description": "scoped mode only: extra allowed command regexes -- how you approve a command a prior run surfaced as SHELL APPROVAL NEEDED. Project default: .qwen-delegate.json `shell_allow`."
+        "description": "scoped mode only: extra allowed command regexes -- how you approve a command a prior run surfaced as SHELL APPROVAL NEEDED. Project default: .delegation.json `shell_allow`."
       },
       "shell_feedback": {
         "type": "string",
@@ -80,7 +80,7 @@ TOOL = json.loads(r'''
         "items": {
           "type": "string"
         },
-        "description": "scoped mode only: allowed MCP tool-name regexes (names look like mcp__<server>__<tool>). Unlisted MCP tools are denied and surfaced by name -- approve by re-delegating with the pattern added. Project default: .qwen-delegate.json `mcp_allow`."
+        "description": "scoped mode only: allowed MCP tool-name regexes (names look like mcp__<server>__<tool>). Unlisted MCP tools are denied and surfaced by name -- approve by re-delegating with the pattern added. Project default: .delegation.json `mcp_allow`."
       },
       "approval_mode": {
         "type": "string",
@@ -92,11 +92,11 @@ TOOL = json.loads(r'''
           "yolo",
           "scoped"
         ],
-        "description": "'auto-edit' = write, no shell (default for code) | 'plan' = read-only (any vague task) | 'scoped' = auto-edit + allowlisted shell | 'yolo' = full shell (only when shell IS the work). 'default'/'auto' deny everything headless. Project default: .qwen-delegate.json `approval_mode`. Details: delegation skill."
+        "description": "'auto-edit' = write, no shell (default for code) | 'plan' = read-only (any vague task) | 'scoped' = auto-edit + allowlisted shell | 'yolo' = full shell (only when shell IS the work). 'default'/'auto' deny everything headless. Project default: .delegation.json `approval_mode`. Details: delegation skill."
       },
       "timeout_sec": {
         "type": "integer",
-        "description": "Per-attempt kill, seconds (default 900, or project .qwen-delegate.json `timeout_sec`; max 7200). Size up for large tasks -- timing model in the delegation skill."
+        "description": "Per-attempt kill, seconds (default 900, or project .delegation.json `timeout_sec`; max 7200). Size up for large tasks -- timing model in the delegation skill."
       },
       "worktree": {
         "type": "string",
@@ -108,11 +108,11 @@ TOOL = json.loads(r'''
       },
       "executor": {
         "type": "string",
-        "description": "Executor profile name from ~/.qwen-delegate/executors.json. Omit for the machine default, else builtin 'qwen-local'."
+        "description": "Executor profile name from ~/.delegation/executors.json. Omit for the machine default, else builtin 'qwen-local'."
       },
       "trust": {
         "type": "string",
-        "description": "'self': L5 full trust -- the delegate writes AND grades its own suite; `verify` optional (server generates a non-vacuous-suite gate). 'verified': your `verify` command is the gate -- pass it for correctness-critical, irreversible, or outward-facing work. Omit to use the configured default: project .qwen-delegate.json `trust` > machine ~/.qwen-delegate/config.json `trust` > built-in 'self'. If that default is 'auto', a bare call is refused so YOU pick 'self'/'verified' per task by criticality. Intermediate levels: parked."
+        "description": "'self': L5 full trust -- the delegate writes AND grades its own suite; `verify` optional (server generates a non-vacuous-suite gate). 'verified': your `verify` command is the gate -- pass it for correctness-critical, irreversible, or outward-facing work. Omit to use the configured default: project .delegation.json `trust` > machine ~/.delegation/config.json `trust` > built-in 'self'. If that default is 'auto', a bare call is refused so YOU pick 'self'/'verified' per task by criticality. Intermediate levels: parked."
       },
       "touch_scope": {
         "type": "array",
@@ -149,7 +149,7 @@ TOOL = json.loads(r'''
       },
       "challenge_brief": {
         "type": "boolean",
-        "description": "ON by default: the worker reads the code and may OBJECT to the brief before building it (read-only, one short pass). A worker-written gate is your brief restated as an assertion, so a wrong requirement becomes a green test defending the defect -- and `preflight_expect` is blind to it (red before, green after is what a confidently-built defect looks like too). The run is refused only when the objection cites a path that EXISTS; unverifiable objections never block. Pass `false` to decline it, or set `challenge_brief` in .qwen-delegate.json / machine config."
+        "description": "ON by default: the worker reads the code and may OBJECT to the brief before building it (read-only, one short pass). A worker-written gate is your brief restated as an assertion, so a wrong requirement becomes a green test defending the defect -- and `preflight_expect` is blind to it (red before, green after is what a confidently-built defect looks like too). The run is refused only when the objection cites a path that EXISTS; unverifiable objections never block. Pass `false` to decline it, or set `challenge_brief` in .delegation.json / machine config."
       },
       "challenge_warm": {
         "type": "boolean",
@@ -157,7 +157,7 @@ TOOL = json.loads(r'''
       },
       "verify_timeout_sec": {
         "type": "integer",
-        "description": "Kill time for ONE `verify` run, seconds (default 300, or project .qwen-delegate.json `verify_timeout_sec`; clamped 10..3600). A pre-flight that times out refuses the run before any attempt is burned."
+        "description": "Kill time for ONE `verify` run, seconds (default 300, or project .delegation.json `verify_timeout_sec`; clamped 10..3600). A pre-flight that times out refuses the run before any attempt is burned."
       },
       "preflight_expect": {
         "type": "string",
@@ -166,7 +166,7 @@ TOOL = json.loads(r'''
           "green",
           "any"
         ],
-        "description": "What `verify` should say BEFORE the worker runs. 'red' (greenfield): a pre-flight that passes refuses the run -- the gate could not prove the work. 'green' (revision work on an already-passing suite): no success_but_preflight_passed demotion. 'any' (default): today's behavior. Project default: .qwen-delegate.json `preflight_expect`."
+        "description": "What `verify` should say BEFORE the worker runs. 'red' (greenfield): a pre-flight that passes refuses the run -- the gate could not prove the work. 'green' (revision work on an already-passing suite): no success_but_preflight_passed demotion. 'any' (default): today's behavior. Project default: .delegation.json `preflight_expect`."
       },
       "result_schema": {
         "type": "object",
@@ -186,7 +186,7 @@ TOOL = json.loads(r'''
       },
       "retry_of": {
         "type": "string",
-        "description": "session_id of an earlier delegation in this cwd: re-run its STORED brief (task, gate, scope, mode, trust) with `retry_message` appended, COLD -- no session resume, because a session that failed argues with the correction. Pass `task: \"\"` to reuse the stored task; any argument you do pass beats the stored one. Briefs live in .qwen-delegate/briefs/ (project key `store_briefs: false` opts out)."
+        "description": "session_id of an earlier delegation in this cwd: re-run its STORED brief (task, gate, scope, mode, trust) with `retry_message` appended, COLD -- no session resume, because a session that failed argues with the correction. Pass `task: \"\"` to reuse the stored task; any argument you do pass beats the stored one. Briefs live in .delegation/briefs/ (project key `store_briefs: false` opts out)."
       },
       "retry_message": {
         "type": "string",
@@ -221,7 +221,7 @@ TOOL["inputSchema"]["properties"]["carry"]["enum"] = list(CARRY_GRADES)
 
 QUERY_TOOL = json.loads(r'''
 {
-  "name": "qwen_query",
+  "name": "query",
   "description": "Ask the local Qwen worker a READ-ONLY question about a codebase (plan mode -- it cannot write; no gate needed). Free tokens instead of your context. Answers are LEADS to verify, not truth. Keep each question bounded to a few files. Discipline: `delegation` skill.",
   "inputSchema": {
     "type": "object",

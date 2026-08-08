@@ -93,7 +93,7 @@ class TheLoadBearingRules(unittest.TestCase):
         self.skill = read("skills/delegation/SKILL.md")
 
     def test_a_question_about_code_is_never_a_delegation(self):
-        self.assertIn("qwen_query, never a delegation", self.skill)
+        self.assertIn("query, never a delegation", self.skill)
 
     def test_it_says_to_go_cold_for_repairs(self):
         # A session that failed carries its confusion forward and argues with

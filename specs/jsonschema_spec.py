@@ -189,9 +189,9 @@ class UnreadableSchemas(unittest.TestCase):
 class TheAcceptCheck(unittest.TestCase):
     """Claim 4: `schema_refusal(schema)` -> refusal text, or None to proceed.
 
-    The one function BOTH call sites use -- `_preconditions` for qwen_delegate
-    and `run_query` for qwen_query -- so the keyword list cannot drift between
-    two surfaces that share nothing else. `qwen_query` never enters engine.py;
+    The one function BOTH call sites use -- `_preconditions` for delegate
+    and `run_query` for query -- so the keyword list cannot drift between
+    two surfaces that share nothing else. `query` never enters engine.py;
     a check living at one of them is this repo's signature bug, covered on the
     path someone thought about and silently open on the other.
 

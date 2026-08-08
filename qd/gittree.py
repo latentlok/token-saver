@@ -11,7 +11,7 @@ import re
 import subprocess
 
 DEFAULT_SPEC_GLOBS = ["*_spec.*", "*.spec.*"]
-PROJECT_CONFIG = ".qwen-delegate.json"
+PROJECT_CONFIG = ".delegation.json"
 
 
 def git(cwd, *a):
@@ -299,7 +299,7 @@ def restore_paths(cwd, paths, base=None, t0=None):
 
 
 def _project_config(cwd):
-    """Parsed <cwd>/.qwen-delegate.json (the per-project override file), or {}.
+    """Parsed <cwd>/.delegation.json (the per-project override file), or {}.
 
     Recognised keys: `spec_globs` (list), `max_iterations` (int, the retry budget),
     `executor` (profile name), `min_tests` (int, self-gate floor), `trust`
@@ -320,16 +320,16 @@ def _project_config(cwd):
 
 
 def _global_config():
-    """Parsed machine-level ~/.qwen-delegate/config.json (or $QWEN_DELEGATE_CONFIG), or {}.
+    """Parsed machine-level ~/.delegation/config.json (or $DELEGATION_CONFIG), or {}.
 
     The machine-wide defaults file — lowest-precedence override, below any per-project
-    .qwen-delegate.json. Recognised key: `trust` (`"self"`|`"verified"`|`"auto"`), the
+    .delegation.json. Recognised key: `trust` (`"self"`|`"verified"`|`"auto"`), the
     standing slider position for every project on this machine. Same env-override +
     tolerant-read convention as the executors/registry machine files.
     A missing or corrupt file is treated as no overrides, never an error."""
     try:
-        p = os.environ.get("QWEN_DELEGATE_CONFIG") or os.path.expanduser(
-            "~/.qwen-delegate/config.json")
+        p = os.environ.get("DELEGATION_CONFIG") or os.path.expanduser(
+            "~/.delegation/config.json")
         if os.path.isfile(p):
             with open(p) as f:
                 d = json.load(f)

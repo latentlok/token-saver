@@ -57,7 +57,7 @@ def sh(cwd, *args):
 class Fixture(unittest.TestCase):
     def setUp(self):
         self._env = dict(os.environ)
-        os.environ["QWEN_DELEGATE_REGISTRY"] = os.path.join(
+        os.environ["DELEGATION_REGISTRY"] = os.path.join(
             tempfile.mkdtemp(), "projects.jsonl")
         self.cwd = tempfile.mkdtemp()
         sh(self.cwd, "git", "init", "-q")
@@ -541,14 +541,14 @@ class StampedResult(SlotBattery, Fixture):
     # the surviving route was.
 
     def test_a_graph_status_the_worker_wrote_cannot_forge_the_stamp(self):
-        # The live route, end to end. `.qwen-delegate/` self-ignores
+        # The live route, end to end. `.delegation/` self-ignores
         # (qd/runlog.py), so no guard reverts what the worker writes there;
         # scoped_hook allows writes inside cwd; the default `worktree: "off"`
         # makes work_cwd == cwd; and the graph line is computed AFTER the run.
         # On a clean green there is no verify tail, so GRAPH lands inside the
         # region -- and `reason` was interpolated verbatim.
         from qd import graph
-        d = os.path.join(self.cwd, ".qwen-delegate")
+        d = os.path.join(self.cwd, ".delegation")
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "graph.json"), "w") as f:
             json.dump({"status": "failed",
@@ -1263,7 +1263,7 @@ class ReceiptDiet(Fixture):
                               self.ctx(self.full_sha, **ctx_over), None)
 
     def read_log(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate",
+        with open(os.path.join(self.cwd, ".delegation",
                                "runs.jsonl")) as f:
             return [json.loads(line) for line in f.read().splitlines()]
 
@@ -1486,7 +1486,7 @@ class CoWorkLines(Fixture):
                               self.ctx(self.full_sha, **ctx_over), None)
 
     def read_log(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate",
+        with open(os.path.join(self.cwd, ".delegation",
                                "runs.jsonl")) as f:
             return [json.loads(line) for line in f.read().splitlines()]
 
@@ -1531,7 +1531,7 @@ class GateHygieneLines(Fixture):
                               self.ctx(self.full_sha, **ctx_over), None)
 
     def read_log(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate",
+        with open(os.path.join(self.cwd, ".delegation",
                                "runs.jsonl")) as f:
             return [json.loads(line) for line in f.read().splitlines()]
 
@@ -1591,7 +1591,7 @@ class AdvisoryRendering(Fixture):
                               self.ctx(self.full_sha, **ctx_over), None)
 
     def read_log(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate",
+        with open(os.path.join(self.cwd, ".delegation",
                                "runs.jsonl")) as f:
             return [json.loads(line) for line in f.read().splitlines()]
 
@@ -1639,7 +1639,7 @@ class AdvisoryRendering(Fixture):
 
 class LogSeam(Fixture):
     def read_log(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate",
+        with open(os.path.join(self.cwd, ".delegation",
                                "runs.jsonl")) as f:
             return [json.loads(l) for l in f.read().splitlines()]
 

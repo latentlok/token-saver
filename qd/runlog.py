@@ -13,7 +13,7 @@ import random
 import threading
 import time
 
-RUNLOG_DIR = ".qwen-delegate"
+RUNLOG_DIR = ".delegation"
 RUNLOG_FILE = "runs.jsonl"
 BRIEFS_DIR = "briefs"
 
@@ -35,14 +35,14 @@ def new_run_id():
 
 def registry_path():
     """Return the global project registry path, reading env at call time."""
-    return os.environ.get("QWEN_DELEGATE_REGISTRY") or os.path.expanduser(
-        "~/.qwen-delegate/projects.jsonl"
+    return os.environ.get("DELEGATION_REGISTRY") or os.path.expanduser(
+        "~/.delegation/projects.jsonl"
     )
 
 
 def runlog_dir(cwd):
     """
-    Create <cwd>/.qwen-delegate/ holding a self-ignoring .gitignore.
+    Create <cwd>/.delegation/ holding a self-ignoring .gitignore.
 
     The `*` pattern makes git ignore every file in the directory INCLUDING the .gitignore
     itself, so `git status --porcelain` never reports it. That is load-bearing: snapshot()
@@ -110,7 +110,7 @@ def write_runlog(cwd, record):
         pass
 
 
-def completed_runs(cwd, tool="qwen_delegate", limit=200):
+def completed_runs(cwd, tool="delegate", limit=200):
     """The last `limit` FINISHED run records for this project, oldest first.
 
     Submission markers (`status: "running"`, U5.2) are skipped: they carry no
@@ -139,7 +139,7 @@ def completed_runs(cwd, tool="qwen_delegate", limit=200):
 
 
 def ledger_summary(cwd):
-    """Aggregate of this project's qwen_delegate history, for the LEDGER line.
+    """Aggregate of this project's delegate history, for the LEDGER line.
 
     The log had no reader: `leverage` was computed and never surfaced, and a
     dedicated logging agent existed in the field solely because receipts had
@@ -158,7 +158,7 @@ def ledger_summary(cwd):
                     rec = json.loads(line)
                 except Exception:
                     continue  # a corrupt line must not hide the rest
-                if not isinstance(rec, dict) or rec.get("tool") != "qwen_delegate":
+                if not isinstance(rec, dict) or rec.get("tool") != "delegate":
                     continue
                 status = rec.get("status") or ""
                 # A `running` record is a SUBMISSION marker (U5.2), not a run
@@ -206,7 +206,7 @@ def brief_summary(cwd, path):
                     rec = json.loads(line)
                 except Exception:
                     continue  # a corrupt line must not hide the rest
-                if not isinstance(rec, dict) or rec.get("tool") != "qwen_delegate":
+                if not isinstance(rec, dict) or rec.get("tool") != "delegate":
                     continue
                 if rec.get("status") == "running":
                     continue
@@ -247,7 +247,7 @@ def save_brief(cwd, session_id, brief):
     every prompt precisely so whole prompts -- which embed real source -- do
     not accumulate in a permanent log. A brief is the opposite kind of object:
     a working file for ONE session, written beside the source it quotes, under
-    the self-ignoring .qwen-delegate/, never committed, and switchable off
+    the self-ignoring .delegation/, never committed, and switchable off
     with `store_briefs: false`. The log stays a log.
 
     Best-effort by contract: a brief that cannot be written costs a future

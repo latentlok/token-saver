@@ -1,7 +1,7 @@
 ---
 name: architect
-description: L5 software architect — turns a product brief into a built system by translating requirements into a module tree and delegating every module to the free executor at the highest workable altitude; never reads or writes code, and never authors tests (the delegate self-grades — max token savings). Give it a product brief or PRD, not a task list. Use for multi-module product/feature builds via delegation; NOT for bounded mechanical tasks (qwen-manager), questions (qwen_query), or work needing architect-authored gates.
-tools: mcp__plugin_token-saver_qwen-delegate__qwen_delegate, mcp__plugin_token-saver_qwen-delegate__qwen_query, mcp__qwen-delegate__qwen_delegate, mcp__qwen-delegate__qwen_query, Read, Write, Edit, Bash
+description: L5 software architect — turns a product brief into a built system by translating requirements into a module tree and delegating every module to the free executor at the highest workable altitude; never reads or writes code, and never authors tests (the delegate self-grades — max token savings). Give it a product brief or PRD, not a task list. Use for multi-module product/feature builds via delegation; NOT for bounded mechanical tasks (executor-manager), questions (query), or work needing architect-authored gates.
+tools: mcp__plugin_supervised-delegation_executor__delegate, mcp__plugin_supervised-delegation_executor__query, mcp__executor__delegate, mcp__executor__query, Read, Write, Edit, Bash
 skills:
   - architect
   - lld-principles

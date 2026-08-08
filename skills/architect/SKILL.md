@@ -1,6 +1,6 @@
 ---
 name: architect
-description: Run the L5 architect loop — translate a product conversation into software requirements and a module tree, then delegate every module to the executor at the highest workable altitude. You never read or write code; the delegate writes it AND grades it (L5 = max token savings). Use for building products/features through delegation; NOT for bounded mechanical tasks (that is `delegation`) or questions (qwen_query).
+description: Run the L5 architect loop — translate a product conversation into software requirements and a module tree, then delegate every module to the executor at the highest workable altitude. You never read or write code; the delegate writes it AND grades it (L5 = max token savings). Use for building products/features through delegation; NOT for bounded mechanical tasks (that is `delegation`) or questions (query).
 ---
 
 # The L5 Architect
@@ -32,7 +32,7 @@ on-demand primitive — never part of this loop.
    structure cost +64% in retries — FINDINGS "coherence beats determinism"). The
    WORKER locates: delegate with `approval_mode="scoped"` so it can query the repo
    graph (`graphify explain/path`, on the scoped allowlist) before grepping. Your own
-   design questions go to `qwen_query` (semantic, read-only). For an unfamiliar
+   design questions go to `query` (semantic, read-only). For an unfamiliar
    codebase, have the semantic graph layer built ONCE on free tokens (delegate
    `graphify update .` with the local backend) — an offline job, never in the loop.
 4. **Handoff at the right altitude** (the capability slider, C1 `altitude`):
@@ -67,7 +67,7 @@ on-demand primitive — never part of this loop.
 
 Pass `trust: "self"` and omit `verify` — the server generates the gate: it runs the
 delegate's own suite (the project's detected test command, else stdlib unittest
-discovery) behind a non-vacuous guard (≥ `min_tests` from `.qwen-delegate.json`,
+discovery) behind a non-vacuous guard (≥ `min_tests` from `.delegation.json`,
 default 5) and rewrites that gate before every run, so the worker cannot edit it. The
 receipt's `TRUST: self` line records what the green means. **Never author behavioral
 tests.** If you are writing assertions about the module's behavior, you have left L5
@@ -78,7 +78,7 @@ the delta.)
 ## Token discipline (what "lean" means in practice)
 
 - **Never read code.** Not the diff, not on green, not on red, not "just to check."
-  Existing structure = graphify; module facts = the receipt; anything else = qwen_query.
+  Existing structure = graphify; module facts = the receipt; anything else = query.
 - **Never re-verify a green gate.** It ran server-side; a Bash re-run is distrust the
   design already removed.
 - Bash exists for `git` and `graphify` queries only.
@@ -91,7 +91,7 @@ Server-side retries are automatic and not your loop. After them, in order: **alt
 drop** (re-delegate THAT module at contract grain) → red again at contract grain =
 **design bug, not worker failure**: the boundary is wrong — redraw it (split/merge,
 respec), update `DESIGN.md`, re-delegate the affected modules. For a handoff you are
-unsure of, pre-flight read-only first: `qwen_query("implementable? grounded?
+unsure of, pre-flight read-only first: `query("implementable? grounded?
 contradiction-free?")` — write-less delegates answer honestly.
 
 ## Escalation & mechanics

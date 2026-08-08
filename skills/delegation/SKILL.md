@@ -1,13 +1,13 @@
 ---
 name: delegation
-description: Spend Qwen's free local tokens instead of your context — build code against a gate, answer codebase questions, pull docs, map a repo. Use for mechanical/verifiable work a command could prove, and for read-only questions. Routes builds through the qwen_delegate gate loop; questions through qwen_query.
+description: Spend Qwen's free local tokens instead of your context — build code against a gate, answer codebase questions, pull docs, map a repo. Use for mechanical/verifiable work a command could prove, and for read-only questions. Routes builds through the delegate gate loop; questions through query.
 ---
 
 # Delegating to Qwen
 
 You have a free local executor (Qwen) behind two MCP tools. The whole point: **its
 word is never evidence — a gate decides, and only a short verdict reaches your context.**
-One engine, one loop, whether you run it inline or hand it to the qwen-manager subagent.
+One engine, one loop, whether you run it inline or hand it to the executor-manager subagent.
 
 ## The loop
 
@@ -16,16 +16,16 @@ One engine, one loop, whether you run it inline or hand it to the qwen-manager s
 You speak at most three times; everything between is free-side and unseen:
 
 1. **Pre-flight (when unsure of your own spec).** Ask read-only, where Qwen can't game:
-   `qwen_query("Is this spec implementable / grounded / contradiction-free?")`. This is
+   `query("Is this spec implementable / grounded / contradiction-free?")`. This is
    where your design mistakes surface honestly — a write-capable Qwen games a flawed gate
    to green instead of reporting it.
-2. **Submit.** `qwen_delegate(task, cwd, verify=<a real gate>, approval_mode="auto-edit")`
+2. **Submit.** `delegate(task, cwd, verify=<a real gate>, approval_mode="auto-edit")`
    **does not block** — it answers in seconds with a claim ticket:
 
        STATUS: submitted
        RUN: <id>
-       RECEIPT: <cwd>/.qwen-delegate/receipts/<id>.md — lands on completion
-       HEARTBEAT: <cwd>/.qwen-delegate/progress.json
+       RECEIPT: <cwd>/.delegation/receipts/<id>.md — lands on completion
+       HEARTBEAT: <cwd>/.delegation/progress.json
        WATCH: until [ -f <receipt> ]; do sleep 5; done; cat <receipt>
 
    The build runs on a background thread; the receipt file appears only when it is
@@ -35,7 +35,7 @@ You speak at most three times; everything between is free-side and unseen:
    the receipt in the response instead — worth it only for a run short enough that
    switching costs more than waiting. The gate is a shell command exiting 0 only on true
    success; the server runs it, feeds real failures back, and iterates on free tokens —
-   you are not in that loop. `qwen_query` is unchanged: synchronous, answer in the
+   you are not in that loop. `query` is unchanged: synchronous, answer in the
    response. (Ending your session kills its in-flight runs — they are threads of this
    MCP server, not detached jobs.)
 
@@ -78,11 +78,11 @@ not its difficulty:
     new unit · tests for existing code · >50 lines · many files → cold delegation, brief
                                                                   as a POINTER (paths and
                                                                   end state, not a design)
-    a question about the code                                   → qwen_query, never a delegation
+    a question about the code                                   → query, never a delegation
 
 Do NOT go mapping the repo yourself to prepare a small edit: architect-side `graphify`
 shell calls measured **+64% total cost** versus locating through the worker — every call
-is a turn whose output stays in your context. Locate with one `qwen_query`, or from what
+is a turn whose output stays in your context. Locate with one `query`, or from what
 you already know.
 
 **Resume vs cold (the heuristic the receipt now states for you).** Resume for
@@ -124,7 +124,7 @@ Don't read a repo into your context — and don't query the graph yourself eithe
 calls measured **+64% total cost** (see above), because every call is a turn whose output
 stays in your context forever.
 
-So: ask with one `qwen_query` ("what calls X?"), and let the worker read the graph on
+So: ask with one `query` ("what calls X?"), and let the worker read the graph on
 free tokens. Treat what comes back as leads — INFERRED edges and semantic summaries are
 claims to verify, tree-sitter coordinates are trustworthy — then pin the change as a
 spec. The receipt's `GRAPH` line tells you whether the map the worker used was fresh.
@@ -155,7 +155,7 @@ dependencies'). Contracts-first is what makes the pieces compose.
 ## Concurrency (`parallel_max`)
 
 Each endpoint declares how many requests it serves at once — `parallel_max` in the
-`endpoints` section of `~/.qwen-delegate/executors.json`. That one number is the whole
+`endpoints` section of `~/.delegation/executors.json`. That one number is the whole
 model: slots are held machine-wide (a file lock), so two Claude sessions on one
 endpoint queue instead of colliding, and an endpoint with one slot is simply serial.
 Undeclared means one slot, so fan-out is opt-in.
@@ -228,13 +228,13 @@ the stop is what you can count on. `reinject` (continue on the summarised histor
 choose to continue after a compaction, put critical rules in the TASK TEXT — QWEN.md
 does not survive one.
 
-**qwen_query:** keep questions bounded to a few files — a forced whole-repo read pushes
+**query:** keep questions bounded to a few files — a forced whole-repo read pushes
 Qwen past compaction, after which it fabricates having read things. Structure and
 semantics are reliable; precise citations are not (measured: a perfect library map with
 every line number fabricated). The VERIFY list says what to confirm.
 
 **trust:** `"self"` (default) — L5 full trust: omit `verify`, the server gates on the
-delegate's OWN suite behind a non-vacuous guard (`min_tests` in `.qwen-delegate.json`,
+delegate's OWN suite behind a non-vacuous guard (`min_tests` in `.delegation.json`,
 default 5) and stamps `TRUST: self` in the receipt. Max token saving, max reliance: a
 self-graded suite can share the code's blindspot (measured — see FINDINGS "L5
 self-grading"). `"verified"` — your `verify` command is the gate; pass it for stakes you
@@ -244,7 +244,7 @@ must know rather than trust.
 explicitly — `"verified"` when it is correctness-critical, irreversible, outward-facing,
 or touches security / data-loss / money / auth; `"self"` for low-stakes mechanical or
 greenfield work. When in doubt, `"verified"`. If the standing default (project
-`.qwen-delegate.json` or machine `~/.qwen-delegate/config.json`) is `"auto"`, the server
+`.delegation.json` or machine `~/.delegation/config.json`) is `"auto"`, the server
 *enforces* this — it refuses a bare call, so there is no silent fallback and you must
 make the criticality call on every delegation.
 
@@ -253,7 +253,7 @@ is stale); parallel delegations need separate worktrees — `batch` handles that
 
 **Co-work is the norm — isolate by default.** When anyone (you, subagents, the user)
 may touch the tree while a run is live, delegate into a worktree: `worktree="auto"`
-per call, or `"worktree": "auto"` once in the project's `.qwen-delegate.json` to make
+per call, or `"worktree": "auto"` once in the project's `.delegation.json` to make
 it the standing default (a call arg still forces `"off"`). The worker builds on its
 own `qwen/<id>` branch and the receipt carries the `MERGE:` line. One cost: a worktree
 branches from HEAD, blind to uncommitted co-work — **commit first** is load-bearing
@@ -293,23 +293,23 @@ the worker reads on demand.
   a `FINDINGS:` line, and a red gate as the deliverable.
 - **`result_schema={...}`** — a VALUE back instead of prose: the worker ends with a JSON
   block, violations are fed back by path, the receipt carries it verbatim (also on
-  `qwen_query`, reported once rather than retried).
+  `query`, reported once rather than retried).
 - **`retry_of=<session_id>` + `retry_message`** — replay that run's stored brief COLD with
   your correction (`task: ""` reuses the stored task).
 - **`fixture_provenance=true`** — created fixtures must carry `captured-from:` (a `.src`
   sidecar for binaries); imagined fixtures pass any gate written against them.
-- **Project `.qwen-delegate.json`** — `task_suffix` appends your standing worker discipline
+- **Project `.delegation.json`** — `task_suffix` appends your standing worker discipline
   to every task server-side (compaction-safe, unlike QWEN.md); `approval_mode` /
   `shell_allow` / `mcp_allow` / `timeout_sec` / `preflight_expect` / `verify_timeout_sec`
   are defaults a call arg still beats.
-- **`.qwen-delegate/progress.json`** — heartbeat: records, input tokens, attempt, state.
+- **`.delegation/progress.json`** — heartbeat: records, input tokens, attempt, state.
   Answers "is it hung?" for a file read instead of a turn.
 
 ## Inline vs the manager subagent
 
 Run the loop **inline** for interactive work and small counts — and note that "run it off
 to the side while I keep talking" is no longer a reason to spawn anything: a submit
-already does that for free. Hand it to the **qwen-manager** subagent when isolation earns
+already does that for free. Hand it to the **executor-manager** subagent when isolation earns
 its preamble: a multi-unit build whose specs and verdicts would silt up this session, or
 a fan-out with its own iteration to babysit.
 
@@ -339,7 +339,7 @@ direction, outward-facing or hard-to-undo actions, a merge conflict.
 
 ## Mutation-test your own gates
 
-After a module's gate first goes green, spend one free `qwen_query` asking Qwen to propose
+After a module's gate first goes green, spend one free `query` asking Qwen to propose
 mutations the spec would miss; apply+judge them with a throwaway harness. Measured: 7/8 of
 its proposals survived a hand-tested spec. Adversarial review is read-only, so there's
 nothing to game. Green → commit → mutate (never mutate uncommitted work).

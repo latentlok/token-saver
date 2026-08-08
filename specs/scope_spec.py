@@ -52,8 +52,8 @@ class Fixture(unittest.TestCase):
             f.write("BASE = 1\n")
         sh(self.repo, "git", "add", "-A")
         sh(self.repo, "git", "commit", "-qm", "base")
-        os.environ["QWEN_DELEGATE_WORKTREES"] = tempfile.mkdtemp()
-        self.addCleanup(os.environ.pop, "QWEN_DELEGATE_WORKTREES", None)
+        os.environ["DELEGATION_WORKTREES"] = tempfile.mkdtemp()
+        self.addCleanup(os.environ.pop, "DELEGATION_WORKTREES", None)
 
     def container(self):
         return worktrees.acquire(self.repo)

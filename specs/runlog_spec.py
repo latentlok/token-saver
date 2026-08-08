@@ -6,7 +6,7 @@ Claude-authored gate (never delegate this file -- it defines what correct means)
 
 Port gate for the v1 logging surface plus the v2 obligations:
 
-  1. INVISIBLE to git status (self-ignoring .qwen-delegate/) -- an un-ignored log
+  1. INVISIBLE to git status (self-ignoring .delegation/) -- an un-ignored log
      would be attributed to Qwen by snapshot()/blast_radius() and would trip the
      dirty-tree precondition.
   2. A logging failure must never raise -- best-effort by contract.
@@ -14,11 +14,11 @@ Port gate for the v1 logging surface plus the v2 obligations:
      "priced at zero", never "unmeasured".
   4. Concurrent appends (the v2 threaded server) must yield one valid JSONL line
      per call, no torn lines.
-  5. The registry honors QWEN_DELEGATE_REGISTRY at CALL time (deliberate,
+  5. The registry honors DELEGATION_REGISTRY at CALL time (deliberate,
      spec-sanctioned deviation from v1's import-time read: testability).
 
 Public surface pinned here:
-    qd.runlog.RUNLOG_DIR (".qwen-delegate"), qd.runlog.RUNLOG_FILE ("runs.jsonl")
+    qd.runlog.RUNLOG_DIR (".delegation"), qd.runlog.RUNLOG_FILE ("runs.jsonl")
     qd.runlog.runlog_dir(cwd) -> path          (creates + self-ignores)
     qd.runlog.registry_path() -> path          (env at call time)
     qd.runlog.register_project(cwd)
@@ -59,7 +59,7 @@ class Fixture(unittest.TestCase):
         self._env = dict(os.environ)
         self.cwd = tempfile.mkdtemp()
         self.registry = os.path.join(tempfile.mkdtemp(), "projects.jsonl")
-        os.environ["QWEN_DELEGATE_REGISTRY"] = self.registry
+        os.environ["DELEGATION_REGISTRY"] = self.registry
 
     def tearDown(self):
         os.environ.clear()
@@ -207,7 +207,7 @@ class Registry(Fixture):
             self.assertIn(self.cwd, f.read())
 
     def test_registry_path_reads_env_at_call_time(self):
-        os.environ["QWEN_DELEGATE_REGISTRY"] = "/tmp/other.jsonl"
+        os.environ["DELEGATION_REGISTRY"] = "/tmp/other.jsonl"
         self.assertEqual(runlog.registry_path(), "/tmp/other.jsonl")
 
 
@@ -236,7 +236,7 @@ class LedgerSummary(unittest.TestCase):
         self.cwd = tempfile.mkdtemp()
 
     def seed(self, records, corrupt=False):
-        d = os.path.join(self.cwd, ".qwen-delegate")
+        d = os.path.join(self.cwd, ".delegation")
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "runs.jsonl"), "w") as f:
             for r in records:
@@ -249,21 +249,21 @@ class LedgerSummary(unittest.TestCase):
 
     def test_counts_by_status_and_peak_delegate_only(self):
         self.seed([
-            {"tool": "qwen_delegate", "status": "success",
+            {"tool": "delegate", "status": "success",
              "peak_context": 30000},
-            {"tool": "qwen_delegate", "status": "success_but_preflight_passed",
+            {"tool": "delegate", "status": "success_but_preflight_passed",
              "peak_context": 60000},
-            {"tool": "qwen_delegate", "status": "verify_failed",
+            {"tool": "delegate", "status": "verify_failed",
              "peak_context": 10000},
-            {"tool": "qwen_delegate", "status": "stopped", "peak_context": 0},
-            {"tool": "qwen_query", "status": "ok", "peak_context": 999999},
+            {"tool": "delegate", "status": "stopped", "peak_context": 0},
+            {"tool": "query", "status": "ok", "peak_context": 999999},
         ])
         s = runlog.ledger_summary(self.cwd)
         self.assertEqual(s, {"n": 4, "ok": 2, "red": 1, "stopped": 1,
                              "peak": 60000})
 
     def test_corrupt_lines_must_not_hide_the_rest(self):
-        self.seed([{"tool": "qwen_delegate", "status": "success",
+        self.seed([{"tool": "delegate", "status": "success",
                     "peak_context": 5}], corrupt=True)
         self.assertEqual(runlog.ledger_summary(self.cwd)["n"], 1)
 
@@ -271,9 +271,9 @@ class LedgerSummary(unittest.TestCase):
         # U5.2: `running` is a submission marker. Counted, it would inflate the
         # lifetime total and file every live run in the red bucket -- the
         # ledger would read worse the busier the project got.
-        self.seed([{"tool": "qwen_delegate", "status": "running",
+        self.seed([{"tool": "delegate", "status": "running",
                     "run_id": "rabc123", "pid": os.getpid()},
-                   {"tool": "qwen_delegate", "status": "success",
+                   {"tool": "delegate", "status": "success",
                     "run_id": "rabc123", "peak_context": 10}])
         self.assertEqual(runlog.ledger_summary(self.cwd),
                          {"n": 1, "ok": 1, "red": 0, "stopped": 0, "peak": 10})
@@ -285,7 +285,7 @@ class BriefSummary(LedgerSummary):
     return shape is already fixed by this spec and its callers."""
 
     def rec(self, status, path="pb.md", **over):
-        r = {"tool": "qwen_delegate", "status": status,
+        r = {"tool": "delegate", "status": status,
              "brief": {"path": path, "sha256": "ab" * 8}}
         r.update(over)
         return r
@@ -293,7 +293,7 @@ class BriefSummary(LedgerSummary):
     def test_none_when_no_run_recorded_the_path(self):
         self.assertIsNone(runlog.brief_summary(self.cwd, "pb.md"))
         self.seed([self.rec("success", path="other.md"),
-                   {"tool": "qwen_delegate", "status": "success"}])
+                   {"tool": "delegate", "status": "success"}])
         self.assertIsNone(runlog.brief_summary(self.cwd, "pb.md"))
 
     def test_ok_is_the_two_greens_red_is_every_other_completed(self):
@@ -335,33 +335,33 @@ class RunsInFlight(LedgerSummary):
         self.assertEqual(runlog.runs_in_flight(self.cwd), [])
 
     def test_an_unpaired_running_record_is_in_flight(self):
-        self.seed([{"tool": "qwen_delegate", "status": "running",
+        self.seed([{"tool": "delegate", "status": "running",
                     "run_id": "r000001", "pid": os.getpid(), "ts": "T"}])
         self.assertEqual(runlog.runs_in_flight(self.cwd),
                          [{"run_id": "r000001", "pid": os.getpid(),
                            "ts": "T", "dead": False}])
 
     def test_a_completion_record_closes_it(self):
-        self.seed([{"tool": "qwen_delegate", "status": "running",
+        self.seed([{"tool": "delegate", "status": "running",
                     "run_id": "r000001", "pid": os.getpid()},
-                   {"tool": "qwen_delegate", "status": "verify_failed",
+                   {"tool": "delegate", "status": "verify_failed",
                     "run_id": "r000001"}])
         self.assertEqual(runlog.runs_in_flight(self.cwd), [])
 
     def test_a_dead_owner_is_reported_as_dead_not_dropped(self):
-        self.seed([{"tool": "qwen_delegate", "status": "running",
+        self.seed([{"tool": "delegate", "status": "running",
                     "run_id": "r000002", "pid": self.dead_pid()}])
         flight = runlog.runs_in_flight(self.cwd)
         self.assertEqual(len(flight), 1)
         self.assertTrue(flight[0]["dead"])
 
     def test_records_without_a_run_id_are_none_of_its_business(self):
-        self.seed([{"tool": "qwen_delegate", "status": "success"},
-                   {"tool": "qwen_query", "status": "ok"}])
+        self.seed([{"tool": "delegate", "status": "success"},
+                   {"tool": "query", "status": "ok"}])
         self.assertEqual(runlog.runs_in_flight(self.cwd), [])
 
     def test_a_corrupt_line_does_not_hide_the_rest(self):
-        self.seed([{"tool": "qwen_delegate", "status": "running",
+        self.seed([{"tool": "delegate", "status": "running",
                     "run_id": "r000003", "pid": os.getpid()}], corrupt=True)
         self.assertEqual([f["run_id"] for f in runlog.runs_in_flight(self.cwd)],
                          ["r000003"])

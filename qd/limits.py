@@ -126,7 +126,7 @@ class Progress:
     Unlike :class:`BurnLimit` it always returns ``None`` — it observes,
     never stops a run.
 
-    The snapshot path is ``<cwd>/.qwen-delegate/progress.json``.
+    The snapshot path is ``<cwd>/.delegation/progress.json``.
 
     :attr:`attempt` and :attr:`state` are set by the caller (C11): a poller
     asking "is it hung?" cannot answer from a record count alone -- attempt 3
@@ -138,7 +138,7 @@ class Progress:
     ----------
     cwd : str | Path
         Working directory that contains (or will contain) the
-        ``.qwen-delegate`` folder.
+        ``.delegation`` folder.
     session_id : str | None
         Optional session identifier stored in the snapshot. Public and
         settable: a cold run only learns its session from the first reply, and
@@ -223,7 +223,7 @@ class Progress:
             "state": self.state,
         }
 
-        dir_path = os.path.join(self._cwd, ".qwen-delegate")
+        dir_path = os.path.join(self._cwd, ".delegation")
         os.makedirs(dir_path, exist_ok=True)
 
         import json
@@ -266,7 +266,7 @@ def read_progress(cwd):
     Parameters
     ----------
     cwd : str | Path
-        Working directory containing ``.qwen-delegate/progress.json``.
+        Working directory containing ``.delegation/progress.json``.
 
     Returns
     -------
@@ -277,7 +277,7 @@ def read_progress(cwd):
     try:
         import json
 
-        path = os.path.join(cwd, ".qwen-delegate", "progress.json")
+        path = os.path.join(cwd, ".delegation", "progress.json")
         with open(path) as f:
             return json.load(f)
     except Exception:

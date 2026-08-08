@@ -6,7 +6,7 @@ Claude-authored gate (never delegate this file -- it defines what correct means)
 
 The load-bearing cases:
 
-  1. The refs dir is git-ignored (the .qwen-delegate/* self-ignore), so git diff
+  1. The refs dir is git-ignored (the .delegation/* self-ignore), so git diff
      CANNOT see it -- detection must come from a filesystem listing diff, and the
      refs must never pollute git status (which would corrupt blast-radius
      attribution of Qwen's work).
@@ -15,7 +15,7 @@ The load-bearing cases:
      verbatim.
 
 Public surface pinned here:
-    qd.refs.snapshot(cwd) -> dict            {relpath: fingerprint} of .qwen-delegate/refs/
+    qd.refs.snapshot(cwd) -> dict            {relpath: fingerprint} of .delegation/refs/
     qd.refs.added(before, cwd) -> list[str]  new or changed since `before`, sorted
     qd.refs.refs_line(names) -> str | None   C2 "REFS:" line; None when empty
 
@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qd import refs  # noqa: E402
 
 
-REFS_REL = os.path.join(".qwen-delegate", "refs")
+REFS_REL = os.path.join(".delegation", "refs")
 
 
 class Fixture(unittest.TestCase):
@@ -44,7 +44,7 @@ class Fixture(unittest.TestCase):
         d = os.path.join(self.cwd, REFS_REL)
         os.makedirs(d, exist_ok=True)
         # The self-ignore convention the run log already uses.
-        gi = os.path.join(self.cwd, ".qwen-delegate", ".gitignore")
+        gi = os.path.join(self.cwd, ".delegation", ".gitignore")
         if not os.path.exists(gi):
             with open(gi, "w") as f:
                 f.write("*\n")

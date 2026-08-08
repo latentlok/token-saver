@@ -24,8 +24,8 @@ _lock = threading.Lock()
 
 def _base_dir():
     return os.environ.get(
-        "QWEN_DELEGATE_WORKTREES",
-        os.path.expanduser("~/.qwen-delegate/worktrees"),
+        "DELEGATION_WORKTREES",
+        os.path.expanduser("~/.delegation/worktrees"),
     )
 
 

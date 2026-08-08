@@ -27,8 +27,8 @@ Public surface pinned here:
     qd.worktrees.merge_lines(res) -> list[str]
     qd.worktrees.classify_merge(repo, branch) -> "clean" | "conflict"
 
-Base directory honors QWEN_DELEGATE_WORKTREES (default
-~/.qwen-delegate/worktrees/), same env-override pattern as the registry.
+Base directory honors DELEGATION_WORKTREES (default
+~/.delegation/worktrees/), same env-override pattern as the registry.
 
 Run:  python3 specs/worktree_spec.py
 """
@@ -53,7 +53,7 @@ def sh(cwd, *args):
 class Fixture(unittest.TestCase):
     def setUp(self):
         self._env = dict(os.environ)
-        os.environ["QWEN_DELEGATE_WORKTREES"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_WORKTREES"] = tempfile.mkdtemp()
         self.repo = tempfile.mkdtemp()
         sh(self.repo, "git", "init", "-q")
         sh(self.repo, "git", "config", "user.email", "s@t")
@@ -77,7 +77,7 @@ class Acquire(Fixture):
         self.assertRegex(r["branch"], r"^qwen/r[0-9a-f]{6}$")
         self.assertTrue(os.path.isfile(os.path.join(r["path"], "a.py")))
         self.assertTrue(r["path"].startswith(
-            os.environ["QWEN_DELEGATE_WORKTREES"]))
+            os.environ["DELEGATION_WORKTREES"]))
 
     def test_dirty_main_tree_flagged_and_excluded(self):
         with open(os.path.join(self.repo, "uncommitted.py"), "w") as f:
@@ -214,7 +214,7 @@ class StaleContainers(unittest.TestCase):
     def setUp(self):
         self._env = dict(os.environ)
         self.base = tempfile.mkdtemp()
-        os.environ["QWEN_DELEGATE_WORKTREES"] = self.base
+        os.environ["DELEGATION_WORKTREES"] = self.base
         self.repo = tempfile.mkdtemp()
         for a in (["init", "-q"], ["config", "user.email", "t@t"],
                   ["config", "user.name", "t"]):

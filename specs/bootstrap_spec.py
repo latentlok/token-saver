@@ -20,7 +20,7 @@ Load-bearing:
   2. render_worker_rules must never emit a placeholder ("TEMPLATE" banner or
      the un-substituted testing line) -- measured rule: never write a
      placeholder.
-  3. The template must now carry the refs rule (.qwen-delegate/refs/) and the
+  3. The template must now carry the refs rule (.delegation/refs/) and the
      self-test convention (*_qwen.*) -- the v2 additions land in the template.
   4. bootstrap_worker_rules is atomic, backs up pre-existing files, returns
      (test_cmd, dest) or (None, None), never raises.
@@ -138,7 +138,7 @@ class RenderRules(unittest.TestCase):
         # Case 3: the refs rule and the self-test convention live in the
         # template now, so every rendered rules file carries them.
         s = bootstrap.render_worker_rules("npm test")
-        self.assertIn(".qwen-delegate/refs/", s)
+        self.assertIn(".delegation/refs/", s)
         self.assertIn("_qwen.", s)
 
     def test_no_test_cmd_is_an_instruction_not_a_blank(self):
@@ -246,7 +246,7 @@ class TestLocation(unittest.TestCase):
         self.d = tempfile.mkdtemp()
 
     def cfg(self, **keys):
-        with open(os.path.join(self.d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.d, ".delegation.json"), "w") as f:
             json.dump(keys, f)
 
     def test_an_explicit_command_wins_over_every_detector(self):
@@ -283,7 +283,7 @@ class TestLocation(unittest.TestCase):
         self.assertIsNone(bootstrap.test_dir(self.d))
 
     def test_a_corrupt_config_does_not_break_detection(self):
-        with open(os.path.join(self.d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(self.d, ".delegation.json"), "w") as f:
             f.write("{not json")
         os.makedirs(os.path.join(self.d, "tests"))
         self.assertIn("tests", bootstrap.detect_test_cmd(self.d))
@@ -314,7 +314,7 @@ class DetectedCommandActuallyRuns(unittest.TestCase):
 
     WHY THIS IS PINNED AS A DETECTOR FIX, not as a per-project declaration.
     The alternative on offer was to declare a tier map in this repo's own
-    .qwen-delegate.json ("tests": {"unit": ...}). It was rejected as the gate:
+    .delegation.json ("tests": {"unit": ...}). It was rejected as the gate:
     qd/core/tiers.gate_for() has ZERO callers outside its own spec (verified
     2026-08-06), so declaring a map changes nothing that runs today -- and even
     once wired, it would fix exactly one repo while detect_test_cmd kept
@@ -407,7 +407,7 @@ class DetectedCommandActuallyRuns(unittest.TestCase):
         # to run as well, or a project that took our advice and declared
         # test_dir gets a gate that crashes.
         d = tempfile.mkdtemp()
-        put(d, ".qwen-delegate.json", json.dumps({"test_dir": "t"}))
+        put(d, ".delegation.json", json.dumps({"test_dir": "t"}))
         put(d, "t/alpha_spec.py", spec_src("alpha"))
         self.assertRan(*self.detected_run(d), "alpha")
 
@@ -465,7 +465,7 @@ class DetectedCommandActuallyRuns(unittest.TestCase):
                             f"in it could not be imported:\n{out[-600:]}")
 
     def test_a_hostile_test_dir_cannot_execute_anything(self):
-        # `test_dir` is read from .qwen-delegate.json, which is REPO DATA -- so
+        # `test_dir` is read from .delegation.json, which is REPO DATA -- so
         # it is attacker-controlled for anyone who delegates into a repo they
         # did not write, and the string it is interpolated into is handed to a
         # shell (qd/engine.py runs the detected command with shell=True).
@@ -492,7 +492,7 @@ class DetectedCommandActuallyRuns(unittest.TestCase):
             with self.subTest(payload=payload):
                 d = tempfile.mkdtemp()
                 marker = os.path.join(tempfile.mkdtemp(), "PWNED")
-                put(d, ".qwen-delegate.json",
+                put(d, ".delegation.json",
                     json.dumps({"test_dir": payload.format(m=marker)}))
                 put(d, "tests/alpha_spec.py", spec_src("alpha"))
                 cmd = bootstrap.detect_test_cmd(d)
@@ -502,7 +502,7 @@ class DetectedCommandActuallyRuns(unittest.TestCase):
                 self.assertFalse(
                     os.path.exists(marker),
                     f"{cmd!r} executed a command injected through "
-                    f"test_dir in .qwen-delegate.json")
+                    f"test_dir in .delegation.json")
 
     def test_quoting_the_test_dir_did_not_loosen_the_ordinary_command(self):
         # The fix above quotes MINIMALLY (shlex.quote), so an ordinary folder

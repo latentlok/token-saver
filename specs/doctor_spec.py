@@ -118,7 +118,7 @@ class Findings(unittest.TestCase):
 
     def test_a_verified_window_stops_being_a_high_finding(self):
         cfg = os.path.join(tempfile.mkdtemp(), "config.json")
-        os.environ["QWEN_DELEGATE_CONFIG"] = cfg
+        os.environ["DELEGATION_CONFIG"] = cfg
         try:
             s = settings(gen={"contextWindowSize": 196608})
             self.assertIn("context-window-unverified", ids(doctor.check(s)))
@@ -128,13 +128,13 @@ class Findings(unittest.TestCase):
             self.assertEqual(by_id(found, "context-window-verified")["severity"],
                              "info")
         finally:
-            os.environ.pop("QWEN_DELEGATE_CONFIG", None)
+            os.environ.pop("DELEGATION_CONFIG", None)
 
     def test_a_verified_value_that_stops_matching_flags_again(self):
         # The declaration was raised (or the box reloaded smaller) after someone
         # checked. Silence here would be worse than never having checked.
         cfg = os.path.join(tempfile.mkdtemp(), "config.json")
-        os.environ["QWEN_DELEGATE_CONFIG"] = cfg
+        os.environ["DELEGATION_CONFIG"] = cfg
         try:
             doctor.record_verified(196608)
             f = by_id(doctor.check(settings(gen={"contextWindowSize": 227000})),
@@ -142,13 +142,13 @@ class Findings(unittest.TestCase):
             self.assertEqual(f["severity"], "high")
             self.assertIn("no longer", f["text"])
         finally:
-            os.environ.pop("QWEN_DELEGATE_CONFIG", None)
+            os.environ.pop("DELEGATION_CONFIG", None)
 
     def test_record_verified_preserves_other_config_keys(self):
         cfg = os.path.join(tempfile.mkdtemp(), "config.json")
         with open(cfg, "w") as f:
             json.dump({"trust": "verified", "dispatch": "serial"}, f)
-        os.environ["QWEN_DELEGATE_CONFIG"] = cfg
+        os.environ["DELEGATION_CONFIG"] = cfg
         try:
             doctor.record_verified(196608)
             with open(cfg) as f:
@@ -157,7 +157,7 @@ class Findings(unittest.TestCase):
             self.assertEqual(got["dispatch"], "serial")
             self.assertEqual(got["verified_context_window"], 196608)
         finally:
-            os.environ.pop("QWEN_DELEGATE_CONFIG", None)
+            os.environ.pop("DELEGATION_CONFIG", None)
 
     def test_compaction_ceiling_is_stated_in_tokens(self):
         # The question this answers is "how late can it compact?", and the answer

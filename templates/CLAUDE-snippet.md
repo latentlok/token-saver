@@ -28,14 +28,14 @@ own `description:` line is already resident in every session and already carries
 capability map, which is why this block no longer repeats it.
 -->
 
-<!-- qwen-delegate:begin (managed block; delete from begin to end to remove) -->
+<!-- supervised-delegation:begin (managed block; delete from begin to end to remove) -->
 <!-- v: {version} -->
 
 ## Delegating mechanical work
 
-token-saver is installed: a free local model types, a command decides. **Before doing
+supervised-delegation is installed: a free local model types, a command decides. **Before doing
 mechanical work inline, ask — could a command prove this was done?** If yes, delegate
-it (`qwen_delegate`); codebase questions go to `qwen_query`, free and read-only. Keep
+it (`delegate`); codebase questions go to `query`, free and read-only. Keep
 design, specs, gates, and anything irreversible or outward-facing. **Load the
 `delegation` skill before first use** — everything else is in there.
 
@@ -45,4 +45,4 @@ Two rules that must hold before that skill loads:
 - **The gate decides, never the worker's prose.** Trust the receipt's `STATUS`; never
   re-run a green gate or read the diff to check it.
 
-<!-- qwen-delegate:end -->
+<!-- supervised-delegation:end -->

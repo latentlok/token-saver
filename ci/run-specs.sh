@@ -26,8 +26,8 @@ trap 'rm -rf "$TMPDIR"' EXIT
 export HOME="$(mktemp -d)"
 echo "specs running under HOME=$HOME (throwaway, inside TMPDIR=$TMPDIR)"
 
-git config --global user.email "ci@token-saver.test"
-git config --global user.name "token-saver CI"
+git config --global user.email "ci@supervised-delegation.test"
+git config --global user.name "supervised-delegation CI"
 
 mkdir -p "$HOME/.qwen"
 python3 - <<'PY'

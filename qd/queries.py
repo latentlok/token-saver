@@ -155,7 +155,7 @@ def run_query(args):
         tokens_out = (tokens or {}).get("completion", 0)
         cost = qd.profiles.cost_usd(profile, tokens_in, tokens_out)
         qd.runlog.write_runlog(cwd, qd.runlog.leverage_record(
-            "qwen_query", cwd, status, verdict,
+            "query", cwd, status, verdict,
             stats, peak,
             executor=profile["name"],
             cost_usd=cost,
@@ -235,6 +235,6 @@ def run_query(args):
 # `_guards_for` but in NO schema, and `_default_schemas()` is what answers
 # `tools/list`, so no conformant MCP client could discover it or would call it.
 # The capability it aliased is declared on the tool that IS advertised
-# (`qwen_query`, `format` enum ["answer", "map"]), so nothing was taken away.
+# (`query`, `format` enum ["answer", "map"]), so nothing was taken away.
 # specs/dispatch_spec.py now pins the two lists against each other, which is
 # the drift that let an unreachable tool sit in the dispatch table.

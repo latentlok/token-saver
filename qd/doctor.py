@@ -81,7 +81,7 @@ def output_limit(name):
 def verified_window():
     """The context window someone confirmed the endpoint actually serves, or None.
 
-    Recorded in ~/.qwen-delegate/config.json by `--verified N` after reading the
+    Recorded in ~/.delegation/config.json by `--verified N` after reading the
     window the SERVER reports (vLLM: `--max-model-len`, or the `max_model_len`
     field on /v1/models). Nothing here can observe the endpoint, so this is the
     only way the declared number stops being a claim. Kept separate from the
@@ -89,8 +89,8 @@ def verified_window():
     finding comes back.
     """
     try:
-        path = os.environ.get("QWEN_DELEGATE_CONFIG") or os.path.expanduser(
-            "~/.qwen-delegate/config.json")
+        path = os.environ.get("DELEGATION_CONFIG") or os.path.expanduser(
+            "~/.delegation/config.json")
         with open(path) as f:
             return int(json.load(f).get("verified_context_window") or 0) or None
     except Exception:
@@ -99,8 +99,8 @@ def verified_window():
 
 def record_verified(window):
     """Write verified_context_window into the machine config. Returns the path."""
-    path = os.environ.get("QWEN_DELEGATE_CONFIG") or os.path.expanduser(
-        "~/.qwen-delegate/config.json")
+    path = os.environ.get("DELEGATION_CONFIG") or os.path.expanduser(
+        "~/.delegation/config.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         with open(path) as f:
@@ -572,7 +572,7 @@ def project_check(cwd):
         pass
 
     # A0d: several servers, possibly of different plugin versions, sharing one
-    # .qwen-delegate/ directory and one machine-wide lock namespace. Eleven
+    # .delegation/ directory and one machine-wide lock namespace. Eleven
     # were once alive on one box, the oldest three days stale.
     n, versions, pids = _server_count()
     if n > 1:
@@ -582,8 +582,8 @@ def project_check(cwd):
             # a caller then had to re-derive the same pgrep this check already
             # ran, and get the pattern right -- a loose one matches the shell
             # doing the deriving.
-            "text": ("%d token-saver servers are running (%s). They share this "
-                     "project's .qwen-delegate/ state and the machine-wide "
+            "text": ("%d supervised-delegation servers are running (%s). They share this "
+                     "project's .delegation/ state and the machine-wide "
                      "endpoint lock; an upgrade or /reload-plugins starts a new "
                      "one without stopping the old.%s"
                      % (n, ", ".join(versions) or "unknown versions",
@@ -609,16 +609,23 @@ def _kill_hint(pids):
 
 
 def _server_count():
-    """(count, versions, pids) of running token-saver servers, oldest first.
+    """(count, versions, pids) of running supervised-delegation servers, oldest first.
 
     (0, [], []) if unknown."""
     import re as _re
     import subprocess as _sp
     # The command line must be an INTERPRETER running the server script, not
-    # merely a line mentioning it. A loose `token-saver.*server.py` matched the
+    # merely a line mentioning it. A loose `<name>.*server.py` matched the
     # shell that was running the check itself, so the count depended on how it
     # was invoked -- a detector whose answer changes with the observer.
-    real = _re.compile(r"\bpython[0-9.]*\s+\S*token-saver\S*/server\.py")
+    #
+    # Both names, because the path this matches has two sources that disagree:
+    # an installed plugin sits under the PLUGIN name (supervised-delegation),
+    # a git checkout under the REPO name (token-saver, unrenamed). Dropping
+    # either half makes the duplicate-server check silently stop firing for
+    # half the installs -- and it fails open, reporting zero.
+    real = _re.compile(
+        r"\bpython[0-9.]*\s+\S*(?:supervised-delegation|token-saver)\S*/server\.py")
     try:
         p = _sp.run(["pgrep", "-af", "server.py"],
                     capture_output=True, text=True, timeout=5)

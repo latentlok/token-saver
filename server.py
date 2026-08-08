@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""qwen-delegate MCP server -- entry point (the file .mcp.json runs).
+"""executor MCP server -- entry point (the file .mcp.json runs).
 
 At v2 cutover (M6) this shrank to a shim: all logic lives in the `qd/` package
 (qd.server = threaded dispatch, qd.engine = the delegation loop, qd.gittree =

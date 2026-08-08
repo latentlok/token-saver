@@ -197,7 +197,7 @@ class Fixture(EngineFixture):
             f.write(STUB)
 
     def read_log(self):
-        with open(os.path.join(self.cwd, ".qwen-delegate", "runs.jsonl")) as f:
+        with open(os.path.join(self.cwd, ".delegation", "runs.jsonl")) as f:
             return [json.loads(line) for line in f.read().splitlines()]
 
     def run_and_read(self, **over):

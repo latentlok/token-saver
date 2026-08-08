@@ -52,9 +52,9 @@ class Fixture(unittest.TestCase):
         # The guards are REAL here (that is half the claim), and they resolve a
         # profile and take a lock file. Both are pointed at throwaway paths so
         # the spec never reads a developer's machine config or writes into
-        # ~/.qwen-delegate.
-        os.environ["QWEN_DELEGATE_LOCKS"] = tempfile.mkdtemp()
-        os.environ["QWEN_DELEGATE_EXECUTORS"] = os.path.join(
+        # ~/.delegation.
+        os.environ["DELEGATION_LOCKS"] = tempfile.mkdtemp()
+        os.environ["DELEGATION_EXECUTORS"] = os.path.join(
             tempfile.mkdtemp(), "absent.json")
         self.cwd = tempfile.mkdtemp()
         self.seen = []
@@ -250,9 +250,9 @@ class Guards(Fixture):
 
         server.run_chain(self.items(2), h)
         self.assertEqual(log, [
-            ("guards_for", "qwen_delegate", 1), ("acquire", 1),
+            ("guards_for", "delegate", 1), ("acquire", 1),
             ("handler", 1), ("release", 1),
-            ("guards_for", "qwen_delegate", 2), ("acquire", 2),
+            ("guards_for", "delegate", 2), ("acquire", 2),
             ("handler", 2), ("release", 2),
         ])
 
@@ -529,7 +529,7 @@ class SharedWorktree(Fixture):
         subprocess.run(["git", "-C", d, "add", "-A"], capture_output=True)
         subprocess.run(["git", "-C", d, "commit", "-qm", "init"],
                        capture_output=True)
-        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(d, ".delegation.json"), "w") as f:
             f.write('{"worktree": "auto"}')
         return d
 
@@ -595,7 +595,7 @@ class SharedWorktree(Fixture):
         d = self.repo()
         out = server.run_chain([{"task": "s1", "cwd": d}], self.handler(RED))
         self.assertNotIn("=== chain worktree:", out)
-        base = os.path.expanduser("~/.qwen-delegate/worktrees")
+        base = os.path.expanduser("~/.delegation/worktrees")
         import subprocess
         p = subprocess.run(["git", "-C", d, "branch", "--list", "qwen/*"],
                            capture_output=True, text=True)
@@ -607,14 +607,14 @@ class SharedWorktree(Fixture):
         # lock path. Nothing here may change it.
         from qd.engine import WT_ARG
         d = self.repo()
-        with open(os.path.join(d, ".qwen-delegate.json"), "w") as f:
+        with open(os.path.join(d, ".delegation.json"), "w") as f:
             f.write('{"worktree": "off"}')
         server.run_chain([{"task": "s1", "cwd": d}], self.handler(GREEN))
         self.assertNotIn(WT_ARG, self.seen[0])
 
     def test_a_lone_delegation_is_never_lent_a_tree(self):
         # The hard constraint on this change: a single delegation and
-        # qwen_query must behave exactly as before. A lone run acquires and
+        # query must behave exactly as before. A lone run acquires and
         # disposes of its own container; only a chain lends one. Driven through
         # the real routing seam with engine.run stubbed, so this fails if the
         # lone path ever starts reading WT_ARG.

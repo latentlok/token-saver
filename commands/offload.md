@@ -1,9 +1,9 @@
 ---
-description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase (how does X work, where is Y handled, is there already a Z) — those are answered read-only and cheaply. Answers questions directly; builds run the delegation loop INLINE by default (delegations submit and return at once, so a long build already runs in the background — spawn qwen-manager only for a long multi-unit grind or a fan-out with its own iteration to babysit).
+description: Delegate a coding task or question to the free local model under supervision — spend Qwen's free tokens, not your own context. Use for mechanical work a command could prove — bulk or repetitive edits, a rename or signature change across many files, adding tests for existing code, boilerplate, codemods, migrations, doc generation, fixing every instance of a lint or type error. Also for questions about a codebase (how does X work, where is Y handled, is there already a Z) — those are answered read-only and cheaply. Answers questions directly; builds run the delegation loop INLINE by default (delegations submit and return at once, so a long build already runs in the background — spawn executor-manager only for a long multi-unit grind or a fan-out with its own iteration to babysit).
 argument-hint: <a task or question about code; name the repo if it isn't obvious>
 ---
 
-# token-saver — offload
+# supervised-delegation — offload
 
 Request: $ARGUMENTS
 
@@ -23,19 +23,19 @@ genuinely unclear). Everything below needs an absolute `cwd`.
 
 **A question about the code** — "how does X work", "where is Y handled", "is there
 already a function for Z", "what would break if I change W":
-→ Answer it with `qwen_query` (read-only, free). Verify anything load-bearing against
+→ Answer it with `query` (read-only, free). Verify anything load-bearing against
 the source yourself, then relay. **Do not spawn the manager for a question.** For a
 follow-up, reuse the returned `session_id` — it's a warm conversation.
 
 **A build or change** — "add X", "fix Y", "make Z usable from the CLI", "refactor W":
 → Run the delegation loop. **Default: inline** — you write the spec/gate and call
-`qwen_delegate` directly (the skill's loop). Launching a subagent pays a heavy fixed
+`delegate` directly (the skill's loop). Launching a subagent pays a heavy fixed
 preamble every time; a bare call does not, so inline is the cheaper default and the
 right one for one or a few delegations.
-→ **Spawn the `qwen-manager` subagent (background) only when isolation earns that
+→ **Spawn the `executor-manager` subagent (background) only when isolation earns that
 preamble:** a multi-unit build whose spec/verdict churn would silt up this session, or a
 fan-out with its own iteration to babysit. "So I can keep talking to the user" is no
-longer one of those reasons — `qwen_delegate` submits and returns immediately, so a long
+longer one of those reasons — `delegate` submits and returns immediately, so a long
 build already runs off to the side without a subagent. Then hand it the goal (not the
 steps) and relay its report on the notification.
 
@@ -45,12 +45,12 @@ steps) and relay its report on the notification.
 
 ## 2. Dispatch — do not do the work
 
-- **Question:** one `qwen_query`, verify the load-bearing bits, relay. That's it.
+- **Question:** one `query`, verify the load-bearing bits, relay. That's it.
   Questions run **synchronously** — they take ~20s and the user is waiting on the answer.
 - **Build (default: INLINE, per §1):** set `trust` by criticality (`"verified"` for
   correctness-critical / irreversible / outward-facing work, else `"self"` — the
   `delegation` skill has the rule), pin the behavior or author the gate, call
-  `qwen_delegate` directly. **That call SUBMITS and returns in seconds** with a run id,
+  `delegate` directly. **That call SUBMITS and returns in seconds** with a run id,
   the path its receipt will land at, a heartbeat file and a `WATCH:` one-liner — the
   build continues in the background. Keep talking to the user or line up the next unit,
   then read the receipt FILE and relay it (`wait: true` blocks instead, for short runs).
@@ -59,7 +59,7 @@ steps) and relay its report on the notification.
   that is the token you are here to save. Never relay a run whose receipt has not
   landed; if the user asks first, say it is still running.
 - **Build (isolation cases only):** a multi-unit grind whose per-module churn would
-  silt this session, or a parallel fan-out — hand the goal to `qwen-manager` in the
+  silt this session, or a parallel fan-out — hand the goal to `executor-manager` in the
   background and relay its report on the notification. **Never invent or predict
   what a running manager will report.** If the user asks before it lands, say it is
   still running.
@@ -82,6 +82,6 @@ not be detected, ask the user for it and, once they answer, set it by editing th
 `- Run tests with:` line in the project's `QWEN.md`; and offer to add the delegation policy
 block to their `CLAUDE.md` so future mechanical work routes here automatically. If they say
 yes, append the block from the plugin's `templates/CLAUDE-snippet.md` to their `CLAUDE.md`
-yourself — **guard on the `qwen-delegate:begin` marker (and the `## Delegating mechanical
+yourself — **guard on the `supervised-delegation:begin` marker (and the `## Delegating mechanical
 work` heading) so a second run never duplicates it**, and never rewrite their existing
 content. Remind them the new `QWEN.md` is uncommitted.
